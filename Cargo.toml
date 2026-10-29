@@ -34,12 +34,16 @@ egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 egui_kittest = "0.37"
 
-# 并行与跨线程数据交换。
+# 并行与跨线程数据交换（ADR-007）。
+#
+# **当前尚未被任何 crate 引用**：M1 的 Dock 只有一条 UI 线程在跑，
+# 图标解码 / 窗口扫描还没迁移。声明留在这里是为了让"用 rayon 而不是 tokio"
+# 这个决定有一处可查的落点；M2 接入图标管线时直接 `xxx.workspace = true`。
+# 未被引用的 workspace 依赖不参与编译，不产生构建开销。
 rayon = "1.12"
 crossbeam-channel = "0.5"
 arc-swap = "1.9"
 
-bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "1.0"
 
 # windows crate：只用官方绑定，不引入第三方 Win32 封装。

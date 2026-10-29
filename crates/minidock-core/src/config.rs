@@ -345,13 +345,18 @@ impl Key {
     }
 
     /// 加载时的**硬夹紧**区间 `(min, max)`。这是安全边界，不是 UI 提示范围。
+    ///
+    /// 这个 match **故意不写 `_` 兜底**：新增一个键却忘了给值域时，
+    /// 编译器会在这里报"非穷尽匹配"，而不是让新键静默落进布尔域
+    /// （`(0, 1)`）——后者会让 0..=N 的正常取值被夹成 0 或 1，
+    /// 而且只有用户改配置时才会发现。
     #[must_use]
     pub fn range(self) -> (i32, i32) {
-        if let Key::Numeric(i) = self {
-            let row = NUMERIC_KEYS[i as usize];
-            return (row.1, row.2);
-        }
         match self {
+            Key::Numeric(i) => {
+                let row = NUMERIC_KEYS[i as usize];
+                (row.1, row.2)
+            }
             // 几何量。上限取到 256 是为了给高 DPI 留空间（200% 下 128 px）。
             Key::IconSize => (16, 256),
             Key::ZoomSize => (16, 256),
@@ -372,7 +377,23 @@ impl Key {
             // 颜色：-1 表示"未设置"，0..=0xFFFFFF 是 COLORREF。
             Key::BgColor1 | Key::BgColor2 => (-1, 0x00FF_FFFF),
             // 布尔：只认 0/1。
-            _ => (0, 1),
+            Key::Zoom
+            | Key::Dots
+            | Key::Labels
+            | Key::Bounce
+            | Key::WebAppMode
+            | Key::Border
+            | Key::Reserve
+            | Key::Preview
+            | Key::ShowRunning
+            | Key::Lock
+            | Key::Hotkey
+            | Key::AccentTone
+            | Key::Reflect
+            | Key::Clock
+            | Key::FolderFan
+            | Key::MinAnim
+            | Key::Notes => (0, 1),
         }
     }
 

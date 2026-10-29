@@ -85,6 +85,20 @@ pub fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
     }
 }
 
+/// 栏体的基准横向跨度：`2*pad_x + n_icon*s + n_sep*sep_w + gap*(n-1)`。
+///
+/// 这个式子在三处出现（度量、基准中心、实际槽位），是栏体几何的唯一定义。
+/// 空 Dock 例外：保持 4 格宽度，否则"拖到这里"的提示文字无处安放。
+fn span(pad_x: f32, s: f32, gap: f32, sep_w: f32, n_icon: usize, n_sep: usize) -> f32 {
+    let n = n_icon + n_sep;
+    if n == 0 {
+        return 2.0 * pad_x + s * 4.0;
+    }
+    let mut w = 2.0 * pad_x + n_icon as f32 * s + n_sep as f32 * sep_w;
+    w += gap * (n - 1) as f32;
+    w
+}
+
 /// 计算一帧的度量。对应 C 版 `CalcMetrics()`（minidock.c:1511）。
 ///
 /// `n_items` 是**全部**条目数（含分割线），`n_sep` 是其中分割线的数量；
@@ -106,14 +120,7 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     let pad_x0 = pad0 + 2.0;
 
     let n_icon = n_items.saturating_sub(n_sep);
-    let mut wb = 2.0 * pad_x0 + n_icon as f32 * s0 + n_sep as f32 * sep0;
-    if n_items > 1 {
-        wb += g0 * (n_items - 1) as f32;
-    }
-    // 空 Dock 也保持 4 格宽度，否则"拖到这里"的提示文字无处安放。
-    if n_items == 0 {
-        wb = 2.0 * pad_x0 + s0 * 4.0;
-    }
+    let wb = span(pad_x0, s0, g0, sep0, n_icon, n_sep);
 
     let along = if cfg.edge.is_horizontal() {
         work.width() as f32
@@ -346,6 +353,219 @@ pub fn map_actual_to_base(mx: f32, base_c: &[f32], act_c: &[f32]) -> f32 {
         }
     }
     mx
+}
+
+// ---------------------------------------------------------------------------
+// 槽位布局：从度量到"每个图标画在哪、多大、鼠标命中谁"
+// ---------------------------------------------------------------------------
+//
+// 这一段原先在 GPU 版（`minidock-gpu::dock`）与 GDI+ 版（`minidock-ui::dock`）
+// 各写了一遍，常量也各写一遍。两份实现已经开始漂移（GDI+ 版算基准宽度时
+// 用了动画中的 `cur`，导致基准槽位每帧漂移；GPU 版用固定的 `s`，是对的）。
+// 收进 core 后只有一份实现，且能被单测直接覆盖。
+
+/// 放大动画的每帧收敛系数（C 版 `it->cur += d * 0.38f`）。
+pub const SIZE_LERP: f32 = 0.38;
+/// 动画收敛阈值：差值小于它就直接吸附（C 版 `fabsf(d) > 0.3f`）。
+pub const SNAP: f32 = 0.3;
+/// 放大影响的半径系数（C 版 `R = (S + g) * 2.6f`）。
+pub const MAG_RADIUS: f32 = 2.6;
+
+/// 槽位类型。分割线的槽宽由 `SepGap` 决定，与图标不同。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    Icon,
+    Separator,
+}
+
+impl SlotKind {
+    #[must_use]
+    pub const fn is_separator(self) -> bool {
+        matches!(self, Self::Separator)
+    }
+
+    /// 该槽位未放大时的宽度。
+    #[must_use]
+    pub const fn base_width(self, m: &Metrics) -> f32 {
+        if self.is_separator() {
+            m.sep_w
+        } else {
+            m.s
+        }
+    }
+}
+
+/// 栏体与图标的纵向基线。四边停靠共用同一套基线（横向翻转由 `map_rect` 负责）。
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Bars {
+    /// 栏体上边界。
+    pub top: f32,
+    /// 栏体下边界。
+    pub bottom: f32,
+    /// 图标底边（图标从这里往上长）。
+    pub icon_bottom: f32,
+}
+
+/// 由度量推出纵向基线。对应 C 版 `Paint()` 开头那三行赋值。
+#[must_use]
+pub fn bars(m: &Metrics) -> Bars {
+    let bottom = m.lh as f32 - m.margin - 2.0;
+    Bars {
+        top: bottom - m.bar_h,
+        bottom,
+        icon_bottom: bottom - m.pad - 2.0,
+    }
+}
+
+/// 基准跨度（未放大时的栏宽）。
+#[must_use]
+pub fn base_width(m: &Metrics, kinds: &[SlotKind]) -> f32 {
+    let n_sep = kinds.iter().filter(|k| k.is_separator()).count();
+    span(m.pad_x, m.s, m.gap, m.sep_w, kinds.len() - n_sep, n_sep)
+}
+
+/// 基准中心（未放大时的槽位中心），用于算放大权重。
+///
+/// `clock_extra` 是右侧时钟卡片的占位宽度：有它时整条栏体要左移一半。
+#[must_use]
+pub fn base_centers(m: &Metrics, kinds: &[SlotKind], clock_extra: f32) -> Vec<f32> {
+    let left = (m.lw as f32 - base_width(m, kinds) - clock_extra) / 2.0;
+    let mut x = left + m.pad_x;
+    let mut out = Vec::with_capacity(kinds.len());
+    for &kind in kinds {
+        let w = kind.base_width(m);
+        out.push(x + w / 2.0);
+        x += w + m.gap;
+    }
+    out
+}
+
+/// 一帧的交互状态。三个字段总是一起出现，打包后调用点也更好读。
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct View {
+    /// 鼠标在**逻辑坐标**下的位置；横坐标为负表示不在窗口内。
+    pub mouse: (f32, f32),
+    /// 鼠标是否在窗口内。
+    pub hover: bool,
+    /// 隐藏进度：0 = 完全显示，1 = 完全隐藏。
+    pub hide_cur: f32,
+}
+
+/// 本帧每个槽位的目标边长。
+///
+/// 权重必须用**基准**位置算：图标一放大槽位就移动，直接用实际位置会让
+/// "鼠标属于哪个图标"随放大程度漂移（C 版 `MapActualToBase`）。
+#[must_use]
+pub fn magnify_targets(
+    m: &Metrics,
+    kinds: &[SlotKind],
+    base_c: &[f32],
+    prev_act_c: &[f32],
+    view: View,
+    zoom: bool,
+) -> Vec<f32> {
+    let mag = zoom && view.hover && !kinds.is_empty() && view.mouse.0 >= 0.0 && view.hide_cur < 0.5;
+    if !mag {
+        return kinds.iter().map(|k| k.base_width(m)).collect();
+    }
+    let u = map_actual_to_base(view.mouse.0, base_c, prev_act_c);
+    let r = (m.s + m.gap) * MAG_RADIUS;
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            if k.is_separator() {
+                m.sep_w
+            } else {
+                let w = magnify_weight(base_c.get(i).copied().unwrap_or(0.0) - u, r);
+                m.s + (m.z - m.s) * w
+            }
+        })
+        .collect()
+}
+
+/// 向目标值指数逼近一帧。返回是否发生了移动（即还需要下一帧）。
+pub fn lerp_to(cur: &mut f32, target: f32) -> bool {
+    let d = target - *cur;
+    if d.abs() > SNAP {
+        *cur += d * SIZE_LERP;
+        true
+    } else {
+        *cur = target;
+        false
+    }
+}
+
+/// 本帧的实际槽位（放大之后）。全部物理像素。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Slots {
+    /// 栏体左边界。
+    pub bar_l: f32,
+    /// 栏体宽度。
+    pub bar_w: f32,
+    /// 每个槽位的左边界。
+    pub slot_l: Vec<f32>,
+    /// 每个槽位的右边界。
+    pub slot_r: Vec<f32>,
+    /// 每个槽位的实际中心。
+    pub act_c: Vec<f32>,
+}
+
+/// 由当前边长推出实际槽位。`cur` 的顺序与条目一致。
+///
+/// 栏宽超过可用宽度时整体截断（`max_w`），此时右端图标会被裁掉 ——
+/// 与 C 版一致：宁可裁边，也不要让栏体溢出屏幕。
+#[must_use]
+pub fn place_slots(m: &Metrics, cur: &[f32], clock_extra: f32) -> Slots {
+    let n = cur.len();
+    let total = if n == 0 {
+        2.0 * m.pad_x + m.s * 4.0
+    } else {
+        2.0 * m.pad_x + cur.iter().sum::<f32>() + m.gap * (n - 1) as f32
+    };
+    let bar_w = total.min(m.lw as f32 - 4.0 - clock_extra);
+    let bar_l = (m.lw as f32 - bar_w - clock_extra) / 2.0;
+
+    let mut x = bar_l + m.pad_x;
+    let mut slot_l = Vec::with_capacity(n);
+    let mut slot_r = Vec::with_capacity(n);
+    let mut act_c = Vec::with_capacity(n);
+    for &c in cur {
+        slot_l.push(x);
+        slot_r.push(x + c);
+        act_c.push(x + c / 2.0);
+        x += c + m.gap;
+    }
+    Slots {
+        bar_l,
+        bar_w,
+        slot_l,
+        slot_r,
+        act_c,
+    }
+}
+
+/// 命中测试。隐藏中（`hide_cur >= 0.5`）或鼠标不在窗口内一律不命中。
+///
+/// 用本帧槽位而不是上一帧：否则气泡会比图标慢一帧。
+#[must_use]
+pub fn hit_test(m: &Metrics, bars: &Bars, slots: &Slots, cur: &[f32], view: View) -> Option<usize> {
+    if !view.hover || view.hide_cur >= 0.5 {
+        return None;
+    }
+    // 正在消失的图标（`cur <= 1`）不参与命中。
+    let visible: Vec<bool> = cur.iter().map(|c| *c > 1.0).collect();
+    hit_index(
+        view.mouse.0,
+        view.mouse.1,
+        &slots.slot_l,
+        &slots.slot_r,
+        &visible,
+        m.gap,
+        bars.top,
+        m.z,
+        m.lh as f32,
+    )
 }
 
 #[cfg(test)]
@@ -598,5 +818,212 @@ mod tests {
         assert!((map_actual_to_base(50.0, &base_c, &act_c) - 50.0).abs() < 0.01);
         // 数量不一致时放弃映射。
         assert_eq!(map_actual_to_base(170.0, &[100.0], &act_c), 170.0);
+    }
+
+    // ---- 槽位布局 ----
+
+    fn kinds(n: usize) -> Vec<SlotKind> {
+        vec![SlotKind::Icon; n]
+    }
+
+    /// 基准宽度必须与 `calc_metrics` 里的 `wb` 是同一个数 —— 两者若漂移，
+    /// 栏体会被画到窗口外（曾经在 GDI+ 版发生过）。
+    #[test]
+    fn base_width_matches_metrics_formula() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        assert_eq!(
+            base_width(&m, &kinds(3)),
+            2.0 * m.pad_x + 3.0 * m.s + 2.0 * m.gap
+        );
+        // 空 Dock：4 格宽。
+        assert_eq!(base_width(&m, &[]), 2.0 * m.pad_x + 4.0 * m.s);
+    }
+
+    /// 基准中心应等距、且整体居中（无时钟时）。
+    #[test]
+    fn base_centers_are_centered_and_evenly_spaced() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let centers = base_centers(&m, &kinds(3), 0.0);
+        assert_eq!(centers.len(), 3);
+        let step = m.s + m.gap;
+        assert!((centers[1] - centers[0] - step).abs() < 0.01);
+        assert!((centers[2] - centers[1] - step).abs() < 0.01);
+        // 首尾对称于窗口中心。
+        let mid = (centers[0] + centers[2]) / 2.0;
+        assert!((mid - m.lw as f32 / 2.0).abs() < 0.01, "mid={mid}");
+    }
+
+    /// 时钟占位会把整条栏体左移半个占位宽。
+    #[test]
+    fn clock_extra_shifts_the_bar_left() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let plain = base_centers(&m, &kinds(3), 0.0);
+        let with_clock = base_centers(&m, &kinds(3), 120.0);
+        assert!((plain[0] - with_clock[0] - 60.0).abs() < 0.01);
+    }
+
+    /// 没有悬停时不放大，目标尺寸就是基准尺寸。
+    #[test]
+    fn magnify_targets_fall_back_to_base_size() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let bc = base_centers(&m, &kinds(3), 0.0);
+        let t = magnify_targets(&m, &kinds(3), &bc, &bc, View::default(), true);
+        assert!(t.iter().all(|v| (*v - m.s).abs() < 0.01));
+    }
+
+    /// 鼠标正对某个图标时它最大，越远越小，超出影响半径的保持基准尺寸。
+    #[test]
+    fn magnify_targets_peak_under_the_mouse() {
+        let mut c = cfg96();
+        c.zoom = true;
+        // 9 个图标：半径 R = (S + g) * 2.6 ≈ 146，而相邻间距只有 S + g = 56，
+        // 所以要 3 格以上（168 > 146）才能验证"半径外不放大"。
+        let ks = kinds(9);
+        let m = calc_metrics(&c, 96, 9, 0, work());
+        assert!(m.z > m.s, "前提：放大尺寸大于基准");
+        let bc = base_centers(&m, &ks, 0.0);
+        let t = magnify_targets(
+            &m,
+            &ks,
+            &bc,
+            &bc,
+            View {
+                mouse: (bc[4], 0.0),
+                hover: true,
+                hide_cur: 0.0,
+            },
+            true,
+        );
+
+        assert!((t[4] - m.z).abs() < 0.01, "鼠标下的图标应到最大: {t:?}");
+        // 相邻图标也在影响半径内（余弦衰减），但必须严格小于峰值。
+        assert!(t[3] > m.s && t[3] < m.z, "相邻应部分放大: {t:?}");
+        assert!(t[2] < t[3] && t[1] < t[2], "离得越远越小: {t:?}");
+        // 距离 4 格 = 224 > R，完全不受影响。
+        assert!((t[0] - m.s).abs() < 0.01, "半径外应保持基准: {t:?}");
+        assert!((t[8] - m.s).abs() < 0.01);
+    }
+
+    /// 分割线的槽宽恒为 `sep_w`，不参与放大。
+    #[test]
+    fn separators_never_grow() {
+        let mut c = cfg96();
+        c.zoom = true;
+        let m = calc_metrics(&c, 96, 3, 1, work());
+        let ks = [SlotKind::Icon, SlotKind::Separator, SlotKind::Icon];
+        let bc = base_centers(&m, &ks, 0.0);
+        let t = magnify_targets(
+            &m,
+            &ks,
+            &bc,
+            &bc,
+            View {
+                mouse: (bc[1], 0.0),
+                hover: true,
+                hide_cur: 0.0,
+            },
+            true,
+        );
+        assert!((t[1] - m.sep_w).abs() < 0.01);
+    }
+
+    /// 隐藏过半后不再放大 —— 否则收起过程中图标会顶着屏幕边缘。
+    #[test]
+    fn hidden_dock_does_not_magnify() {
+        let mut c = cfg96();
+        c.zoom = true;
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let bc = base_centers(&m, &kinds(3), 0.0);
+        let t = magnify_targets(
+            &m,
+            &kinds(3),
+            &bc,
+            &bc,
+            View {
+                mouse: (bc[1], 0.0),
+                hover: true,
+                hide_cur: 0.6,
+            },
+            true,
+        );
+        assert!(t.iter().all(|v| (*v - m.s).abs() < 0.01));
+    }
+
+    /// `place_slots` 的槽位必须首尾相接（间隙恰好是 `gap`）。
+    #[test]
+    fn place_slots_tile_without_overlap() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let cur = [m.s; 3];
+        let s = place_slots(&m, &cur, 0.0);
+        assert_eq!(s.slot_l.len(), 3);
+        for i in 0..2 {
+            assert!((s.slot_l[i + 1] - s.slot_r[i] - m.gap).abs() < 0.01);
+        }
+        assert!((s.slot_r[2] - s.slot_l[0] - s.bar_w + 2.0 * m.pad_x).abs() < 0.01);
+    }
+
+    /// 空 Dock 的栏宽仍是 4 格 + 两侧内边距。
+    #[test]
+    fn place_slots_keeps_empty_dock_wide_enough() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 0, 0, work());
+        let s = place_slots(&m, &[], 0.0);
+        assert!((s.bar_w - (2.0 * m.pad_x + 4.0 * m.s)).abs() < 0.01);
+        assert!(s.slot_l.is_empty());
+    }
+
+    /// `lerp_to` 在阈值内直接吸附，且报告"动画结束"。
+    #[test]
+    fn lerp_snaps_when_close() {
+        let mut v = 10.0;
+        assert!(!lerp_to(&mut v, 10.2));
+        assert_eq!(v, 10.2);
+
+        let mut v = 10.0;
+        assert!(lerp_to(&mut v, 20.0));
+        assert!(v > 10.0 && v < 20.0, "必须只走一帧的距离: {v}");
+    }
+
+    /// `hit_test` 复用本帧槽位，并尊重"隐藏中不命中"。
+    #[test]
+    fn hit_test_uses_current_slots() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let bars = bars(&m);
+        let cur = [m.s; 3];
+        let s = place_slots(&m, &cur, 0.0);
+        let center = s.act_c[1];
+        let at = |hover, hide_cur| View {
+            mouse: (center, bars.icon_bottom - 5.0),
+            hover,
+            hide_cur,
+        };
+
+        assert_eq!(hit_test(&m, &bars, &s, &cur, at(true, 0.0)), Some(1));
+        assert_eq!(
+            hit_test(&m, &bars, &s, &cur, at(true, 0.6)),
+            None,
+            "隐藏过半后不应命中"
+        );
+        assert_eq!(
+            hit_test(&m, &bars, &s, &cur, at(false, 0.0)),
+            None,
+            "鼠标不在窗口内不应命中"
+        );
+    }
+
+    /// 纵向基线：栏底到栏顶正好一个 `bar_h`。
+    #[test]
+    fn bars_are_consistent_with_metrics() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let b = bars(&m);
+        assert!((b.bottom - b.top - m.bar_h).abs() < 0.01);
+        assert!((b.bottom - b.icon_bottom - m.pad - 2.0).abs() < 0.01);
     }
 }

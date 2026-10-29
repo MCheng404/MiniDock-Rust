@@ -8,7 +8,7 @@
 use minidock_core::color::{argb, hsv_to_rgb, rgb};
 use minidock_core::config::{BgMode, Config, Edge};
 use minidock_core::item::Item;
-use minidock_core::layout::{self, Metrics, Rect};
+use minidock_core::layout::{self, Metrics, Rect, SlotKind};
 use minidock_gfx::{Brush, Canvas, Font, FontFamily, GfxError, Path, Pen, RectF, StringFormat};
 use minidock_platform::{display, theme, Paths};
 
@@ -55,8 +55,7 @@ const WM_APP_TRAY: u32 = WM_APP + 2;
 
 /// 隐藏动画的收敛系数（原版 `0.28`）。数值越大越快。
 const HIDE_LERP: f32 = 0.28;
-/// 图标尺寸/位置的收敛系数（原版 `0.38` / `0.62`）。
-const SIZE_LERP: f32 = 0.38;
+/// 拖拽滑动的收敛系数（原版 `0.62`）。
 const SLIDE_LERP: f32 = 0.62;
 
 #[derive(Debug)]
@@ -302,9 +301,10 @@ impl Dock {
     }
 
     /// 计算一帧的槽位与插值状态。返回"是否还需要下一帧"。
+    ///
+    /// 几何全部来自 [`minidock_core::layout`]，与 GPU 版共用同一份实现。
     fn step_layout(&mut self) -> bool {
         let m = self.metrics;
-        let n = self.items.len();
         let mut anim = false;
 
         // 隐藏动画：指数逼近，差值 < 0.004 视为到位。
@@ -316,50 +316,32 @@ impl Dock {
             self.hide_cur = ht;
         }
 
-        // 基准布局（未放大时的等距排布）。
-        let mut base_w = 2.0 * m.pad_x;
-        for it in &self.items {
-            base_w += self.slot_width(it);
-        }
-        if n > 1 {
-            base_w += m.gap * (n - 1) as f32;
-        }
-        if n == 0 {
-            base_w = 2.0 * m.pad_x + m.s * 4.0;
-        }
-        let base_l = (m.lw as f32 - base_w) / 2.0;
-        let mut x = base_l + m.pad_x;
-        let mut base_c = Vec::with_capacity(n);
-        for it in &self.items {
-            let w = self.slot_width(it);
-            base_c.push(x + w / 2.0);
-            x += w + m.gap;
-        }
+        let kinds: Vec<SlotKind> = self
+            .items
+            .iter()
+            .map(|it| {
+                if it.kind.is_separator() {
+                    SlotKind::Separator
+                } else {
+                    SlotKind::Icon
+                }
+            })
+            .collect();
 
-        // 放大：只对鼠标附近生效。
-        let mag =
-            self.cfg.zoom && self.hover && n > 0 && self.mouse_u >= 0.0 && self.hide_cur < 0.5;
-        // 放大曲线要用**基准**位置：图标放大后槽位会移动，
-        // 直接用实际位置会让"鼠标属于哪个图标"随放大程度漂移。
-        // `self.geom.act_c` 是上一帧的实际中心 —— 与 C 版同序（actC 在本帧稍后才更新）。
-        let u = layout::map_actual_to_base(self.mouse_u, &base_c, &self.geom.act_c);
-        let r = (m.s + m.gap) * 2.6;
-        for (i, it) in self.items.iter_mut().enumerate() {
-            let target = if it.kind.is_separator() {
-                m.sep_w
-            } else if mag {
-                let w = layout::magnify_weight(base_c[i] - u, r);
-                m.s + (m.z - m.s) * w
-            } else {
-                m.s
-            };
-            let d = target - it.cur;
-            if d.abs() > 0.3 {
-                it.cur += d * SIZE_LERP;
-                anim = true;
-            } else {
-                it.cur = target;
-            }
+        // 基准中心 → 放大目标 → 指数逼近。
+        let bars = layout::bars(&m);
+        let base_c = layout::base_centers(&m, &kinds, m.clock_extra);
+        let view = layout::View {
+            // 遗留版只跟踪横向位置，纵向直接取图标底边 —— 一定落在栏体内。
+            mouse: (self.mouse_u, bars.icon_bottom),
+            hover: self.hover,
+            hide_cur: self.hide_cur,
+        };
+        let targets =
+            layout::magnify_targets(&m, &kinds, &base_c, &self.geom.act_c, view, self.cfg.zoom);
+        for (it, target) in self.items.iter_mut().zip(&targets) {
+            anim |= layout::lerp_to(&mut it.cur, *target);
+            // 拖拽滑动偏移（P2 才真正赋值，这里只负责衰减）。
             if it.slide.abs() > 0.5 {
                 it.slide *= SLIDE_LERP;
                 anim = true;
@@ -368,81 +350,22 @@ impl Dock {
             }
         }
 
-        // 实际栏宽（受最大宽度限制）。
-        let mut total = 2.0 * m.pad_x;
-        for it in &self.items {
-            total += it.cur;
-        }
-        if n > 1 {
-            total += m.gap * (n - 1) as f32;
-        }
-        if n == 0 {
-            total += m.s * 4.0;
-        }
-        let max_w = m.lw as f32 - 4.0;
-        let bar_w = total.min(max_w);
-        let bar_l = (m.lw as f32 - bar_w) / 2.0;
-
-        let bar_bottom = m.lh as f32 - m.margin - 2.0;
-        let bar_top = bar_bottom - m.bar_h;
-        let icon_bottom = bar_bottom - m.pad - 2.0;
-
-        let mut x = bar_l + m.pad_x;
-        let mut slot_l = Vec::with_capacity(n);
-        let mut act_c = Vec::with_capacity(n);
-        for it in &self.items {
-            slot_l.push(x);
-            act_c.push(x + it.cur / 2.0);
-            x += it.cur + m.gap;
-        }
+        // 实际槽位与命中（用本帧槽位，否则标签会比图标慢一帧）。
+        let cur: Vec<f32> = self.items.iter().map(|i| i.cur).collect();
+        let slots = layout::place_slots(&m, &cur, m.clock_extra);
+        self.hot = layout::hit_test(&m, &bars, &slots, &cur, view);
 
         self.geom = FrameGeom {
-            bar_l,
-            bar_w,
-            bar_top,
-            bar_bottom,
-            icon_bottom,
-            slot_l,
-            act_c,
-        };
-
-        // 命中测试必须用**本帧**的槽位，否则标签会比图标慢一帧。
-        self.hot = if self.hover && self.hide_cur < 0.5 {
-            // 遗留版只记了 u 没记 v，所以纵向范围检查直接放行
-            // （传 `bar_top` 与 `f32::MAX` 让两个判断都不成立）。
-            let slot_r: Vec<f32> = self
-                .items
-                .iter()
-                .zip(&self.geom.slot_l)
-                .map(|(it, &l)| l + it.cur)
-                .collect();
-            let visible: Vec<bool> = self.items.iter().map(|i| i.cur > 1.0).collect();
-            layout::hit_index(
-                self.mouse_u,
-                self.geom.bar_top,
-                &self.geom.slot_l,
-                &slot_r,
-                &visible,
-                m.gap,
-                self.geom.bar_top,
-                m.z,
-                f32::MAX,
-            )
-        } else {
-            None
+            bar_l: slots.bar_l,
+            bar_w: slots.bar_w,
+            bar_top: bars.top,
+            bar_bottom: bars.bottom,
+            icon_bottom: bars.icon_bottom,
+            slot_l: slots.slot_l,
+            act_c: slots.act_c,
         };
 
         anim
-    }
-
-    fn slot_width(&self, it: &Item) -> f32 {
-        if it.kind.is_separator() {
-            self.metrics.sep_w
-        } else if it.cur > 0.0 {
-            it.cur
-        } else {
-            self.metrics.s
-        }
     }
 
     /// 渲染一帧。返回是否仍有动画在进行。

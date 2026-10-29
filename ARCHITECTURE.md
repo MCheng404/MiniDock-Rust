@@ -40,16 +40,39 @@ minidock-gfx / minidock-ui   遗留 GDI+ 路线，M2 删除
 
 ## 三、渲染管线
 
-一帧的完整路径（`overlay.rs::render`）：
+一帧的完整路径在 **`frame.rs::FrameRenderer::render`** 里，设置窗口
+（`overlay.rs`）与 Dock 窗口（`bin/dock.rs`）共用同一份实现 —— 这条链路
+原先两边各写一遍，逐行相同，任何 API 变动都要改两处。
 
-1. `input.take()` 取出本帧事件，构造 `egui::RawInput`（含 `screen_rect`、`time`、`modifiers`）。
-2. `ctx.run_ui(raw, |ui| ...)`：闭包里先画半透明圆角面板，再调 `settings_ui`。
+1. 调用方组装 `egui::RawInput`（含 `screen_rect`、`time`、`viewports`），
+   传给 `render(raw, hwnd, pos, |ui| ...)`。
+2. `ctx.run_ui(raw, build)`：闭包里只负责画。
 3. `ctx.tessellate(shapes, ppp)` → `Vec<ClippedPrimitive>`。
 4. `textures_delta.set` 逐项 `renderer.update_texture`（字形图集、图标纹理）。
 5. `renderer.update_buffers` 写顶点/索引缓冲。
 6. `begin_render_pass`，`LoadOp::Clear(Color::TRANSPARENT)` —— **透明清屏是窗口能透出桌面的关键**。
-7. `renderer.render(&mut pass, ...)`，`queue.submit`，`frame.present()`。
-8. `textures_delta.free` 回收。
+7. `renderer.render(&mut pass, ...)`，`queue.submit`。
+8. `copy_texture_to_buffer` → 同步回读 → 预乘 BGRA 写入 DIB → `UpdateLayeredWindow`。
+9. `textures_delta.free` 回收，然后 `clear()`（不 clear 会在 Drop 时断言 panic）。
+
+返回 `FrameOutcome { cursor, repaint_delay }` —— 调用方只需要这两个值。
+
+### 槽位布局：`core::layout`
+
+"每个图标画在哪、多大、鼠标命中谁"全部是纯函数，住在 `core::layout`：
+
+| 函数 | 职责 |
+|---|---|
+| `calc_metrics` | 由配置 + 工作区算出 `Metrics`（图标边长、栏高、时钟占位……） |
+| `base_centers` | 未放大时的槽位中心（放大权重必须以它为基准） |
+| `magnify_targets` | 本帧每个槽位的目标边长（余弦衰减） |
+| `lerp_to` | 向目标值指数逼近一帧，返回"还需不需要下一帧" |
+| `place_slots` | 放大后的实际槽位 `bar_l/bar_w/slot_l/slot_r/act_c` |
+| `bars` | 纵向基线 `bar_top/bar_bottom/icon_bottom` |
+| `hit_test` | 命中下标（从左到右第一个，见下） |
+
+GPU 版与 GDI+ 版都只是"取结果 → 画"。这套逻辑曾经两边各写一遍，
+已经漂移过（GDI+ 版拿动画中的 `cur` 去算基准宽度，导致基准槽位每帧移动）。
 
 ## 四、帧调度：空闲不提交
 

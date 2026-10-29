@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "wgpu 表面 + egui 绘制 + Win32 输入/命中（M0 尖刺）"
+description = "wgpu 离屏渲染 + egui 绘制 + Win32 输入/命中与分层窗口呈现"
 
 [dependencies]
 minidock-core.workspace = true
@@ -13,9 +13,18 @@ minidock-settings.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 pollster.workspace = true
-bytemuck.workspace = true
 windows.workspace = true
 
+# 三个可执行文件全部显式声明。`src/bin/` 下的文件本来会被自动发现，
+# 但显式列出后"这个 crate 产出哪几个 exe"一眼可见。
 [[bin]]
 name = "minidock-spike"
 path = "src/bin/spike.rs"
+
+[[bin]]
+name = "minidock-dock"
+path = "src/bin/dock.rs"
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"

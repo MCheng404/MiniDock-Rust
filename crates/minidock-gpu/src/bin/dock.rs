@@ -1,7 +1,8 @@
 //! M1 的 Dock 窗口：真实 Dock 形态（不是设置窗）。
 //!
 //! 复用 M0 的呈现管线（离屏渲染 → 回读 → `UpdateLayeredWindow`），
-//! 把画面换成 [`minidock_gpu::dock::Dock`] 的绘制。
+//! 把画面换成 [`minidock_gpu::dock::Dock`] 的绘制。管线本身在
+//! [`minidock_gpu::frame::FrameRenderer`] 里，与设置窗口共用同一份实现。
 //!
 //! 用法：
 //!
@@ -18,9 +19,8 @@ use minidock_core::ini::Ini;
 use minidock_core::layout::Rect as LRect;
 use minidock_core::store;
 use minidock_gpu::dock::{Dock, DockItem};
+use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
-use minidock_gpu::offscreen::Offscreen;
-use minidock_gpu::present::LayeredPresenter;
 use minidock_platform::display;
 use minidock_platform::Paths;
 use windows::core::w;
@@ -33,11 +33,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowLongPtrW,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, RegisterClassW, SetForegroundWindow, ShowWindow,
-    TranslateMessage, GWLP_USERDATA, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SW_SHOW,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, GWLP_USERDATA,
+    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SW_SHOW, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,10 +61,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dock = Box::new(Dock::new(cfg, items, work));
     dock.update(dpi);
 
-    let (lw, lh) = dock.logical_size();
+    let (win_w, win_h) = dock.physical_size();
     let ppp = dpi as f32 / 96.0;
-    let win_w = lw.round() as i32;
-    let win_h = lh.round() as i32;
+    let win_w = win_w.round() as i32;
+    let win_h = win_h.round() as i32;
 
     let hinstance = unsafe { GetModuleHandleW(None) }?;
     let wc = WNDCLASSW {
@@ -98,31 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let gpu = Gpu::new("")?;
-    let offscreen = Offscreen::new(&gpu.device, win_w as u32, win_h as u32, Gpu::COLOR_FORMAT);
-    let mut presenter = LayeredPresenter::new(win_w, win_h)?;
-    let mut renderer = egui_wgpu::Renderer::new(
-        &gpu.device,
-        Gpu::COLOR_FORMAT,
-        egui_wgpu::RendererOptions {
-            msaa_samples: 1,
-            depth_stencil_format: None,
-            dithering: false,
-            ..Default::default()
-        },
-    );
-    let mut ctx = egui::Context::default();
-    if !minidock_settings::fonts::install_cjk(&ctx) {
-        eprintln!("警告：未找到中文字体");
-    }
-    let last = Instant::now();
+    let mut frame = FrameRenderer::new(&gpu, win_w as u32, win_h as u32, ppp)?;
+    let start = Instant::now();
 
     // Dock 指针挂到窗口上，供 wndproc 回传鼠标位置。
     unsafe {
-        windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-            hwnd,
-            GWLP_USERDATA,
-            (&raw mut *dock) as isize,
-        );
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&raw mut *dock) as isize);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let _ = UpdateWindow(hwnd);
@@ -152,19 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // ③ 出帧。
-
-        render(
-            &dock,
-            &mut ctx,
-            &mut renderer,
-            &gpu,
-            &offscreen,
-            &mut presenter,
-            hwnd,
-            (x, y),
-            ppp,
-            last,
-        )?;
+        render(&dock, &mut frame, &gpu, hwnd, (x, y), ppp, start)?;
 
         // ④ 等待：有消息就醒；动画中按 16 ms 醒一次；完全空闲时真睡着。
         let timeout = if dock.anim { 16 } else { INFINITE };
@@ -178,19 +147,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[allow(clippy::too_many_arguments)]
 fn render(
     dock: &Dock,
-    ctx: &mut egui::Context,
-    renderer: &mut egui_wgpu::Renderer,
+    frame: &mut FrameRenderer,
     gpu: &Gpu,
-    offscreen: &Offscreen,
-    presenter: &mut LayeredPresenter,
     hwnd: HWND,
     pos: (i32, i32),
     ppp: f32,
     start: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dark = dock.cfg.ui_is_dark(true);
-    let (time, date) = clock_text();
     let clock = if dock.cfg.clock {
+        let (time, date) = clock_text();
         Some((time, date))
     } else {
         None
@@ -198,13 +164,11 @@ fn render(
 
     // `screen_rect` 必须给对：egui 用它决定根 Ui 的尺寸。
     // 不给的话画布是默认大小，栏体就会被画在错误的位置（M1 第一版就踩了）。
+    let (w, h) = frame.size();
     let mut raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(
-                offscreen.width() as f32 / ppp,
-                offscreen.height() as f32 / ppp,
-            ),
+            egui::vec2(w as f32 / ppp, h as f32 / ppp),
         )),
         time: Some(start.elapsed().as_secs_f64()),
         ..Default::default()
@@ -218,70 +182,15 @@ fn render(
             ..Default::default()
         },
     );
-    let full = ctx.run_ui(raw, |ui| {
+
+    frame.render(gpu, raw, hwnd, pos, |ui| {
         dock.paint(
             ui,
             ppp,
             dark,
             clock.as_ref().map(|(t, d)| (t.as_str(), d.as_str())),
         );
-    });
-
-    let egui::FullOutput {
-        shapes,
-        pixels_per_point,
-        mut textures_delta,
-        ..
-    } = full;
-    let jobs = ctx.tessellate(shapes, pixels_per_point);
-    for (id, deltas) in &textures_delta.set {
-        for delta in deltas {
-            renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
-        }
-    }
-    let screen = egui_wgpu::ScreenDescriptor {
-        size_in_pixels: [offscreen.width(), offscreen.height()],
-        pixels_per_point,
-    };
-    let mut encoder =
-        gpu.device
-            .create_command_encoder(&egui_wgpu::wgpu::CommandEncoderDescriptor {
-                label: Some("dock-frame"),
-            });
-    let buffers = renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
-    {
-        let mut pass = encoder
-            .begin_render_pass(&egui_wgpu::wgpu::RenderPassDescriptor {
-                label: Some("dock"),
-                color_attachments: &[Some(egui_wgpu::wgpu::RenderPassColorAttachment {
-                    view: &offscreen.view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: egui_wgpu::wgpu::Operations {
-                        load: egui_wgpu::wgpu::LoadOp::Clear(egui_wgpu::wgpu::Color::TRANSPARENT),
-                        store: egui_wgpu::wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            })
-            .forget_lifetime();
-        renderer.render(&mut pass, &jobs, &screen);
-    }
-    offscreen.copy_to_buffer(&mut encoder);
-    gpu.queue
-        .submit(buffers.into_iter().chain([encoder.finish()]));
-
-    let pixels = offscreen.read_pixels(&gpu.device)?;
-    presenter.upload_rgba(&pixels);
-    presenter.present(hwnd, pos.0, pos.1)?;
-
-    for id in &textures_delta.free {
-        renderer.free_texture(id);
-    }
-    textures_delta.clear();
+    })?;
     Ok(())
 }
 
@@ -313,14 +222,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // 逻辑坐标：物理 / ppp。
             let x = (lparam.0 & 0xFFFF) as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as f32;
-            let ppp = {
-                let dpi = GetDpiForWindow(hwnd);
-                if dpi == 0 {
-                    1.0
-                } else {
-                    dpi as f32 / 96.0
-                }
-            };
+            let dpi = GetDpiForWindow(hwnd);
+            let ppp = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dock;
             if !ptr.is_null() {
                 unsafe {
@@ -333,16 +236,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP => LRESULT(0),
         WM_KEYDOWN => {
             if wparam.0 as u32 == 0x1B {
-                unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-                }
+                unsafe { PostQuitMessage(0) };
             }
             LRESULT(0)
         }
         WM_DESTROY => {
-            unsafe {
-                windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-            }
+            unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

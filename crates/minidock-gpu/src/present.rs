@@ -204,7 +204,12 @@ mod tests {
 
     /// 与旧写法（逐字节四次赋值）对拍吞吐。**只打印不断言**：
     /// 时间在不同机器/负载下波动，断言会变成 flaky 测试。
+    ///
+    /// 默认 `#[ignore]`：它要搬 1320×1080×4×20 ≈ 114 MB，是 benchmark 不是
+    /// 正确性测试，放进默认的 `cargo test` 只会让每次跑测试都慢一秒多。
+    /// 需要数字时显式跑：`cargo test -p minidock-gpu -- --ignored --nocapture`。
     #[test]
+    #[ignore = "吞吐 benchmark，用 --ignored 显式运行"]
     fn swap_rb_throughput() {
         const W: usize = 1320;
         const H: usize = 1080;

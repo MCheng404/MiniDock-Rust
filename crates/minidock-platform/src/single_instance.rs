@@ -7,11 +7,12 @@
 
 use std::fmt;
 
-use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND};
 use windows::Win32::System::Threading::CreateMutexW;
 
 use minidock_core::SINGLETON_MUTEX;
+
+use crate::win::to_wide;
 
 /// 已持有的单实例锁。Drop 时关闭句柄（进程退出时系统也会兜底）。
 #[derive(Debug)]
@@ -26,7 +27,11 @@ impl SingleInstance {
     /// - `Ok(None)`：已有实例在跑，调用方应当把窗口唤到前台后退出。
     /// - `Err(_)`：连互斥体都创建不了（极少见），调用方可以选择继续启动。
     pub fn acquire() -> Result<Option<Self>, MutexError> {
-        let handle = unsafe { CreateMutexW(None, true, w!("Local\\MiniDock_Wangcy_Singleton")) }
+        // 名字来自 `minidock_core::SINGLETON_MUTEX`：C 版与 Rust 版共用同一个
+        // 互斥体名，才能做到"两个版本不会同时起两份 Dock"。这里不再硬编码，
+        // 否则改常量不会生效（曾经就是个只检查非空的假断言）。
+        let name = to_wide(SINGLETON_MUTEX);
+        let handle = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) }
             .map_err(|e| MutexError { code: e.code().0 })?;
         // CreateMutexW 有竞态：即使对象已存在也会返回有效句柄，
         // 真正的判定在 GetLastError()。
@@ -73,6 +78,3 @@ pub fn find_window(class: &str) -> Option<HWND> {
     };
     hwnd.ok().filter(|h| !h.0.is_null())
 }
-
-/// 互斥体名与 core 里的常量必须一致，这里做一次编译期对齐检查。
-const _: () = assert!(!SINGLETON_MUTEX.is_empty());

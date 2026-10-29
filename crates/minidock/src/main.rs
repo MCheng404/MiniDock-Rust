@@ -54,10 +54,9 @@ fn run() -> Result<(), String> {
     let cfg = Config::from_ini(&ini, dpi);
     let items = store::load_items(&ini);
     eprintln!(
-        "MiniDock: {} 个条目，{}x{} 逻辑尺寸，DPI {}",
+        "MiniDock: {} 个条目 · 配置目录 {} · DPI {}",
         items.len(),
-        0,
-        0,
+        paths.dir.display(),
         dpi
     );
 

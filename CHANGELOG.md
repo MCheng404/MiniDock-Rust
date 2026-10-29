@@ -5,6 +5,65 @@
 
 ---
 
+## 0.1.1 — 代码整理（2026-10-29）
+
+没有新功能，只做去重、死代码清理与两处真实缺陷修复。质量门禁：
+`cargo clippy -D warnings` / `cargo fmt --check` 全绿，100 条测试通过
+（原 89 条，新增 12 条槽位布局单测，1 条吞吐 benchmark 标为 ignored）。
+
+### 去重
+
+- **新增 `minidock-gpu/src/frame.rs`**：把"egui → 离屏纹理 → 回读 → 分层
+  窗口"的提交路径抽成 `FrameRenderer`。`overlay.rs`（设置窗口）与
+  `bin/dock.rs`（Dock 窗口）原先各写了一遍、逐行相同，任何 wgpu/egui 的
+  API 变动都要改两处。`overlay.rs` 662 → 531 行，`bin/dock.rs` 350 → 300 行。
+- **槽位布局收进 `core::layout`**：新增 `base_centers` / `magnify_targets` /
+  `lerp_to` / `place_slots` / `bars` / `hit_test`，以及 `View`（鼠标 + 悬停 +
+  隐藏进度）与 `SlotKind`。GPU 版与 GDI+ 版都改为调用同一份实现。
+  `SIZE_LERP` / `SNAP` / `MAG_RADIUS` 三个常量也随之只有一个定义。
+- `calc_metrics` 与两处栏宽累加合并成 `span()`：栏体跨度的公式原先出现三次。
+- `gpu::dock::colorref_to_rgb` 删除，改用 `core::color::from_colorref`
+  （另修了一处偏差：`bg_color2` 缺省时原来按 0.75 压暗，现在用 `color::mix`
+  与 GDI+ 版一致）。
+- `bar_colors` 的两个分支值完全相同（强调色尚未接 DWM），合并为一条。
+
+### 修复
+
+- **GDI+ 版基准槽位每帧漂移**：`step_layout` 用 `it.cur`（动画中的值）算
+  基准宽度，图标放大时基准中心跟着动，`MapActualToBase` 的映射随之失真。
+  现在与 GPU 版一样用固定的 `m.s`。
+- **GDI+ 版时钟开启时栏体不左移**：`calc_metrics` 已经把 `clock_extra`
+  算进逻辑宽度，但布局没减掉它，导致栏体 + 时钟卡片整体偏右、右端被裁。
+  现在两版都传 `clock_extra` 给 `base_centers` / `place_slots`。
+- **单实例互斥体名没走常量**：`single_instance.rs` 硬编码了
+  `"Local\\MiniDock_Wangcy_Singleton"`，旁边那句"编译期对齐检查"其实只断言了
+  非空。改 `SINGLETON_MUTEX` 不会生效。现在真的用常量构造名字。
+- `Key::range()` 去掉 `_ => (0, 1)` 兜底：新增键忘了给值域时会得到编译错误，
+  而不是静默落进布尔域。
+- `minidock/src/main.rs` 启动日志里有两个写死的 `0`（占位残留），改为打印
+  配置目录。
+
+### 清理
+
+- 删除死代码：`overlay.rs` 的 `PANEL_INSET` / `Layout::panel_rect` /
+  `pixels_per_point()` / `layout_panel()`，`platform::theme::read_hkcu_dword`。
+- 删除未使用的 `bytemuck` 依赖；`minidock-gpu` 的三个 `[[bin]]` 改为显式声明。
+  顺带修了一个不一致：文档一直写 `minidock-dock`，但自动发现产出的其实叫
+  `dock.exe`，按文档里的命令跑会找不到文件。
+- `present.rs` 的 `swap_rb_throughput` 标 `#[ignore]`：它搬 114 MB 只为打印
+  数字，是 benchmark 不是测试，不该拖慢每次 `cargo test`。
+- `Dock::logical_size` 改名 `physical_size`（它返回的是物理像素）。
+- `Dock::paint` 从 230 行拆成 `paint_bar_area` / `paint_clock_card` /
+  `paint_separators` / `paint_icons` / `paint_icon` / `paint_running_dot` /
+  `paint_hover_bubble`，坐标换算统一走 `Proj { k, tx, ty }`。
+
+### 已知问题
+
+- 本次重构**没有在真机上跑过**（无显示器环境）。像素级验收仍需按
+  `PORTING.md` 的流程与 C 版并排截图比对，重点看四边停靠下的槽位与气泡位置。
+
+---
+
 ## 0.1.0 — M0 尖刺（2026-10-27）
 
 ### 新增工作区

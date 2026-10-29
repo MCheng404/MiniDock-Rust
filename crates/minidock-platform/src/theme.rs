@@ -111,24 +111,3 @@ pub fn set_autostart(on: bool) -> bool {
 pub fn last_registry_error() -> u32 {
     last_error()
 }
-
-/// 供将来扩展：读取任意 HKCU 下的 DWORD。
-#[allow(dead_code)]
-fn read_hkcu_dword(subkey: &str, name: &str) -> Option<u32> {
-    let mut value = 0u32;
-    let mut size = 4u32;
-    let sk = to_wide(subkey);
-    let nm = to_wide(name);
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(sk.as_ptr()),
-            windows::core::PCWSTR(nm.as_ptr()),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(std::ptr::addr_of_mut!(value).cast()),
-            Some(&mut size),
-        )
-    };
-    (status == ERROR_SUCCESS).then_some(value)
-}

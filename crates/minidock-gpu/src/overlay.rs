@@ -8,11 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, Pos2, Rect};
-use egui_wgpu::wgpu;
-use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor};
+use egui::{Color32, CornerRadius};
 use minidock_core::config::Config;
-use minidock_settings::{fonts, settings_ui, Command, Outcome, SettingsState};
+use minidock_settings::{settings_ui, Command, Outcome, SettingsState};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, UpdateWindow, PAINTSTRUCT};
@@ -20,7 +18,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
-    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_MENU, VK_SHIFT,
@@ -35,11 +33,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::frame::FrameRenderer;
 use crate::gpu::{Gpu, GpuError};
 use crate::input::{map_vk, Input};
 use crate::mem::MemStats;
-use crate::offscreen::Offscreen;
-use crate::present::LayeredPresenter;
 
 pub const CLASS_NAME: &str = "MiniDockOverlay";
 
@@ -61,23 +58,10 @@ fn class_pcwstr() -> PCWSTR {
     PCWSTR(buf.as_ptr())
 }
 
-/// 面板相对窗口的内缩（逻辑像素）。留这圈空白，是为了肉眼能验证
-/// "点击空白处会穿透到下面的窗口"（分层窗口按 alpha 判定）。
-const PANEL_INSET: f32 = 28.0;
-
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     width: f32,
     height: f32,
-}
-
-impl Layout {
-    fn panel_rect(&self) -> Rect {
-        Rect::from_min_max(
-            Pos2::new(PANEL_INSET, PANEL_INSET),
-            Pos2::new(self.width - PANEL_INSET, self.height - PANEL_INSET),
-        )
-    }
 }
 
 /// 每帧记账。性能页显示的就是这些数字。
@@ -102,10 +86,7 @@ pub struct Overlay {
     hwnd: HWND,
     pos: (i32, i32),
     gpu: Gpu,
-    offscreen: Offscreen,
-    presenter: LayeredPresenter,
-    ctx: egui::Context,
-    renderer: Renderer,
+    frame: FrameRenderer,
     input: Input,
     layout: Layout,
     pixels_per_point: f32,
@@ -191,24 +172,7 @@ impl Overlay {
         if gpu.selection.fell_back() {
             settings.adapter_note = gpu.selection.describe();
         }
-        let offscreen = Offscreen::new(&gpu.device, win_w as u32, win_h as u32, Gpu::COLOR_FORMAT);
-        let presenter = LayeredPresenter::new(win_w, win_h)?;
-
-        let ctx = egui::Context::default();
-        // 必须在第一帧之前装字体：egui 0.37 缺字形直接 panic。
-        if !fonts::install_cjk(&ctx) {
-            eprintln!("警告: 未找到中文字体，界面会因缺字形而崩溃。");
-        }
-        let renderer = Renderer::new(
-            &gpu.device,
-            Gpu::COLOR_FORMAT,
-            RendererOptions {
-                msaa_samples: 1,
-                depth_stencil_format: None,
-                dithering: false,
-                ..Default::default()
-            },
-        );
+        let frame = FrameRenderer::new(&gpu, win_w as u32, win_h as u32, ppp)?;
 
         let mut client = RECT::default();
         unsafe {
@@ -237,10 +201,7 @@ impl Overlay {
             hwnd,
             pos: (x, y),
             gpu,
-            offscreen,
-            presenter,
-            ctx,
-            renderer,
+            frame,
             input: Input::default(),
             layout: Layout { width, height },
             pixels_per_point: ppp,
@@ -325,33 +286,31 @@ impl Overlay {
 
     fn render(&mut self) -> Result<(), GpuError> {
         let t0 = Instant::now();
-        let raw = self.input.take(
-            (self.offscreen.width(), self.offscreen.height()),
-            self.pixels_per_point,
-        );
+        let raw = self.input.take(self.frame.size(), self.pixels_per_point);
 
-        let ctx = self.ctx.clone();
         let mut outcome = Outcome::default();
-        let full_output = ctx.run_ui(raw, |ui| {
-            let rect = ui.max_rect();
-            let dark = ui.visuals().dark_mode;
-            // 设置窗口不需要"透出桌面"的观感，只有圆角外侧留透明；
-            // 250/255 足够看出边缘融合，又不至于让壁纸干扰阅读。
-            let bg = if dark {
-                Color32::from_rgba_unmultiplied(24, 25, 30, 250)
-            } else {
-                Color32::from_rgba_unmultiplied(246, 247, 250, 250)
-            };
-            ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
+        let frame_out = self
+            .frame
+            .render(&self.gpu, raw, self.hwnd, self.pos, |ui| {
+                let rect = ui.max_rect();
+                let dark = ui.visuals().dark_mode;
+                // 设置窗口不需要"透出桌面"的观感，只有圆角外侧留透明；
+                // 250/255 足够看出边缘融合，又不至于让壁纸干扰阅读。
+                let bg = if dark {
+                    Color32::from_rgba_unmultiplied(24, 25, 30, 250)
+                } else {
+                    Color32::from_rgba_unmultiplied(246, 247, 250, 250)
+                };
+                ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
 
-            let inner = rect.shrink(18.0);
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(inner)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            outcome = settings_ui(&mut child, &mut self.cfg, &mut self.settings);
-        });
+                let inner = rect.shrink(18.0);
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(inner)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                outcome = settings_ui(&mut child, &mut self.cfg, &mut self.settings);
+            })?;
 
         if let Some(cmd) = outcome.command {
             self.commands.push(cmd.clone());
@@ -362,112 +321,37 @@ impl Overlay {
         if outcome.changed {
             self.settings.status = "已修改（M1 接入自动保存）".to_owned();
         }
-        self.cursor = full_output.platform_output.cursor_icon;
+        self.cursor = frame_out.cursor;
         // egui 自己知道下一次该在什么时候画：动画会给一个非零延时，
         // "越快越好"给 0，完全不需重绘给 `Duration::MAX`。
         // 用它来驱动消息循环，比固定 `sleep(8ms)` 空转省电得多（ADR-014）。
-        let delay = full_output
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .map_or(Duration::MAX, |v| v.repaint_delay);
-        self.next_repaint_at = if delay == Duration::MAX {
+        self.next_repaint_at = if frame_out.repaint_delay == Duration::MAX {
             // 没有待办：阻塞到下一个窗口消息为止。
             None
-        } else if delay.is_zero() {
+        } else if frame_out.repaint_delay.is_zero() {
             // 0 表示"尽快"。Dock 的动画按 60 fps 排就够，不必贴着渲染速度空转。
             Some(Instant::now() + FRAME_PACING)
         } else {
-            Some(Instant::now() + delay)
+            Some(Instant::now() + frame_out.repaint_delay)
         };
 
         // 可观测性：排查"空闲还在重绘"这类问题时，`MINIDOCK_TRACE=1` 会
-        // 每 30 帧打印一次 egui 给的理由。默认关闭，不影响正常运行。
+        // 每秒打印一次 egui 给的理由。默认关闭，不影响正常运行。
         if std::env::var_os("MINIDOCK_TRACE").is_some()
             && self.last_trace.elapsed() >= Duration::from_secs(1)
         {
+            let ctx = self.frame.ctx();
             let frames = self.stats.samples;
             let per_sec = frames.saturating_sub(self.last_trace_frames);
             self.last_trace_frames = frames;
             self.last_trace = Instant::now();
-            let hover = self.ctx.input(|i| i.pointer.hover_pos());
+            let hover = ctx.input(|i| i.pointer.hover_pos());
             eprintln!(
-                "[trace] {frames} 帧 (+{per_sec}/s) hover={hover:?} delay={delay:?} 原因 {:?}",
-                self.ctx.repaint_causes()
+                "[trace] {frames} 帧 (+{per_sec}/s) hover={hover:?} delay={:?} 原因 {:?}",
+                frame_out.repaint_delay,
+                ctx.repaint_causes()
             );
         }
-
-        let egui::FullOutput {
-            shapes,
-            pixels_per_point,
-            mut textures_delta,
-            ..
-        } = full_output;
-
-        let jobs = ctx.tessellate(shapes, pixels_per_point);
-        for (id, deltas) in &textures_delta.set {
-            for delta in deltas {
-                self.renderer
-                    .update_texture(&self.gpu.device, &self.gpu.queue, *id, delta);
-            }
-        }
-
-        let screen = ScreenDescriptor {
-            size_in_pixels: [self.offscreen.width(), self.offscreen.height()],
-            pixels_per_point: self.pixels_per_point,
-        };
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("minidock-frame"),
-            });
-        let buffers = self.renderer.update_buffers(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &mut encoder,
-            &jobs,
-            &screen,
-        );
-
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("minidock"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.offscreen.view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            // 透明清屏：分层窗口里 alpha=0 即"透出桌面"。
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-            self.renderer.render(&mut pass, &jobs, &screen);
-        }
-        self.offscreen.copy_to_buffer(&mut encoder);
-        self.gpu
-            .queue
-            .submit(buffers.into_iter().chain([encoder.finish()]));
-
-        let pixels = self
-            .offscreen
-            .read_pixels(&self.gpu.device)
-            .map_err(GpuError::Wgpu)?;
-        self.presenter.upload_rgba(&pixels);
-        self.presenter.present(self.hwnd, self.pos.0, self.pos.1)?;
-
-        for id in &textures_delta.free {
-            self.renderer.free_texture(id);
-        }
-        textures_delta.clear();
 
         self.update_stats(t0);
         apply_cursor(self.cursor);
@@ -633,16 +517,6 @@ fn dpi_awareness() {
     };
 }
 
-#[allow(dead_code)]
-fn pixels_per_point(hwnd: HWND) -> f32 {
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
-    if dpi == 0 {
-        1.0
-    } else {
-        dpi as f32 / 96.0
-    }
-}
-
 fn primary_work_area() -> (i32, i32) {
     let mut rc = RECT::default();
     unsafe {
@@ -654,9 +528,4 @@ fn primary_work_area() -> (i32, i32) {
         );
     }
     (rc.right, rc.bottom)
-}
-
-#[allow(dead_code)]
-fn layout_panel(layout: &Layout) -> Rect {
-    layout.panel_rect()
 }
