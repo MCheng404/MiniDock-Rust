@@ -36,6 +36,8 @@ source scripts/env.sh          # 注入 MSVC + Windows SDK
 cargo build                    # 默认 target: x86_64-pc-windows-msvc
 cargo test  --workspace        # 逻辑层 + 设置界面（无需显示器/GPU）
 
+./scripts/build.sh --gate      # 完整门禁：fmt + clippy + test（提交前跑这个）
+
 # M0 尖刺：透明 GPU 窗口 + 设置界面，Esc 退出
 ./scripts/build.sh --run -p minidock-gpu --bin minidock-spike
 
@@ -43,6 +45,10 @@ cargo test  --workspace        # 逻辑层 + 设置界面（无需显示器/GPU�
 ./scripts/probe-mem.sh
 PROBE_LIST=1 ./target/x86_64-pc-windows-msvc/release/probe.exe   # 先看适配器清单
 ```
+
+**克隆后做一次** `git config core.hooksPath .githooks`，否则提交前的
+`fmt`/`clippy` 门禁不会生效。提交信息格式与分支约定见
+[`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 依赖版本：`egui 0.37` / `egui-wgpu 0.37` / `wgpu 30` / `windows 0.62`，全部取当前最新。
 
