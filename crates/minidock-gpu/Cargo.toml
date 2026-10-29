@@ -1,0 +1,21 @@
+[package]
+name = "minidock-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "wgpu 表面 + egui 绘制 + Win32 输入/命中（M0 尖刺）"
+
+[dependencies]
+minidock-core.workspace = true
+minidock-platform.workspace = true
+minidock-settings.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+windows.workspace = true
+
+[[bin]]
+name = "minidock-spike"
+path = "src/bin/spike.rs"

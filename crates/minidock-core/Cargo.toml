@@ -1,0 +1,15 @@
+[package]
+name = "minidock-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MiniDock 的纯逻辑层：配置、条目模型、INI 编解码、布局数学"
+
+# 依赖刻意为空：本 crate 必须能在**任何**宿主上编译与测试
+# （包括 CI 的 Linux runner），这样布局/配置这类纯数学逻辑
+# 才可能用最快的反馈回路验证。任何 Win32 依赖都属于越界。
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

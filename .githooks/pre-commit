@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# 提交前的快速质量门禁：格式 + clippy。
+#
+# 为什么只有这两项：它们是**毫秒到秒级**的反馈，能让"改坏了"在提交前暴露，
+# 而不是等到下次跑测试。`cargo test` 慢一个数量级（要链接 7 个 crate 的
+# 测试二进制），放进 pre-commit 的结果一定是被 `--no-verify` 绕过，
+# 那还不如不放 —— 全量门禁在 `scripts/build.sh --gate` 与 CI 里跑。
+#
+# 不需要 MSVC 环境：`fmt` 只读源码，`clippy` 走的是 `cargo check`
+# （不链接），所以这里**不** source `scripts/env.sh` —— 少一层依赖，
+# 在没装 VS 的机器上也不会误报失败。
+#
+# 启用方式（新 clone 后做一次）：
+#   git config core.hooksPath .githooks
+#
+# 临时跳过：
+#   SKIP_GATE=1 git commit ...     # 明确表示"这次不管"
+#   git commit --no-verify ...     # git 原生逃生口
+
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ "${SKIP_GATE:-0}" = "1" ]; then
+    echo "[pre-commit] SKIP_GATE=1，跳过门禁"
+    exit 0
+fi
+
+# 只改文档/图片的提交不该等编译。判定依据是**暂存区**，不是工作区 ——
+# 否则会为了一次 README 修改去编译整个 workspace。
+changed="$(git diff --cached --name-only --diff-filter=ACMR)"
+if ! printf '%s\n' "$changed" | grep -qE '(\.rs$|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$)'; then
+    exit 0
+fi
+
+fail=0
+
+echo "[pre-commit] cargo fmt --all --check"
+if ! cargo fmt --all --check; then
+    echo
+    echo "  ✗ 格式不符合 rustfmt。修法：cargo fmt --all" >&2
+    fail=1
+fi
+
+echo "[pre-commit] cargo clippy -D warnings"
+if ! cargo clippy --workspace --all-targets --quiet -- -D warnings; then
+    echo
+    echo "  ✗ clippy 有告警（本项目把 warning 当 error）。" >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "提交被拦下。确认要提交这份状态时用：git commit --no-verify" >&2
+    exit 1
+fi
+
+exit 0

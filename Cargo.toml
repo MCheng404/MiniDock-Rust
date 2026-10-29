@@ -1,0 +1,94 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/minidock-core",
+    "crates/minidock-gfx",
+    "crates/minidock-platform",
+    "crates/minidock-settings",
+    "crates/minidock-gpu",
+    "crates/minidock-ui",
+    "crates/minidock",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "LicenseRef-Proprietary-Upstream"   # 见 README「许可证与版权」
+authors = ["MiniDock Rust port contributors"]
+repository = ""
+
+[workspace.dependencies]
+minidock-core = { path = "crates/minidock-core" }
+minidock-gfx = { path = "crates/minidock-gfx" }
+minidock-platform = { path = "crates/minidock-platform" }
+minidock-settings = { path = "crates/minidock-settings" }
+minidock-gpu = { path = "crates/minidock-gpu" }
+minidock-ui = { path = "crates/minidock-ui" }
+
+# egui 0.37：当前最新。**只依赖 egui + egui-wgpu**，不引 eframe——
+# eframe 会接管消息循环，而 Dock 需要自己持有 Win32 循环（托盘/热键/AppBar/
+# 逐像素命中）。wgpu 版本不单独声明：用 `egui_wgpu::wgpu` 重导出，
+# 保证 device/surface 类型与 egui 侧完全同一份，避免版本漂移。
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
+egui_kittest = "0.37"
+
+# 并行与跨线程数据交换。
+rayon = "1.12"
+crossbeam-channel = "0.5"
+arc-swap = "1.9"
+
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "1.0"
+
+# windows crate：只用官方绑定，不引入第三方 Win32 封装。
+#
+# 为什么是 0.62：本机 cargo 缓存里已有 0.62.2，可离线构建；且该版本
+# 的 `Win32::Graphics::GdiPlus` 已暴露 GDI+ 平面 API（GdipXxx），
+# 与原始 C 版的调用方式一一对应，便于逐函数迁移比对。
+#
+# features 是**并集**语义：各 crate 内声明的 feature 会在 workspace
+# 内合并，所以统一写在这里，避免各 crate 版本/feature 漂移。
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_Graphics_GdiPlus",
+    "Win32_Graphics_Dwm",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# release 取向与 C 版一致：先求体积。
+#
+# 注意：`opt-level = "z"` 会牺牲内联，动画帧（15 ms）里热点若变成
+# 瓶颈，优先把 `minidock-gfx::frame` 相关函数标 `#[inline]`，而不是
+# 整体换 `opt-level = 3` —— 后者让 exe 从 ~700 KB 涨到 1.4 MB 量级。
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# dev profile 保留符号，方便用 WinDbg / VS 附加到 Rust 进程复查
+# 崩溃点（v2.0.0 的 GdipDrawLine 事故就是这么定位的）。
+[profile.dev]
+incremental = true

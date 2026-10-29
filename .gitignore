@@ -1,0 +1,36 @@
+# 构建产物
+/target/
+**/*.pdb
+**/*.ilk
+**/*.exp
+**/*.lib
+**/*.o
+
+# 运行期数据（便携模式会把 ini 与图标缓存写在这里）
+/MiniDock.ini
+/MiniDock.portable
+/icons/
+/run/
+
+# 原始 C 项目与参考资料**不**纳入版本库：
+#   上游源码版权归原作者 Wangcy，许可证未授予再分发权（见 README）。
+#   本地对照时请自行把 minidock.c 放到 reference/ 下，该目录被忽略。
+/reference/
+
+# 编辑器 / 系统
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 临时验证产物
+/scratch/
+*.log
+
+# 协作工具的工作区数据（会话记忆、缓存）。与 .idea/ 同类：
+# 只对当前机器有意义，进了版本库只会制造无意义的 diff。
+/.workbuddy-ai/

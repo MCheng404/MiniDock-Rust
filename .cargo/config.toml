@@ -1,0 +1,32 @@
+# MiniDock-rs 构建配置。
+#
+# 为什么锁 MSVC 而不是 gnx/GNU：
+#   1. 目标机的系统 DLL 就是 MSVC ABI 的（GDI+/DWM/shell32），
+#      `x86_64-pc-windows-msvc` 是 Windows 上的第一等目标；
+#   2. `+crt-static` 可以把 CRT 静态链进去，产物是**真正的单文件 exe**，
+#      不依赖 VCRUNTIME140.dll —— 便携 Dock 的前提；
+#   3. 崩溃转储的符号/调试信息在 MSVC 下与 WinDbg 配合最好。
+# 代价：本机 VS 装在 D:\Program Files（非常规路径），必须先 source
+# `scripts/env.sh` 注入 INCLUDE/LIB/PATH，见 BUILD.md。
+[build]
+target = "x86_64-pc-windows-msvc"
+
+# NOTE: 不要在命令行临时覆盖 CARGO_INCREMENTAL。
+# 增量开/关使用两套不同的缓存，交替使用等于每次全量重编。
+[profile.dev]
+incremental = true
+
+# 测试二进制的调试信息只保留行表：完整调试信息会让每个测试
+# 二进制多出几十 MB PDB，链接时间是主要开销。
+[profile.test]
+debug = "line-tables-only"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# 目前没有需要 cc-rs 编译的 C 依赖；保留 CC/CXX 定义是为了将来
+# 引入 C 依赖（如图标解析、SQLite 之类）时不用再改环境。
+[env]
+CC = { value = "cl.exe", force = false }
+CXX = { value = "cl.exe", force = false }
+AR = { value = "lib.exe", force = false }

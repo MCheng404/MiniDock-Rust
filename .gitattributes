@@ -1,0 +1,39 @@
+# Git 属性：换行、二进制判定。
+#
+# 这个仓库只在本机 Windows + Git Bash 上开发，但**索引里统一存 LF**。
+# 理由：`cargo fmt --check` 必须给出与机器无关的答案，而 CRLF 会让 rustfmt
+# 把每个文件都判成"有 diff"。工作区检出时也保持 LF —— 本项目的工具链
+# （rustc / cargo / bash / python）都吃 LF，只有 Windows PowerShell 挑剔。
+#
+# 注意：**不要**用 `core.autocrlf=true` 代替本文件。那是每台机器各自的设置，
+# 换个人 clone 就变样；写进仓库的规则才是契约。
+
+# ---- 默认：文本，检出为 LF ----
+* text=auto eol=lf
+
+# ---- 明确为文本 ----
+*.rs      text
+*.toml    text
+*.md      text
+*.sh      text eol=lf
+
+# Windows PowerShell 5.1 对 LF 的 here-string 处理不稳，脚本保持 CRLF。
+*.ps1     text eol=crlf
+
+# ---- 二进制：不做换行转换，也不要在 diff 里当文本展开 ----
+*.exe     binary
+*.dll     binary
+*.pdb     binary
+*.ico     binary
+*.png     binary
+*.ttf     binary
+*.ttc     binary
+
+# `.ini` 一律按二进制处理。
+# 本项目的配置文件是 **UTF-16LE + BOM**（见 core::ini 与 DECISIONS 的编码约定），
+# 一旦被当成文本做换行转换，每个字节都会被重新解释，C 版再读就是乱码。
+# 仓库里目前没有 .ini（运行期写在 %APPDATA%），这条是防御性规则。
+*.ini     binary
+
+# ---- 生成物：GitHub 上折叠显示，但保留可读 diff ----
+Cargo.lock linguist-generated=true

@@ -1,0 +1,13 @@
+# 固定工具链通道。
+#
+# 这里**不写死具体版本号**（如 1.99.1）：本项目不是靠 nightly 特性吃饭的，
+# 写死版本只会让 CI 与本地因为一次 rustup update 产生无意义的 diff。
+# 写 `stable` 的含义是「任何当前 stable 都必须能构建」，真正的最低版本
+# 约束写在 [workspace.package].rust-version。
+#
+# targets/components 也不在这里声明：本机两个 toolchain 的
+# x86_64-pc-windows-msvc std 均已安装（见 BUILD.md 的核对命令）。
+# 一旦在此声明，rustup 会在每次进入目录时尝试联网补齐，离线环境下
+# 会直接把 `cargo build` 卡死。
+[toolchain]
+channel = "stable"

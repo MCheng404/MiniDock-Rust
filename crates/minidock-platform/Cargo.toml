@@ -1,0 +1,14 @@
+[package]
+name = "minidock-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Win32 系统服务：路径、显示器、DPI、主题、单实例"
+
+[dependencies]
+minidock-core.workspace = true
+windows.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

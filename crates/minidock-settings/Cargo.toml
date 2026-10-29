@@ -1,0 +1,18 @@
+[package]
+name = "minidock-settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "设置界面（egui）：纯 UI 逻辑，不依赖 wgpu，可用 kittest 无头测试"
+
+[dependencies]
+minidock-core.workspace = true
+egui.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+
+# 这一层刻意**不依赖** wgpu / windows：
+# 设置界面是纯函数式的 "状态 → 控件树"，没有任何窗口/GPU 概念，
+# 因此测试可以在无显示器的 CI 上跑，且换渲染后端时一行都不用改。
