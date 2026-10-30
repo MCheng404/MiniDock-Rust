@@ -96,6 +96,23 @@ impl FrameRenderer {
         })
     }
 
+    /// 改变离屏目标与 DIB 的尺寸，**保留** egui 上下文与渲染管线。
+    ///
+    /// 为什么需要它：右键菜单的高度随项数变化，每次打开都要换尺寸。
+    /// 而 `FrameRenderer::new` 里最贵的两步是 egui 上下文（装 CJK 字体，
+    /// 解析字体文件）与 wgpu 管线编译（几十毫秒）—— 它们与尺寸无关。
+    /// 每次重建的话，菜单弹出会明显卡一下。
+    ///
+    /// 尺寸不变时直接返回，避免无谓地重建纹理。
+    pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) -> Result<(), GpuError> {
+        if self.offscreen.width() == width && self.offscreen.height() == height {
+            return Ok(());
+        }
+        self.offscreen = Offscreen::new(&gpu.device, width, height, Gpu::COLOR_FORMAT);
+        self.presenter = LayeredPresenter::new(width as i32, height as i32)?;
+        Ok(())
+    }
+
     /// egui 用的 `Context`（需要 `request_repaint` 之类时用）。
     #[must_use]
     pub const fn ctx(&self) -> &egui::Context {

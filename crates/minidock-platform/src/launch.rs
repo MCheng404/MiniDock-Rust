@@ -16,6 +16,10 @@ pub enum LaunchError {
     Unsupported(&'static str),
     /// Shell 拒绝执行，`code` 是 `ShellExecuteW` 的返回值。
     Shell(i32),
+    /// 要打开的路径是空的。
+    EmptyTarget,
+    /// 路径不存在（或类型不对，例如要求目录却给了文件）。
+    NotFound(String),
 }
 
 impl std::fmt::Display for LaunchError {
@@ -23,6 +27,8 @@ impl std::fmt::Display for LaunchError {
         match self {
             Self::Unsupported(what) => write!(f, "{what} 尚未实现"),
             // 原版同样以 32 为界；把原始码打出来比"失败"两个字有用得多。
+            Self::EmptyTarget => write!(f, "路径为空"),
+            Self::NotFound(p) => write!(f, "路径不存在：{p}"),
             Self::Shell(0) => write!(f, "系统内存不足"),
             Self::Shell(2) => write!(f, "找不到文件"),
             Self::Shell(3) => write!(f, "找不到路径"),
@@ -121,6 +127,23 @@ pub fn launch(item: &Item) -> Result<(), LaunchError> {
         minidock_core::item::ItemKind::Group => Err(LaunchError::Unsupported("应用组")),
         minidock_core::item::ItemKind::Note => Err(LaunchError::Unsupported("速记")),
     }
+}
+
+/// 在资源管理器中打开一个目录（右键菜单的"在资源管理器中打开"）。
+///
+/// 与 [`launch`] 的区别：这里**总是**用 Explorer，不看条目类型，
+/// 也不传条目自带的参数 —— 那个参数是给应用启动用的，
+/// 塞给 `explorer.exe` 可能被当成开关解析。
+pub fn open_folder(path: &str) -> Result<(), LaunchError> {
+    if path.is_empty() {
+        return Err(LaunchError::EmptyTarget);
+    }
+    if !std::path::Path::new(path).is_dir() {
+        // 不是目录就别假装能打开：`ShellExecute` 对不存在的路径
+        // 也可能"成功"返回（转交给默认处理程序），错误会静默消失。
+        return Err(LaunchError::NotFound(path.to_owned()));
+    }
+    shell_open(path, None, None)
 }
 
 #[cfg(test)]

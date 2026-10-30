@@ -262,6 +262,11 @@ pub struct Dock {
     /// 都新起一个实例"（原版 `LaunchItem(i, force)`）。把两种点击
     /// 收进同一条路径，主循环只需处理一次。
     click: Option<(usize, bool)>,
+    /// 待处理的右键请求（客户区物理坐标）。主循环取走后弹菜单。
+    ///
+    /// 不在窗口过程里直接弹：菜单是**模态**的（自己跑消息循环），
+    /// 在 `WndProc` 里阻塞会让这个窗口的消息队列停摆。
+    menu_at: Option<(f32, f32)>,
     /// 本次按下是否按着 Shift / 来自中键。抬起时据此决定 `click` 的 force。
     press_force: bool,
 }
@@ -295,6 +300,7 @@ impl Dock {
             press: None,
             click: None,
             press_force: false,
+            menu_at: None,
         }
     }
 
@@ -472,6 +478,21 @@ impl Dock {
             self.click = hit.map(|i| (i, true));
         }
         hit
+    }
+
+    /// 记住一次右键，等主循环来取。
+    ///
+    /// 顺带清掉按下/拖拽状态：右键之前若按着左键（比如拖到一半又点右键），
+    /// 那个按下状态不该延续到菜单关闭之后。
+    pub fn request_menu(&mut self, u: f32, v: f32) {
+        self.cancel_drag();
+        self.menu_at = Some((u, v));
+        self.mark_dirty();
+    }
+
+    /// 取走右键请求。
+    pub fn take_menu_request(&mut self) -> Option<(f32, f32)> {
+        self.menu_at.take()
     }
 
     /// 切换"快捷键强制收起"。返回切换后的状态（true = 已收起）。

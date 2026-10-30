@@ -27,6 +27,7 @@ use minidock_core::store;
 use minidock_gpu::dock::{Dock, DockItem};
 use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
+use minidock_gpu::menu::{Menu, MenuCmd};
 use minidock_platform::app_window;
 use minidock_platform::appbar::AppBar;
 use minidock_platform::display;
@@ -55,11 +56,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
     GetWindowRect, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    GWLP_USERDATA, MA_NOACTIVATE, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND,
-    WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -229,6 +231,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = UpdateWindow(hwnd);
     }
 
+    // 菜单窗口与它的渲染器：懒建、复用（见 `show_menu`）。
+    let mut menu_slot: MenuSlot = None;
+
     // 全屏检测：前台是沉浸式全屏（视频/游戏）时整体隐藏 Dock。
     // 一秒一次足够 —— 用户从全屏切回来到 Dock 重新出现，1 秒内感知不到延迟，
     // 而检查本身只是两个只读查询，不触发任何渲染。
@@ -338,6 +343,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // 图标数与配置不一致时不要静默吞掉，这类错配要能看见。
                 None => eprintln!("点击了第 {i} 项，但配置里没有对应条目"),
+            }
+        }
+
+        // ②.52 右键菜单。模态：这里会阻塞到用户选择或取消。
+        if let Some((u, v)) = dock.take_menu_request() {
+            let hit = dock.hit_at(u, v);
+            let running = hit.and_then(|i| raw.get(i)).is_some_and(|it| it.running);
+            if let Some(menu) = Menu::build(hit.and_then(|i| raw.get(i)), running) {
+                // 光标位置决定菜单弹出点；工作区边界决定往哪边翻。
+                let mut pt = POINT::default();
+                let _ = unsafe { GetCursorPos(&raw mut pt) };
+                let cursor = (pt.x as f32 / ppp, pt.y as f32 / ppp);
+                // 边界用**工作区**而不是整块屏幕：菜单不该压到任务栏上。
+                let w = dock.work;
+                let bounds = (
+                    w.left as f32 / ppp,
+                    w.top as f32 / ppp,
+                    w.right as f32 / ppp,
+                    w.bottom as f32 / ppp,
+                );
+                let dark = dock.cfg.dock_is_dark(theme::is_dark());
+                match show_menu(&gpu, &mut menu_slot, menu, cursor, bounds, dark, ppp, start) {
+                    Ok(cmd) => {
+                        if std::env::var_os("MINIDOCK_GEOM").is_some() {
+                            eprintln!(
+                                "[menu] 命中 hit={hit:?} name={:?} cmd={cmd:?}",
+                                hit.and_then(|i| raw.get(i)).map(|it| it.name.clone())
+                            );
+                        }
+                        if let Some(cmd) = cmd {
+                            run_menu_cmd(cmd, hit, &mut raw, &dock.cfg);
+                        }
+                    }
+                    Err(e) => eprintln!("菜单显示失败：{e}"),
+                }
+                // 菜单期间 Dock 没有重绘，回来后强制出帧并刷新悬停。
+                need_frame = true;
+                dock.mark_dirty();
+                // 取消悬停：光标多半已经不在图标上了。
+                dock.hover = false;
+                dock.mouse = (-1.0, -1.0);
             }
         }
 
@@ -662,7 +708,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        WM_RBUTTONDOWN | WM_RBUTTONUP => LRESULT(0),
+        // 右键：只记位置，菜单由主循环弹（模态，不能在窗口过程里阻塞）。
+        WM_RBUTTONDOWN => LRESULT(0),
+        WM_RBUTTONUP => {
+            let (u, v) = physical_xy(lparam);
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).request_menu(u, v);
+                }
+            }
+            LRESULT(0)
+        }
         WM_KEYDOWN => {
             if wparam.0 as u32 == 0x1B {
                 unsafe { PostQuitMessage(0) };
@@ -855,4 +912,301 @@ fn refresh_running(raw: &mut [Item], dock: &mut Dock) -> bool {
         }
     }
     changed
+}
+
+// ============================ 右键菜单 ============================
+
+/// 菜单窗口状态。放在堆上，指针挂到 `GWLP_USERDATA`。
+struct MenuWindow {
+    menu: Menu,
+    dark: bool,
+    /// 模态循环的退出标志。
+    done: bool,
+    /// 被选中的命令。`None` + `done` = 取消。
+    cmd: Option<MenuCmd>,
+    /// DPI 缩放。物理尺寸按它算，命中也要用它换算回逻辑坐标。
+    ppp: f32,
+}
+
+fn menu_ptr(hwnd: HWND) -> *mut MenuWindow {
+    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuWindow }
+}
+
+/// 客户区物理坐标 → 逻辑坐标（`Menu::hit` 吃的是逻辑坐标）。
+fn menu_logical(lparam: LPARAM, ppp: f32) -> (f32, f32) {
+    let (x, y) = physical_xy(lparam);
+    (x / ppp, y / ppp)
+}
+
+unsafe extern "system" fn menu_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        if std::env::var_os("MINIDOCK_MENU_TRACE").is_some() {
+            eprintln!("[menu-proc] msg=0x{msg:04X} wparam=0x{:X}", wparam.0);
+        }
+        match msg {
+            // 与 Dock 一样不抢焦点：菜单是工具窗，抢焦点会让用户原本正在
+            // 用的窗口失焦，关闭菜单后还得再点一次才能继续。
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_MOUSEMOVE => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    let (u, v) = menu_logical(lparam, (*ptr).ppp);
+                    let hit = (*ptr).menu.hit(u, v);
+                    (*ptr).menu.set_hover(hit);
+                }
+                LRESULT(0)
+            }
+            // 点在菜单矩形之外 = 取消。这条依赖 `SetCapture`：
+            // 菜单没有焦点，别的窗口上的点击不会转发过来。
+            WM_LBUTTONDOWN => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    let (u, v) = menu_logical(lparam, (*ptr).ppp);
+                    let (w, h) = (*ptr).menu.logical_size();
+                    if u < 0.0 || v < 0.0 || u > w || v > h {
+                        (*ptr).done = true;
+                    }
+                }
+                LRESULT(0)
+            }
+            // 抬起即选中。注意 `hit` 返回 `None` 时也要结束 ——
+            // 落在分隔带上的点击等于"什么也没选"，菜单应当收起。
+            WM_LBUTTONUP => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    let (u, v) = menu_logical(lparam, (*ptr).ppp);
+                    (*ptr).cmd = (*ptr).menu.hit(u, v).and_then(|i| (*ptr).menu.cmd_at(i));
+                    (*ptr).done = true;
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                // Esc 取消。其他键忽略：菜单没有键盘导航，别装作有。
+                if wparam.0 as u32 == 0x1B {
+                    let ptr = menu_ptr(hwnd);
+                    if !ptr.is_null() {
+                        (*ptr).done = true;
+                    }
+                }
+                LRESULT(0)
+            }
+            // 捕获被别人抢走（弹窗、Alt+Tab）：已经收不到点击了，
+            // 必须收起，否则会挂在屏幕上等一个永远不会到来的"取消"。
+            WM_CAPTURECHANGED => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    (*ptr).done = true;
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+/// 注册菜单窗口类。已注册时 `RegisterClassW` 返回 0，忽略即可。
+fn register_menu_class() -> Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        let hinst = GetModuleHandleW(None)?;
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(menu_proc),
+            hInstance: HINSTANCE(hinst.0),
+            lpszClassName: w!("MiniDockMenuWindow"),
+            ..Default::default()
+        };
+        RegisterClassW(&raw const wc);
+    }
+    Ok(())
+}
+
+/// 菜单窗口的复用槽：窗口句柄 + 专属渲染器。
+///
+/// 为什么渲染器要独立：Dock 的 `FrameRenderer` 尺寸固定为栏体大小，
+/// 菜单尺寸完全不同。而 `resize` 只重建离屏目标与 DIB，
+/// egui 上下文与 wgpu 管线（最贵的两步）都保留。
+type MenuSlot = Option<(HWND, FrameRenderer)>;
+
+/// 弹出菜单并阻塞到用户选择或取消。返回被选中的命令。
+///
+/// **模态**：期间不处理 Dock 的其他输入（上游 `ShowMenu` 同样是模态的）。
+/// 用 `SetCapture` 而不是激活窗口来实现"点外面关闭" —— 菜单不抢焦点，
+/// 关闭后用户原来在用的窗口仍是前台。
+#[allow(clippy::too_many_arguments)]
+fn show_menu(
+    gpu: &Gpu,
+    slot: &mut MenuSlot,
+    menu: Menu,
+    cursor: (f32, f32),
+    bounds: (f32, f32, f32, f32),
+    dark: bool,
+    ppp: f32,
+    start: Instant,
+) -> Result<Option<MenuCmd>, Box<dyn std::error::Error>> {
+    let (lw, lh) = menu.logical_size();
+    // 向上取整：少一个像素会把最后一行的圆角裁掉。
+    let pw = (lw * ppp).ceil() as i32;
+    let ph = (lh * ppp).ceil() as i32;
+    let (lx, ly) = Menu::place(cursor, (lw, lh), bounds);
+    let (px, py) = ((lx * ppp).round() as i32, (ly * ppp).round() as i32);
+
+    // 懒建：第一次开菜单时建窗口与渲染器，之后复用。
+    // 第一次会慢一点（装 CJK 字体 + 编译 wgpu 管线），之后只剩 resize。
+    if slot.is_none() {
+        register_menu_class()?;
+        let hinst = unsafe { GetModuleHandleW(None)? };
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("MiniDockMenuWindow"),
+                w!("MiniDockMenu"),
+                WS_POPUP,
+                px,
+                py,
+                pw,
+                ph,
+                None,
+                None,
+                Some(HINSTANCE(hinst.0)),
+                None,
+            )?;
+            let renderer = FrameRenderer::new(gpu, pw as u32, ph as u32, ppp)?;
+            *slot = Some((hwnd, renderer));
+        }
+    }
+
+    let (hwnd, renderer) = slot.as_mut().expect("上一段刚建好");
+    renderer.resize(gpu, pw as u32, ph as u32)?;
+
+    // 位置与尺寸一起改：菜单每次打开的高度都可能不同。
+    unsafe {
+        let _ = SetWindowPos(*hwnd, Some(HWND_TOPMOST), px, py, pw, ph, SWP_NOACTIVATE);
+    }
+
+    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+        eprintln!(
+            "[menu] items={} logical=({lw},{lh}) physical=({pw},{ph}) at=({px},{py})",
+            menu.entries.len()
+        );
+    }
+    let mut state = Box::new(MenuWindow {
+        menu,
+        dark,
+        done: false,
+        cmd: None,
+        ppp,
+    });
+    unsafe {
+        SetWindowLongPtrW(*hwnd, GWLP_USERDATA, (&raw mut *state) as isize);
+        let _ = ShowWindow(*hwnd, SW_SHOWNA);
+        SetCapture(*hwnd);
+    }
+
+    // 首帧必画：窗口是重新显示的，之前那块内容已经无效。
+    let mut painted: Option<Option<usize>> = None;
+    let mut msg = MSG::default();
+    loop {
+        // 只取本窗口的消息：模态期间 Dock 的输入要压住。
+        while unsafe { PeekMessageW(&raw mut msg, Some(*hwnd), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        if state.done {
+            break;
+        }
+        // 高亮变了才重绘。菜单很小，但没必要鼠标每动一像素就跑一遍 GPU。
+        if painted != Some(state.menu.hover) {
+            painted = Some(state.menu.hover);
+            let menu = &state.menu;
+            let dark = state.dark;
+            renderer.render(
+                gpu,
+                menu_raw(renderer.size(), ppp, start),
+                *hwnd,
+                (px, py),
+                |ui| menu.paint(ui, dark),
+            )?;
+        }
+        unsafe {
+            MsgWaitForMultipleObjectsEx(None, 200, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+    }
+
+    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+        eprintln!("[menu] 关闭 cmd={:?}", state.cmd);
+    }
+    unsafe {
+        if GetCapture() == *hwnd {
+            let _ = ReleaseCapture();
+        }
+        SetWindowLongPtrW(*hwnd, GWLP_USERDATA, 0);
+        let _ = ShowWindow(*hwnd, SW_HIDE);
+    }
+    Ok(state.cmd)
+}
+
+/// 执行菜单命令。`hit` 是当初右键命中的条目下标（`None` = 空白处）。
+fn run_menu_cmd(cmd: MenuCmd, hit: Option<usize>, raw: &mut [Item], cfg: &Config) {
+    match cmd {
+        // 与左键点击同一条路径：已运行则激活，否则启动。
+        MenuCmd::Open => {
+            let Some(item) = hit.and_then(|i| raw.get(i)) else {
+                return;
+            };
+            let switched = running::running_key(item).is_some_and(|exe| {
+                let toggle = cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+                app_window::activate(&exe, toggle)
+            });
+            if !switched {
+                if let Err(e) = launch::launch(item) {
+                    eprintln!("打开「{}」失败：{e}", item.name);
+                }
+            }
+        }
+        MenuCmd::OpenInExplorer => {
+            if let Some(item) = hit.and_then(|i| raw.get(i)) {
+                if let Err(e) = launch::open_folder(&item.path) {
+                    eprintln!("打开文件夹「{}」失败：{e}", item.name);
+                }
+            }
+        }
+        MenuCmd::QuitApp => {
+            if let Some(exe) = hit.and_then(|i| raw.get(i)).and_then(running::running_key) {
+                if !app_window::close_app(&exe) {
+                    eprintln!("退出「{exe}」失败");
+                }
+            }
+        }
+        MenuCmd::ExitDock => {
+            // 走正常退出路径：`Drop` 会注销 AppBar、释放单实例锁。
+            unsafe { PostQuitMessage(0) };
+        }
+    }
+}
+
+/// 菜单的单帧输入。与 Dock 的 `render` 同口径，只是没有时钟与鼠标状态。
+fn menu_raw(size: (u32, u32), ppp: f32, start: Instant) -> egui::RawInput {
+    let (w, h) = size;
+    let mut raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w as f32 / ppp, h as f32 / ppp),
+        )),
+        time: Some(start.elapsed().as_secs_f64()),
+        ..Default::default()
+    };
+    raw.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            native_pixels_per_point: Some(ppp),
+            ..Default::default()
+        },
+    );
+    raw
 }
