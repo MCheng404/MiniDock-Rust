@@ -103,6 +103,12 @@ const DRAG_THRESHOLD: f32 = 6.0;
 pub struct DockItem {
     /// 显示名（气泡里用）。
     pub name: String,
+    /// 条目的路径。
+    ///
+    /// 只用于一件事：热更新时**按路径搬运已加载的图标纹理**。
+    /// 没有它，每次改条目顺序/数量都会让所有图标退回"首字占位"再重新加载，
+    /// 用户看到的是整条 Dock 闪一下。
+    pub path: String,
     pub kind: ItemKind,
     /// 当前边长。放大动画的值，对应 C 版 `items[i].cur`。
     pub cur: f32,
@@ -147,6 +153,7 @@ impl DockItem {
     pub fn from_item(item: &Item) -> Self {
         Self {
             name: item.name.clone(),
+            path: item.path.clone(),
             kind: item.kind,
             cur: 0.0,
             slide: 0.0,
@@ -488,6 +495,51 @@ impl Dock {
         self.cancel_drag();
         self.menu_at = Some((u, v));
         self.mark_dirty();
+    }
+
+    /// 整份替换条目列表（配置热更新用）。
+    ///
+    /// 只替换 `items`，**不**重算几何 —— 几何在下一帧 `update()` 里算，
+    /// 因为窗口尺寸与位置要等 `physical_size()` 出来之后才能改。
+    ///
+    /// 顺手清掉所有交互状态：条目已经换了，旧的按下/拖拽/悬停下标都指向
+    /// 不存在的项，留着只会让下一次点击作用到错的目标。
+    pub fn replace_items(&mut self, items: Vec<DockItem>) {
+        // 按路径搬运已有图标。热更新通常只挪动一两项，其余条目的图标
+        // 完全没变 —— 全部丢掉重载会让整条 Dock 闪一次"首字占位"。
+        let mut old: std::collections::HashMap<String, Option<IconTex>> =
+            std::collections::HashMap::new();
+        if self.icons.len() == self.items.len() {
+            for (it, icon) in self.items.iter().zip(self.icons.drain(..)) {
+                if !it.path.is_empty() {
+                    // 重复路径（用户放了两份同一个快捷方式）只保住第一份，
+                    // 另一份重新加载 —— 不影响正确性。
+                    old.entry(it.path.clone()).or_insert(icon);
+                }
+            }
+        }
+        self.icons = items
+            .iter()
+            .map(|it| {
+                if it.path.is_empty() {
+                    None
+                } else {
+                    old.remove(&it.path).flatten()
+                }
+            })
+            .collect();
+
+        self.items = items;
+        self.hover = false;
+        self.mouse = (-1.0, -1.0);
+        self.press = None;
+        self.drag = None;
+        self.click = None;
+        self.menu_at = None;
+        // 旧帧的槽位中心数量与新条目无关，清掉避免放大权重错位。
+        self.prev_act_c.clear();
+        self.mark_dirty();
+        self.anim = true;
     }
 
     /// 取走右键请求。

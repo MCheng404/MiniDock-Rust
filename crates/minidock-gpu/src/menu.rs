@@ -23,10 +23,11 @@ use egui::{Align2, Color32, FontId, Stroke};
 
 /// 菜单命令。执行逻辑在调用方（`bin/dock.rs`）。
 ///
-/// 只放**当前真能执行**的命令。`RemoveItem` / `AddSepAfter` 这类会改变
-/// 条目数量、进而改变栏体宽度与窗口尺寸的命令暂时不做：那需要一套
-/// "改配置 → 重建条目 → 重算几何 → 重建离屏目标与 DIB"的热更新路径，
-/// 与菜单本身是两件事。先上菜单，热更新单独一轮。
+/// 只放**当前真能执行**的命令。
+///
+/// 改变条目数量的三项（移除 / 加分割线 / 删分割线）依赖配置热更新：
+/// 条目数变 → 栏体宽度变 → 窗口尺寸变 → 离屏目标与 DIB 要跟着重建。
+/// 这条链在 `bin/dock.rs` 的 ②.1 里，菜单只负责发出命令。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuCmd {
     /// 打开 / 启动；已运行时由调用方决定是激活还是新起。
@@ -35,6 +36,12 @@ pub enum MenuCmd {
     OpenInExplorer,
     /// 请求应用退出（仅正在运行的普通应用）。
     QuitApp,
+    /// 在当前项右侧插入一条分割线。
+    AddSepAfter,
+    /// 从 Dock 移除（普通条目）。
+    RemoveItem,
+    /// 删除这条分割线。
+    RemoveSep,
     /// 退出 Dock 进程。
     ExitDock,
 }
@@ -94,8 +101,14 @@ impl Menu {
             None => {
                 entries.push(MenuEntry::new("退出 Dock", MenuCmd::ExitDock, true, false));
             }
-            // 分割线暂时没有可用命令（删除它会改变栏体宽度）。
-            Some(ItemKind::Separator) => return None,
+            Some(ItemKind::Separator) => {
+                entries.push(MenuEntry::new(
+                    "删除分割线",
+                    MenuCmd::RemoveSep,
+                    true,
+                    false,
+                ));
+            }
             Some(kind) => {
                 // 运行中的普通应用给"显示 / 最小化"，
                 // 与上游 `it->running && it->type == T_FILE ? ...` 一致。
@@ -116,6 +129,18 @@ impl Menu {
                 if running && matches!(kind, ItemKind::File | ItemKind::Url) {
                     entries.push(MenuEntry::new("退出应用", MenuCmd::QuitApp, false, false));
                 }
+                entries.push(MenuEntry::new(
+                    "在右侧添加分割线",
+                    MenuCmd::AddSepAfter,
+                    false,
+                    true,
+                ));
+                entries.push(MenuEntry::new(
+                    "从 Dock 移除",
+                    MenuCmd::RemoveItem,
+                    true,
+                    false,
+                ));
             }
         }
         if entries.is_empty() {
@@ -308,14 +333,19 @@ mod tests {
         Item::new(kind, name, "")
     }
 
-    /// 普通应用：只有"打开"。
+    /// 普通应用：打开 / 加分割线 / 移除。
     #[test]
-    fn file_menu_opens() {
+    fn file_menu_has_open_and_remove() {
         let it = item(ItemKind::File, "记事本");
         let m = Menu::build(Some(&it), false).expect("应当有菜单");
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
-        assert_eq!(cmds, vec![MenuCmd::Open]);
+        assert_eq!(
+            cmds,
+            vec![MenuCmd::Open, MenuCmd::AddSepAfter, MenuCmd::RemoveItem]
+        );
         assert!(!m.entries[0].danger);
+        assert!(m.entries[1].sep_after, "加分割线之后要画分隔");
+        assert!(m.entries[2].danger, "移除类必须是警告色");
     }
 
     /// 运行中的普通应用：首项改为"显示 / 最小化"，并多出"退出应用"。
@@ -363,14 +393,14 @@ mod tests {
         assert!(m.entries[0].danger);
     }
 
-    /// 分割线上暂时不该弹菜单。
-    ///
-    /// 唯一能对它做的"删除分割线"会改变栏体宽度，属于热更新。
-    /// 弹一个空窗口出来是对用户的欺骗：看着能点，实际什么也没有。
+    /// 分割线只给"删除"。
     #[test]
-    fn separator_offers_no_menu() {
+    fn separator_offers_only_delete() {
         let sep = item(ItemKind::Separator, "");
-        assert!(Menu::build(Some(&sep), false).is_none());
+        let m = Menu::build(Some(&sep), false).expect("应当有菜单");
+        assert_eq!(m.entries.len(), 1);
+        assert_eq!(m.entries[0].cmd, MenuCmd::RemoveSep);
+        assert!(m.entries[0].danger);
     }
 
     /// 命中与绘制必须用同一套纵坐标。

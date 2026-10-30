@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     dock.mode = dock.cfg.mode;
     dock.update(dpi);
 
-    let (win_w, win_h) = dock.physical_size_i32();
+    let (mut win_w, mut win_h) = dock.physical_size_i32();
     // `MINIDOCK_GEOM=1` 打印度量，用于与 C 版逐项对拍（验收 ≤1 px 时靠它定位）。
     if std::env::var_os("MINIDOCK_GEOM").is_some() {
         let m = &dock.metrics;
@@ -294,6 +294,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             need_frame = true;
         }
 
+        // ②.1 配置热更新：条目数变了 → 栏体宽度变了 → 窗口尺寸与位置都要改。
+        //
+        // 这条路径此前从未走过（窗口尺寸从建窗起就是固定的），风险在于
+        // 离屏纹理与 DIB 必须跟着换成新尺寸，否则 `UpdateLayeredWindow`
+        // 提交的还是一块旧尺寸的位图 —— 表现为"只有左上角一部分被画出来"。
+        let (nw, nh) = dock.physical_size_i32();
+        if nw != win_w || nh != win_h {
+            win_w = nw;
+            win_h = nh;
+            frame.resize(&gpu, nw as u32, nh as u32)?;
+            (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    win_w,
+                    win_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            need_frame = true;
+            if std::env::var_os("MINIDOCK_GEOM").is_some() {
+                eprintln!("[relayout] 窗口 -> ({x},{y}) {win_w}x{win_h}");
+            }
+        }
+
         // ②.4 把拖拽产生的重排同步到配置副本，并写回 ini。
         //
         // `Dock` 只持有名称与类型，启动用的完整条目在主循环这边。
@@ -373,7 +401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         if let Some(cmd) = cmd {
-                            run_menu_cmd(cmd, hit, &mut raw, &dock.cfg);
+                            run_menu_cmd(cmd, hit, &mut raw, &mut dock, &paths);
                         }
                     }
                     Err(e) => eprintln!("菜单显示失败：{e}"),
@@ -1152,17 +1180,28 @@ fn show_menu(
 }
 
 /// 执行菜单命令。`hit` 是当初右键命中的条目下标（`None` = 空白处）。
-fn run_menu_cmd(cmd: MenuCmd, hit: Option<usize>, raw: &mut [Item], cfg: &Config) {
+///
+/// 会改条目列表的三条命令走同一条收尾路径：**先改 `raw`（真源）→ 写回 ini
+/// → 整份替换 `dock.items`**。替换之后几何由下一帧 `update()` 重算，
+/// 窗口尺寸的变化由主循环 ②.1 兜住 —— 这里不直接碰窗口。
+fn run_menu_cmd(
+    cmd: MenuCmd,
+    hit: Option<usize>,
+    raw: &mut Vec<Item>,
+    dock: &mut Dock,
+    paths: &Paths,
+) {
     match cmd {
         // 与左键点击同一条路径：已运行则激活，否则启动。
         MenuCmd::Open => {
             let Some(item) = hit.and_then(|i| raw.get(i)) else {
                 return;
             };
-            let switched = running::running_key(item).is_some_and(|exe| {
-                let toggle = cfg.get_i32(Key::CLICK_TOGGLE) != 0;
-                app_window::activate(&exe, toggle)
-            });
+            // 先把开关读成 bool：后面要可变借用 `dock`，不能再挂着对
+            // `dock.cfg` 的借用。
+            let toggle = dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+            let switched =
+                running::running_key(item).is_some_and(|exe| app_window::activate(&exe, toggle));
             if !switched {
                 if let Err(e) = launch::launch(item) {
                     eprintln!("打开「{}」失败：{e}", item.name);
@@ -1187,7 +1226,41 @@ fn run_menu_cmd(cmd: MenuCmd, hit: Option<usize>, raw: &mut [Item], cfg: &Config
             // 走正常退出路径：`Drop` 会注销 AppBar、释放单实例锁。
             unsafe { PostQuitMessage(0) };
         }
+        MenuCmd::AddSepAfter => {
+            let Some(i) = hit else { return };
+            if i >= raw.len() {
+                return;
+            }
+            raw.insert(i + 1, Item::new(ItemKind::Separator, "", ""));
+            apply_item_change(raw, dock, paths);
+        }
+        MenuCmd::RemoveItem | MenuCmd::RemoveSep => {
+            let Some(i) = hit else { return };
+            if i >= raw.len() {
+                return;
+            }
+            // 最后一项不允许删：Dock 会变成一个空壳，而用户没有任何
+            // 可点的东西能把它恢复回来（拖放进来的入口还没做）。
+            if raw.len() <= 1 {
+                eprintln!("这是最后一项，不能移除。");
+                return;
+            }
+            raw.remove(i);
+            apply_item_change(raw, dock, paths);
+        }
     }
+}
+
+/// 条目列表变了之后的统一收尾：写回 ini、替换显示列表。
+///
+/// 写盘失败不回滚内存里的改动：宁可"这次生效但没保存"，也不要
+/// "点了没反应"。失败会打印出来，下一次成功保存时一并写入。
+fn apply_item_change(raw: &[Item], dock: &mut Dock, paths: &Paths) {
+    if let Err(e) = save_order(paths, raw) {
+        eprintln!("保存配置失败（改动仍在本进程内生效）：{e}");
+    }
+    let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
+    dock.replace_items(items);
 }
 
 /// 菜单的单帧输入。与 Dock 的 `render` 同口径，只是没有时钟与鼠标状态。
