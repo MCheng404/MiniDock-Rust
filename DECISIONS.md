@@ -1259,3 +1259,65 @@ GEOM dpi=144 S=64.0 Z=100.0 ... clockW=249     ← 全部取自旧配置
   路径会写。设置窗口接进来之后才有连续的写回。
 - 段顺序按"首次出现"排列，所以升级后的文件里 `[Items]` 会排在 `[meta]` 前面。
   不影响解析，但不美观 —— 等设置窗口落地时再统一排序。
+
+---
+
+## ADR-035 · 删除 GDI+ 老实现（minidock / gfx / ui）
+
+### 一、ADR-010 当时为什么留
+
+ADR-010 的决定是「`minidock-gfx` / `minidock-ui` 暂不删除，作为行为参照与
+fallback」。在 M0 阶段这是对的：wgpu 路线还没证明可行，
+GDI+ 那套至少能跑，留个退路。
+
+### 二、现在为什么删
+
+三条理由，按分量排：
+
+1. **它从来不是行为基准。** 真正的基准是上游 C 版源码（`reference/` 下的
+   `minidock.c`，本地对照用）。这三个 crate 只是 M0 之前的一次**移植尝试**，
+   而且是不完整的 —— 它没有应用组、没有扇面、没有磨砂，配置也只接了
+   一部分。拿一个半成品当参照，比没有参照更容易误导。
+2. **两份实现已经开始漂移。** `layout.rs` 的注释里记着一例：GDI+ 版算基准
+   宽度时用了动画中的 `cur`，导致基准槽位每帧漂移；GPU 版用固定的 `s` 才是
+   对的。这类分歧只会越来越多，而"哪份是对的"每次都要重新判断。
+3. **它让 `cargo build` 产出两个 Dock。** `MiniDock.exe`（GDI+）与
+   `minidock-dock.exe`（wgpu）并存，两个都编、都能启动、都读同一份配置。
+   调试时先要确认"我跑的是哪个"，这个成本每次都在付。
+
+### 三、删了什么
+
+| 路径 | 行数 | 内容 |
+|---|---|---|
+| `crates/minidock` | 83 | 老的 bin 入口（`MiniDock.exe`） |
+| `crates/minidock-gfx` | 969 | GDI+ 封装（canvas / objects / 字体） |
+| `crates/minidock-ui` | 948 | GDI+ 版 Dock 骨架 |
+
+合计 **2000 行**，占当时总代码（16604 行）的 12%。
+
+workspace 从 7 个 crate 减到 4 个：`core` / `platform` / `settings` / `gpu`。
+
+### 四、影响的可见变化
+
+**可执行文件名从 `MiniDock.exe` 变成 `minidock-dock.exe`**。之前两个 exe
+并存，现在只剩后者。如果后续需要沿用 `MiniDock.exe` 这个名字，
+应该在 `minidock-gpu` 里给 bin 加一个 alias，而不是把老 crate 捡回来。
+
+### 五、被删代码里有什么值得留意的
+
+删之前扫了一遍，只有一处**思路**值得记下来（代码本身不留）：
+
+`gfx/objects.rs` 里对 GDI+ 的 `GraphicsPath` 做圆角矩形的拼法，
+和现在 `dock.rs` 里 `rounded_gradient()` 自建三角扇网格是两套完全不同的
+做法（前者调库、后者自己出顶点）。现在这套已经跑通且经过像素验证，
+没有理由回头。
+
+其余都是薄封装，没有独有逻辑。
+
+### 六、没有做的事
+
+- **没有留 Cargo feature 开关**。留一个 `--features legacy-gdi` 看似稳妥，
+  实际会让"删干净"这件事永远差一步：CI 要不要编它？测试要不要跑它？
+  两份实现共存的成本会以另一种形式回来。
+- **没有先把它们移到 `archive/` 分支**。git 历史里都有，需要时
+  `git checkout <sha> -- crates/minidock-ui` 就能拿回来。

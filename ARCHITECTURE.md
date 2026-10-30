@@ -30,8 +30,6 @@ minidock-core        （无 Win32 依赖，纯逻辑）
    └── minidock-platform│
               ↑         │
          minidock-gpu ──┘  （wgpu + Win32 窗口/输入/命中）
-
-minidock-gfx / minidock-ui   遗留 GDI+ 路线，M2 删除
 ```
 
 依赖方向是单向的：`gpu → settings → core`、`gpu → platform`。

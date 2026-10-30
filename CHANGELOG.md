@@ -35,6 +35,41 @@
 
 ---
 
+## 0.2.1 — 删除 GDI+ 老实现（2026-10-30）
+
+`minidock` / `minidock-gfx` / `minidock-ui` 三个 crate 删除，共 **2000 行**
+（占当时总代码 12%）。workspace 从 7 个 crate 减到 4 个。
+
+### 删除
+
+| 路径 | 行数 | 内容 |
+|---|---|---|
+| `crates/minidock` | 83 | 老的 bin 入口（`MiniDock.exe`） |
+| `crates/minidock-gfx` | 969 | GDI+ 封装（canvas / objects / 字体） |
+| `crates/minidock-ui` | 948 | GDI+ 版 Dock 骨架 |
+
+它们是 M0 之前的一次移植尝试，**从来不是行为基准**（基准一直是上游 C 版
+源码）。ADR-010 当初留作 fallback，现在 wgpu 路线已跑通、两份实现开始漂移
+（`layout.rs` 里记着一例基准宽度算法分歧），且 `cargo build` 会产出两个
+可交互的 Dock，调试时先要确认跑的是哪个 —— 成本每次都在付。
+
+### 可见变化
+
+- **可执行文件名只剩 `minidock-dock.exe`**（原来的 `MiniDock.exe` 一并删除）。
+- `Cargo.lock` 清理干净，`cargo build --workspace` 少编三个 crate。
+
+### 未做
+
+- 不留 `--features legacy-gdi` 开关：会让"删干净"永远差一步，
+  CI 与测试都要为不存在的路径付成本。
+- 不另开 `archive/` 分支：git 历史里有，需要时
+  `git checkout <sha> -- crates/minidock-ui` 就能取回。
+
+质量门禁：197 条测试（与删除前一致）、`clippy -D warnings`、`fmt --check`
+全绿；启动实测 3 个真实图标正常渲染。
+
+---
+
 ## 0.2.0 — 配置格式 v2（2026-10-30）
 
 「去除对上游依赖」的第一步：配置不再照抄上游的键名与分段。

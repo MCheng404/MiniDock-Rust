@@ -620,27 +620,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "minidock"
-version = "0.1.0"
-dependencies = [
- "minidock-core",
- "minidock-gfx",
- "minidock-platform",
- "minidock-ui",
- "windows",
-]
-
-[[package]]
 name = "minidock-core"
 version = "0.1.0"
-
-[[package]]
-name = "minidock-gfx"
-version = "0.1.0"
-dependencies = [
- "minidock-core",
- "windows",
-]
 
 [[package]]
 name = "minidock-gpu"
@@ -670,16 +651,6 @@ dependencies = [
  "egui",
  "egui_kittest",
  "minidock-core",
-]
-
-[[package]]
-name = "minidock-ui"
-version = "0.1.0"
-dependencies = [
- "minidock-core",
- "minidock-gfx",
- "minidock-platform",
- "windows",
 ]
 
 [[package]]

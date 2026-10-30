@@ -2,12 +2,9 @@
 resolver = "2"
 members = [
     "crates/minidock-core",
-    "crates/minidock-gfx",
     "crates/minidock-platform",
     "crates/minidock-settings",
     "crates/minidock-gpu",
-    "crates/minidock-ui",
-    "crates/minidock",
 ]
 
 [workspace.package]
@@ -20,11 +17,9 @@ repository = ""
 
 [workspace.dependencies]
 minidock-core = { path = "crates/minidock-core" }
-minidock-gfx = { path = "crates/minidock-gfx" }
 minidock-platform = { path = "crates/minidock-platform" }
 minidock-settings = { path = "crates/minidock-settings" }
 minidock-gpu = { path = "crates/minidock-gpu" }
-minidock-ui = { path = "crates/minidock-ui" }
 
 # egui 0.37：当前最新。**只依赖 egui + egui-wgpu**，不引 eframe——
 # eframe 会接管消息循环，而 Dock 需要自己持有 Win32 循环（托盘/热键/AppBar/

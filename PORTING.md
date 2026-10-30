@@ -140,7 +140,7 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 - [ ] 托盘、全局热键、AppBar 预留、单实例唤起
 - [ ] 最小化飞入动画（`SetWinEventHook`）
 - [ ] 自动启动注册表、导出/导入 `.mdock`
-- [ ] 删除遗留 `minidock-gfx` / `minidock-ui`
+- [x] 删除遗留 `minidock-gfx` / `minidock-ui` / `minidock`（ADR-035）
 
 ## 三、函数级台账
 
@@ -201,4 +201,4 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 - **跨平台**：Dock 依赖 shell/DWM/AppBar/托盘，移植到 macOS 等于重写产品。
 - **多进程架构**：单进程足够，IPC 只会增加崩溃面。
-- **保留 C 版兼容层**：M4 直接删除 `minidock-gfx` / `minidock-ui`。
+- ~~保留 C 版兼容层~~：已于 0.2.1 删除，见 ADR-035。
