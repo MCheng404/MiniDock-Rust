@@ -81,12 +81,3 @@ docs: README / ARCHITECTURE / BUILD / PORTING / CONFIG / DECISIONS / CHANGELOG
   打开对话框/写注册表/增删条目都由主程序执行。
 
 细节见 [`ARCHITECTURE.md`](ARCHITECTURE.md)，决策理由见 [`DECISIONS.md`](DECISIONS.md)。
-
-## 许可证与版权
-
-⚠️ **上游 `minidock.c` 的版权归原作者 Wangcy 所有，仓库未授予再分发许可。**
-本重写是衍生作品，**在取得授权前不得分发**；当前仅作本地研究与迁移用。
-`minidock-gfx` / `minidock-ui` 中的绘制逻辑与常量来自上游源码，同样受此约束。
-
-本项目自身新增代码暂不声明开源许可证，待上游授权明确后再定。
-上游的图标资源（`res/app.ico`）**未**复制进本仓库。
