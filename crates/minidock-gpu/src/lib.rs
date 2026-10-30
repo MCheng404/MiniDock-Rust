@@ -7,8 +7,8 @@
 //!
 //! 模块分工：
 //! - `frame` —— 一帧的提交路径（egui → 离屏 → 回读 → 分层窗口），
-//!   设置窗口与 Dock 窗口共用；
-//! - `overlay` —— 设置窗口的建窗、消息循环、输入；
+//!   Dock 窗口与设置窗口共用；
+//! - `settings_win` —— 设置窗口的建窗、输入、呈现（ADR-036，Dock 进程内）；
 //! - `dock` —— Dock 的布局状态机与 egui 绘制；
 //! - `gpu` / `offscreen` / `present` —— 设备、离屏目标、DIB 呈现；
 //! - `input` —— Win32 消息 → `egui::RawInput`。
@@ -26,8 +26,8 @@ pub mod input;
 pub mod mem;
 pub mod menu;
 pub mod offscreen;
-pub mod overlay;
 pub mod present;
+pub mod settings_win;
 
 pub use dock::{Dock, DockItem};
 pub use frame::{FrameOutcome, FrameRenderer};
@@ -35,5 +35,5 @@ pub use gpu::{Gpu, GpuError, Selection};
 pub use mem::MemStats;
 pub use menu::{Menu, MenuCmd, MenuEntry};
 pub use offscreen::Offscreen;
-pub use overlay::Overlay;
 pub use present::LayeredPresenter;
+pub use settings_win::SettingsWindow;

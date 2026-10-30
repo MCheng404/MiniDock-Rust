@@ -42,6 +42,8 @@ pub enum MenuCmd {
     RemoveItem,
     /// 删除这条分割线。
     RemoveSep,
+    /// 打开设置窗口。
+    Settings,
     /// 退出 Dock 进程。
     ExitDock,
 }
@@ -146,6 +148,15 @@ impl Menu {
         if entries.is_empty() {
             return None;
         }
+        // "Dock 设置"必须在**任何**菜单里都有。
+        //
+        // 只放在空白处是不够的：图标一多，栏体就被占满，用户右键任何地方
+        // 都落在某个图标上 —— 而设置窗口是目前的唯一入口（还没有托盘）。
+        // 放在最后并用分隔线隔开，顺带保住"红色项不与常用项挨着"。
+        if let Some(last) = entries.last_mut() {
+            last.sep_after = true;
+        }
+        entries.push(MenuEntry::new("Dock 设置", MenuCmd::Settings, false, false));
         Some(Self {
             entries,
             hover: None,
@@ -341,7 +352,12 @@ mod tests {
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
-            vec![MenuCmd::Open, MenuCmd::AddSepAfter, MenuCmd::RemoveItem]
+            vec![
+                MenuCmd::Open,
+                MenuCmd::AddSepAfter,
+                MenuCmd::RemoveItem,
+                MenuCmd::Settings,
+            ]
         );
         assert!(!m.entries[0].danger);
         assert!(m.entries[1].sep_after, "加分割线之后要画分隔");
@@ -384,22 +400,24 @@ mod tests {
             .any(|e| e.cmd == MenuCmd::OpenInExplorer));
     }
 
-    /// 空白处只给"退出 Dock"。
+    /// 空白处 = 对 Dock 本身说话：设置 + 退出。
     #[test]
-    fn blank_area_offers_exit() {
+    fn blank_area_offers_settings_and_exit() {
         let m = Menu::build(None, false).expect("应当有菜单");
-        assert_eq!(m.entries.len(), 1);
-        assert_eq!(m.entries[0].cmd, MenuCmd::ExitDock);
+        let cmds: Vec<MenuCmd> = m.entries.iter().map(|e| e.cmd).collect();
+        assert_eq!(cmds, vec![MenuCmd::ExitDock, MenuCmd::Settings]);
+        // 设置与退出之间要有分隔线：两者后果差别太大，挨在一起容易误点。
         assert!(m.entries[0].danger);
+        assert!(m.entries[0].sep_after);
     }
 
-    /// 分割线只给"删除"。
+    /// 分割线只给"删除"，外加总在最后的一项"Dock 设置"。
     #[test]
-    fn separator_offers_only_delete() {
+    fn separator_offers_delete_and_settings() {
         let sep = item(ItemKind::Separator, "");
         let m = Menu::build(Some(&sep), false).expect("应当有菜单");
-        assert_eq!(m.entries.len(), 1);
-        assert_eq!(m.entries[0].cmd, MenuCmd::RemoveSep);
+        let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
+        assert_eq!(cmds, vec![MenuCmd::RemoveSep, MenuCmd::Settings]);
         assert!(m.entries[0].danger);
     }
 

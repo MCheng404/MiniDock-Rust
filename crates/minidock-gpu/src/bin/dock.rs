@@ -28,6 +28,7 @@ use minidock_gpu::dock::{Dock, DockItem};
 use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
 use minidock_gpu::menu::{Menu, MenuCmd};
+use minidock_gpu::settings_win::SettingsWindow;
 use minidock_platform::app_window;
 use minidock_platform::appbar::AppBar;
 use minidock_platform::display;
@@ -38,6 +39,8 @@ use minidock_platform::shortcut;
 use minidock_platform::single_instance::SingleInstance;
 use minidock_platform::theme;
 use minidock_platform::Paths;
+use minidock_settings::{Command, SettingsState};
+use std::pin::Pin;
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -167,7 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
     // 留着那块空白反而更怪（C 版同样是 `cfg.reserve && cfg.mode == 0`）。
     let mut appbar = AppBar::new(hwnd);
-    let reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
+    let mut reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
         appbar.apply(
             dock.cfg.edge,
             dock.reserve_thickness(),
@@ -244,6 +247,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 菜单窗口与它的渲染器：懒建、复用（见 `show_menu`）。
     let mut menu_slot: MenuSlot = None;
+    // 设置窗口同样是懒建的：第一次打开才付"装字体 + 编译 GPU 管线"那几十毫秒，
+    // 代价与取舍记在 `SettingsWindow::new` 里。
+    let mut settings_slot: Option<Pin<Box<SettingsWindow>>> = None;
+    // 设置面板改动到写盘的防抖窗口。滑块拖动会连着产生几十次改动，
+    // 每次都 `Ini::save` 等于每帧一次 UTF-16 全量回写。
+    let mut cfg_dirty_at: Option<Instant> = None;
 
     // 全屏检测：前台是沉浸式全屏（视频/游戏）时整体隐藏 Dock。
     // 一秒一次足够 —— 用户从全屏切回来到 Dock 重新出现，1 秒内感知不到延迟，
@@ -411,8 +420,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 hit.and_then(|i| raw.get(i)).map(|it| it.name.clone())
                             );
                         }
+                        // 设置窗口要激活另一个 HWND，不能在 `run_menu_cmd`
+                        // 里做：那儿没有 `gpu`，也不该有。
+                        // 菜单已经在上面收起，这里只是把请求带出去。
+                        let mut open_settings = false;
                         if let Some(cmd) = cmd {
-                            run_menu_cmd(cmd, hit, &mut raw, &mut dock, &paths);
+                            if cmd == MenuCmd::Settings {
+                                open_settings = true;
+                            } else {
+                                run_menu_cmd(cmd, hit, &mut raw, &mut dock, &paths);
+                            }
+                        }
+                        if open_settings {
+                            let sw = ensure_settings(&gpu, &mut settings_slot, &paths, ppp)?;
+                            // 每次打开都重读：用户可能刚在任务管理器里改过它。
+                            sw.state.auto_start = theme::get_autostart();
+                            sw.show();
                         }
                     }
                     Err(e) => eprintln!("菜单显示失败：{e}"),
@@ -423,6 +446,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 取消悬停：光标多半已经不在图标上了。
                 dock.hover = false;
                 dock.mouse = (-1.0, -1.0);
+            }
+        }
+
+        // ②.53 设置窗口。**非模态**：改参数时要能一边拖动滑块一边看栏体
+        //       的变化，所以不像菜单那样把整条消息循环堵住。
+        let (changed, remount) =
+            tick_settings(&gpu, &mut settings_slot, &mut dock, &mut raw, &paths, dpi)?;
+        if changed {
+            // 配置是 Dock 与设置窗口共用的同一份：`update()` 在下一轮用它
+            // 重算几何，这里只需要要求出帧 + 排一次写盘。
+            cfg_dirty_at = Some(Instant::now());
+            need_frame = true;
+            dock.mark_dirty();
+            if std::env::var_os("MINIDOCK_GEOM").is_some() {
+                eprintln!("[settings] 配置有改动，排定写盘");
+            }
+        }
+        if remount {
+            // 停靠边 / 预留 / 隐藏模式变了：AppBar 得重新注册，窗口位置
+            // 得跟着新边算。尺寸若也变了（左右停靠要转置 lw/lh），下一轮
+            // ②.1 会 resize —— 这里先按旧尺寸摆到新位置，差的是一帧。
+            dock.mode = dock.cfg.mode;
+            reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
+                appbar.apply(
+                    dock.cfg.edge,
+                    dock.reserve_thickness(),
+                    display::monitor_rect(0),
+                )
+            } else {
+                appbar.remove();
+                None
+            };
+            (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    win_w,
+                    win_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            if std::env::var_os("MINIDOCK_GEOM").is_some() {
+                eprintln!(
+                    "[settings] 重挂 edge={:?} reserve={} mode={:?} -> pos=({x},{y}) reserved={reserved:?}",
+                    dock.cfg.edge, dock.cfg.reserve, dock.mode
+                );
+            }
+            need_frame = true;
+        }
+
+        // ②.535 配置落盘。滑块一次拖动会连着产生几十次 `changed`，
+        //        每条都写一次等于每帧一次 UTF-16 全量回写。
+        if let Some(at) = cfg_dirty_at {
+            if at.elapsed() >= Duration::from_millis(CFG_SAVE_DEBOUNCE_MS) {
+                cfg_dirty_at = None;
+                if let Err(e) = save_config(&paths, &dock.cfg) {
+                    eprintln!("保存配置失败（改动仍在本进程内生效）：{e}");
+                } else {
+                    settings_status(&mut settings_slot, "已保存");
+                    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+                        eprintln!("[settings] 已写回 {}", paths.ini.display());
+                    }
+                }
             }
         }
 
@@ -779,6 +868,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// 1 秒对用户感知足够快，同时把空闲唤醒压到每秒一次。
 const FS_CHECK_MS: u32 = 1000;
 
+/// 设置面板改动到写盘的防抖窗口（毫秒）。
+///
+/// 拖一下滑块会产生几十次 `changed`；ini 是 UTF-16 全量回写，逐次写盘
+/// 会让一次拖动变成几十次文件重写。400 ms 是"停手就存、拖着不存"的折中。
+const CFG_SAVE_DEBOUNCE_MS: u64 = 400;
+
 /// 给每个条目装图标。
 ///
 /// 来源顺序照抄原版 `LoadItemIcon()` 的主干，但只覆盖"能拿到的"几条：
@@ -1128,8 +1223,12 @@ fn show_menu(
 
     if std::env::var_os("MINIDOCK_GEOM").is_some() {
         eprintln!(
-            "[menu] items={} logical=({lw},{lh}) physical=({pw},{ph}) at=({px},{py})",
-            menu.entries.len()
+            "[menu] items={} labels={:?} logical=({lw},{lh}) physical=({pw},{ph}) at=({px},{py})",
+            menu.entries.len(),
+            menu.entries
+                .iter()
+                .map(|e| e.label.as_str())
+                .collect::<Vec<_>>()
         );
     }
     let mut state = Box::new(MenuWindow {
@@ -1237,6 +1336,11 @@ fn run_menu_cmd(
             // 走正常退出路径：`Drop` 会注销 AppBar、释放单实例锁。
             unsafe { PostQuitMessage(0) };
         }
+        // 入口在 `tick` 之前就被截走了（`MenuCmd::Settings` 要 GPU 才能开窗口）。
+        // 这里是穷尽匹配要求的占位：真走到这里说明拦截失效了，那是一个 bug。
+        MenuCmd::Settings => {
+            eprintln!("`Settings` 命令走错了路径：它应当在主循环里被处理");
+        }
         MenuCmd::AddSepAfter => {
             let Some(i) = hit else { return };
             if i >= raw.len() {
@@ -1272,6 +1376,209 @@ fn apply_item_change(raw: &[Item], dock: &mut Dock, paths: &Paths) {
     }
     let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
     dock.replace_items(items);
+}
+
+// ============================ 设置窗口 ============================
+
+/// 首次打开时建窗，之后一直复用同一个窗口与渲染器。
+///
+/// 懒建是为了别把"装字体 + 编译 GPU 管线"那几十毫秒记在 Dock 的启动时间上：
+/// 大部分会话压根不会打开设置。
+fn ensure_settings<'a>(
+    gpu: &Gpu,
+    slot: &'a mut Option<Pin<Box<SettingsWindow>>>,
+    paths: &Paths,
+    ppp: f32,
+) -> Result<&'a mut SettingsWindow, Box<dyn std::error::Error>> {
+    if slot.is_none() {
+        let monitors = display::monitors();
+        let state = SettingsState {
+            config_dir: paths.dir.display().to_string(),
+            monitors: monitors
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    if i == 0 {
+                        "主显示器".to_owned()
+                    } else {
+                        format!("显示器 {}", i + 1)
+                    }
+                })
+                .collect(),
+            // 显示的是注册表里的真值，不是配置项：用户可以在任务管理器里改它。
+            auto_start: theme::get_autostart(),
+            // 软件光栅器不进下拉框：选它只会得到一帧几十毫秒的结果。
+            adapters: minidock_platform::gpu::adapters()
+                .into_iter()
+                .filter(|a| a.kind != minidock_platform::AdapterKind::Software)
+                .map(|a| a.name)
+                .collect(),
+            ..SettingsState::default()
+        };
+        // `new` 返回的是 pin 住的装箱值：窗口过程按地址找它，地址不能变。
+        *slot = Some(SettingsWindow::new(gpu, state, ppp)?);
+    }
+    Ok(slot.as_mut().expect("上一段刚塞进去"))
+}
+
+/// 每轮给设置窗口一次机会。
+///
+/// 返回 `(配置有改动, 需要重挂)`。第二项由调用方做，因为 AppBar 与窗口位置
+/// 是主循环的东西 —— 传进来会把这个函数拖成十几个参数。
+fn tick_settings(
+    gpu: &Gpu,
+    slot: &mut Option<Pin<Box<SettingsWindow>>>,
+    dock: &mut Dock,
+    raw: &mut Vec<Item>,
+    paths: &Paths,
+    dpi: i32,
+) -> Result<(bool, bool), Box<dyn std::error::Error>> {
+    let Some(sw) = slot.as_mut() else {
+        return Ok((false, false));
+    };
+    // 停靠边 / 预留 / 隐藏模式变了要重新注册 AppBar 并重算窗口位置。
+    let before = (dock.cfg.edge, dock.cfg.reserve, dock.cfg.mode);
+
+    let mut changed = false;
+    if sw.visible() && sw.due() {
+        // 关键点：`cfg` 就是 Dock 用的那一份。设置窗口改它等于改 Dock，
+        // 没有 IPC、没有复制、也没有"保存后重启"。
+        sw.render(gpu, &mut dock.cfg)?;
+        let out = std::mem::take(&mut sw.outcome);
+        changed = out.changed;
+        if let Some(cmd) = out.command {
+            changed |= run_settings_cmd(cmd, dock, raw, paths, sw, dpi);
+        }
+    }
+    // Esc 与"关闭"都走这个标志：关闭要在命令结算之后执行，
+    // 否则点关闭按钮那一帧的改动会被丢掉。
+    if sw.close_requested {
+        sw.hide();
+    }
+    let after = (dock.cfg.edge, dock.cfg.reserve, dock.cfg.mode);
+    Ok((changed, before != after))
+}
+
+/// 执行设置界面发出的命令。返回值表示"是否需要把配置写盘"。
+///
+/// 还没接通的能力在最后一支里给出明确提示 —— 什么都不做会让用户以为按钮
+/// 坏了，而那几项本来就在 `PORTING.md` 的待办里。
+fn run_settings_cmd(
+    cmd: Command,
+    dock: &mut Dock,
+    raw: &mut Vec<Item>,
+    paths: &Paths,
+    sw: &mut SettingsWindow,
+    dpi: i32,
+) -> bool {
+    match cmd {
+        // 关闭由 `tick_settings` 处理（窗口要藏起来），这里不再做事。
+        Command::Close => false,
+        Command::OpenConfigDir => {
+            let dir = paths.dir.display().to_string();
+            if let Err(e) = launch::open_folder(&dir) {
+                sw.state.status = format!("打开配置目录失败：{e}");
+            }
+            false
+        }
+        Command::ToggleAutostart(on) => {
+            if theme::set_autostart(on) {
+                // 写完重新读真值：策略把写入拦下来时，写函数也可能返回成功。
+                sw.state.auto_start = theme::get_autostart();
+                sw.state.status = if sw.state.auto_start {
+                    "已设置开机自启动".to_owned()
+                } else {
+                    "已取消开机自启动".to_owned()
+                };
+            } else {
+                sw.state.status =
+                    format!("写入注册表失败（错误码 {}）", theme::last_registry_error());
+                sw.state.auto_start = theme::get_autostart();
+            }
+            false
+        }
+        Command::ResetDefaults => {
+            dock.cfg = Config::defaults(dpi);
+            sw.state.status = "已恢复默认设置".to_owned();
+            true
+        }
+        Command::Recommended => {
+            apply_recommended(&mut dock.cfg);
+            sw.state.status = "已套用推荐设置（尺寸与停靠边没动）".to_owned();
+            true
+        }
+        Command::LowPower => {
+            apply_low_power(&mut dock.cfg);
+            sw.state.status = "已关闭高开销视觉效果".to_owned();
+            true
+        }
+        // 这两项与右键菜单里的同一条路径共用收尾：改 `raw` → 写盘 → 换列表。
+        Command::AddSeparator => {
+            raw.push(Item::new(ItemKind::Separator, "", ""));
+            apply_item_change(raw, dock, paths);
+            true
+        }
+        Command::AddTrash => {
+            raw.push(Item::new(ItemKind::Trash, "回收站", ""));
+            apply_item_change(raw, dock, paths);
+            true
+        }
+        _ => {
+            sw.state.status = "这项能力还没接进 Dock（见 PORTING.md 待办）".to_owned();
+            false
+        }
+    }
+}
+
+/// 推荐设置：只动"要不要这些效果"，尺寸、颜色与停靠边一概不碰 ——
+/// 那些是用户已经调好、一改就得从头再来的东西。
+fn apply_recommended(cfg: &mut Config) {
+    for (key, v) in [
+        (Key::Labels, 1),
+        (Key::Zoom, 1),
+        (Key::Reflect, 1),
+        (Key::Dots, 1),
+        (Key::Bounce, 1),
+        (Key::MinAnim, 1),
+        (Key::Border, 1),
+        (Key::Preview, 1),
+    ] {
+        cfg.apply_i32(key, v);
+    }
+}
+
+/// 低占用：关掉所有"每帧都要多干一遍"的效果。磨砂（`Blur` + `BgMode`）是
+/// 这里面唯一的常驻开销，其余只是少几次在特定时机额外做的事。
+fn apply_low_power(cfg: &mut Config) {
+    for (key, v) in [
+        (Key::Reflect, 0),
+        (Key::Blur, 0),
+        (Key::MinAnim, 0),
+        (Key::Bounce, 0),
+        (Key::Preview, 0),
+        (Key::FolderFan, 0),
+        (Key::ShowRunning, 0),
+        (Key::BgMode, 0),
+    ] {
+        cfg.apply_i32(key, v);
+    }
+}
+
+/// 把当前配置写回 ini。
+///
+/// 先读一次再写：`[Items]` 段不归 `write_ini` 管，直接新建一份会丢光条目。
+fn save_config(paths: &Paths, cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ini = Ini::load(&paths.ini)?;
+    cfg.write_ini(&mut ini);
+    ini.save(&paths.ini)?;
+    Ok(())
+}
+
+/// 给设置窗口的底部状态条写一句话（窗口没建过就什么都不做）。
+fn settings_status(slot: &mut Option<Pin<Box<SettingsWindow>>>, text: &str) {
+    if let Some(sw) = slot.as_mut() {
+        sw.state.status = text.to_owned();
+    }
 }
 
 /// 菜单的单帧输入。与 Dock 的 `render` 同口径，只是没有时钟与鼠标状态。

@@ -18,10 +18,6 @@ windows.workspace = true
 # 三个可执行文件全部显式声明。`src/bin/` 下的文件本来会被自动发现，
 # 但显式列出后"这个 crate 产出哪几个 exe"一眼可见。
 [[bin]]
-name = "minidock-spike"
-path = "src/bin/spike.rs"
-
-[[bin]]
 name = "minidock-dock"
 path = "src/bin/dock.rs"
 
