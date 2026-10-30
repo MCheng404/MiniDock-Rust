@@ -88,7 +88,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let paths = Paths::resolve()?;
     let dpi = display::system_dpi();
-    let ini = Ini::load(&paths.ini)?;
+    let mut ini = Ini::load(&paths.ini)?;
+    // 上游格式就地升级：读一次就变成新格式，用户不需要知道有这回事。
+    // 只在这一步写盘 —— 迁移失败也不影响本次运行（`from_ini` 两种格式都认）。
+    if Config::upgrade_legacy(&mut ini, dpi) {
+        match ini.save(&paths.ini) {
+            Ok(()) => eprintln!(
+                "配置已从上游格式升级到 v{}（各设置保持不变）。",
+                minidock_core::config::CONFIG_VERSION
+            ),
+            Err(e) => eprintln!("配置升级后保存失败（本次仍按新格式使用）：{e}"),
+        }
+    }
     let cfg = Config::from_ini(&ini, dpi);
     // 可变：拖拽重排要跟着 Dock 一起调整，顺序才与屏幕一致。
     let mut raw: Vec<Item> = store::load_items(&ini);

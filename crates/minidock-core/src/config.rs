@@ -65,6 +65,44 @@ pub enum Key {
     Numeric(u16),
 }
 
+/// 新配置格式的版本号。改动键名或分区就 +1。
+pub const CONFIG_VERSION: i32 = 2;
+
+/// 新版存放元信息的段。
+pub const META_SECTION: &str = "meta";
+
+/// 上游格式里所有配置挤在这一个段里。**只**用于读旧文件。
+pub const LEGACY_SECTION: &str = "Settings";
+
+/// 数值键的段归属，按名字前缀判断。
+///
+/// 用前缀而不是给表加两列：表已有 41 行，加列要动全部数据；
+/// 而前缀规则本身就把"这是什么功能"表达清楚了。
+fn section_of_numeric(name: &str) -> &'static str {
+    if name.starts_with("Plate") {
+        "appearance.plate"
+    } else if name.starts_with("Grad") || name.starts_with("BgColor") {
+        "appearance.background"
+    } else if name.starts_with("Refl") {
+        "appearance.reflect"
+    } else if name.starts_with("Clock") || name.starts_with("DateFmt") {
+        "widgets.clock"
+    } else if name.starts_with("Fan")
+        || name.starts_with("Group")
+        || name.starts_with("Grp")
+        || name == "MinStyle"
+    {
+        "behavior.group"
+    } else if name.starts_with("Mn") || name == "MenuTheme" {
+        "menu"
+    } else if name == "Browser" {
+        "advanced"
+    } else {
+        // 边框 / 分隔线 / 指示点 / 点击切换 / 守护进程等。
+        "appearance"
+    }
+}
+
 /// 裸数值键的表：`(ini 键名, 最小值, 最大值, 默认值, 是否布尔, 默认值随 DPI 缩放)`。
 ///
 /// 来源：上游 v1.4.0 的 `g_tab[]` 与 `DefaultCfg()`，值域取自上游设置行
@@ -291,9 +329,116 @@ impl Key {
         Key::MN_ADD,
     ];
 
-    /// ini 中的键名（大小写照抄原版，Windows profile API 本身不区分大小写）。
+    /// 新配置格式里该键所属的段。
+    ///
+    /// 按**语义**分组，而不是照抄上游把所有东西塞进 `[Settings]`。
+    /// 实际收益：以后加功能时能一眼看出新键该放哪，不用在一张平表里找位置。
+    ///
+    /// 数值键（`Key::Numeric`，对应上游的裸 `int`）按名字前缀归类，
+    /// 这样表本身不用改结构 —— 加一条数据仍然只需一行。
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub fn section(self) -> &'static str {
+        match self {
+            Key::IconSize
+            | Key::ZoomSize
+            | Key::Spacing
+            | Key::Margin
+            | Key::Padding
+            | Key::Radius
+            | Key::Opacity
+            | Key::Blur
+            | Key::Border => "appearance",
+
+            Key::BgMode | Key::BgColor1 | Key::BgColor2 | Key::AccentTone => {
+                "appearance.background"
+            }
+
+            Key::Mode | Key::Edge | Key::Monitor | Key::Reserve => "layout",
+
+            Key::Zoom
+            | Key::Dots
+            | Key::Labels
+            | Key::Bounce
+            | Key::Preview
+            | Key::ShowRunning
+            | Key::Lock
+            | Key::Clock
+            | Key::Notes
+            | Key::MinAnim
+            | Key::FolderFan
+            | Key::WebAppMode => "behavior",
+
+            // 倒影：开关与三个参数同段，改倒影时只看这一处。
+            Key::Reflect => "appearance.reflect",
+
+            Key::Theme | Key::UiTheme | Key::PlateRadius | Key::DotStyle => "theme",
+
+            Key::Hotkey => "advanced",
+
+            Key::Numeric(i) => section_of_numeric(NUMERIC_KEYS[i as usize].0),
+        }
+    }
+
+    /// 新配置格式里的键名（小写下划线）。
+    ///
+    /// 与上游的驼峰名**故意不同**。改名不是洁癖，有两处是真的会误导：
+    ///
+    /// - `Mode` → `hide_mode`：原名 `Mode` 实际是"隐藏方式"
+    ///   （常显 / 自动隐藏 / 智能隐藏），和 `BgMode` 摆在一起时
+    ///   完全看不出哪个管背景、哪个管行为；
+    /// - `BgMode` → `fill`：它控制的是背景**填充方式**（纯色 / 渐变 / 磨砂），
+    ///   叫 `BgMode` 会被读成"背景开关"。
+    ///
+    /// 数值键沿用上游名：它们大多对应**尚未实现**的功能（扇面、应用组、
+    /// 磨砂），等做那些功能时再连同语义一起定名，比现在拍脑袋强。
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Key::IconSize => "icon_size",
+            Key::ZoomSize => "zoom_size",
+            Key::Spacing => "spacing",
+            Key::Margin => "margin",
+            Key::Padding => "padding",
+            Key::Radius => "radius",
+            Key::Opacity => "opacity",
+            Key::Blur => "blur",
+            Key::Zoom => "zoom",
+            Key::Theme => "dock_theme",
+            Key::Dots => "dots",
+            Key::Labels => "labels",
+            Key::Bounce => "bounce",
+            Key::WebAppMode => "web_app_mode",
+            Key::Border => "border",
+            Key::BgMode => "fill",
+            Key::Mode => "hide_mode",
+            Key::Reserve => "reserve",
+            Key::Edge => "edge",
+            Key::Monitor => "monitor",
+            Key::Preview => "preview",
+            Key::ShowRunning => "show_running",
+            Key::Lock => "lock",
+            Key::Hotkey => "hotkey",
+            Key::DotStyle => "dot_style",
+            Key::PlateRadius => "plate_radius",
+            Key::BgColor1 => "color1",
+            Key::BgColor2 => "color2",
+            Key::AccentTone => "accent_tone",
+            Key::Reflect => "reflect",
+            Key::Clock => "clock",
+            Key::FolderFan => "folder_fan",
+            Key::MinAnim => "min_anim",
+            Key::Notes => "notes",
+            Key::UiTheme => "settings_theme",
+            Key::Numeric(i) => NUMERIC_KEYS[i as usize].0,
+        }
+    }
+
+    /// 上游（C 版）的键名。**只**用于读旧配置文件。
+    ///
+    /// 保留它的唯一目的是让老配置能原地升级：`from_ini` 在新名下找不到
+    /// 就回退到 `[Settings]` 段里的这个名字。新代码不该再用它。
+    #[must_use]
+    pub const fn legacy_name(self) -> &'static str {
         match self {
             Key::IconSize => "IconSize",
             Key::ZoomSize => "ZoomSize",
@@ -330,6 +475,7 @@ impl Key {
             Key::MinAnim => "MinAnim",
             Key::Notes => "Notes",
             Key::UiTheme => "UiTheme",
+            // 数值键没改名，新旧同名。
             Key::Numeric(i) => NUMERIC_KEYS[i as usize].0,
         }
     }
@@ -338,10 +484,18 @@ impl Key {
     #[must_use]
     pub fn from_name(s: &str) -> Option<Self> {
         let s = s.trim();
+        // 新名优先，再回退到上游的驼峰名：手写配置、从 C 版抄过来的
+        // 片段、以及我们自己生成的两种格式都要认。
         Self::ALL
             .iter()
             .copied()
             .find(|k| k.name().eq_ignore_ascii_case(s))
+            .or_else(|| {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| k.legacy_name().eq_ignore_ascii_case(s))
+            })
     }
 
     /// 加载时的**硬夹紧**区间 `(min, max)`。这是安全边界，不是 UI 提示范围。
@@ -819,8 +973,13 @@ impl Config {
     #[must_use]
     pub fn from_ini(ini: &Ini, dpi: i32) -> Self {
         let mut cfg = Self::defaults(dpi);
-        if ini.get("Settings", "BgMode").is_none() {
-            if let Some(frost) = ini.get_i32("Settings", "Frost") {
+        // 1.x 的 `Frost` 是 `BgMode` 的前身。判"该不该看 Frost"要同时看
+        // 两种格式：只看旧段的话，新格式文件（有 `fill`、没有 `BgMode`）
+        // 会被误判成 1.x 文件，`Frost` 值反而盖掉 `fill`。
+        let has_fill = ini.get("appearance.background", "fill").is_some()
+            || ini.get(LEGACY_SECTION, "BgMode").is_some();
+        if !has_fill {
+            if let Some(frost) = ini.get_i32(LEGACY_SECTION, "Frost") {
                 cfg.bg_mode = if frost != 0 {
                     BgMode::Frost
                 } else {
@@ -828,8 +987,15 @@ impl Config {
                 };
             }
         }
+        // 读的时候**两种格式都认**：新格式优先，找不到再回退到上游的
+        // `[Settings]` + 驼峰名。于是老配置拿过来就能直接用，
+        // 下一次保存时自动变成新格式 —— 不需要单独的迁移步骤，
+        // 也就不会出现"迁移失败但旧文件已被覆盖"这种事。
         for key in Key::ALL.iter().copied() {
-            if let Some(raw) = ini.get("Settings", key.name()) {
+            let found = ini
+                .get(key.section(), key.name())
+                .or_else(|| ini.get(LEGACY_SECTION, key.legacy_name()));
+            if let Some(raw) = found {
                 // Windows profile API 对非数字返回 0；这里保持同样行为，
                 // 但**不**把"解析失败"当成 0 悄悄用下去 —— 夹紧会兜住它。
                 let v = raw.trim().parse::<i32>().unwrap_or(0);
@@ -843,12 +1009,38 @@ impl Config {
 
     /// 写回 `[Settings]`，保留其它段与未知键。
     pub fn write_ini(&self, ini: &mut Ini) {
+        // 版本号让人一眼看出这是第几代格式。读取其实不依赖它（靠键名回退
+        // 判断），但排查配置时省事。
+        ini.set_i32(META_SECTION, "version", CONFIG_VERSION);
         for key in Key::ALL.iter().copied() {
-            ini.set_i32("Settings", key.name(), self.get_i32(key));
+            ini.set_i32(key.section(), key.name(), self.get_i32(key));
         }
         // 自动时写空串而不是删键：删掉会让"手动改成自动"在文件里看不出痕迹，
         // 排查用户配置时容易误判成"从没设置过"。
         ini.set("Graphics", "Adapter", &self.adapter);
+    }
+
+    /// 把上游格式就地升级为当前格式，返回是否发生了升级。
+    ///
+    /// 做法是"读 → 删旧段 → 按新格式重写"。不用单独的迁移工具：
+    /// 用户不需要知道有这回事，打开一次就升级完了。
+    ///
+    /// 判定条件是"没有 `[meta] version` 且 `[Settings]` 非空"：
+    /// 只看 `[Settings]` 会把新格式文件里的 `[Items]` 误判 —— 条目段
+    /// 一直叫这个名字，两代格式共用。
+    pub fn upgrade_legacy(ini: &mut Ini, dpi: i32) -> bool {
+        if ini.get(META_SECTION, "version").is_some() {
+            return false;
+        }
+        if ini.len_of(LEGACY_SECTION) == 0 {
+            return false;
+        }
+        let cfg = Self::from_ini(ini, dpi);
+        // 先删旧段再写：留着的话文件里会有两套等价的键，
+        // 读的时候新格式优先，但人看文件会以为配置重复了。
+        ini.remove_section(LEGACY_SECTION);
+        cfg.write_ini(ini);
+        true
     }
 
     /// Dock 主题解析：`System` 时跟随系统。
@@ -1042,7 +1234,9 @@ mod tests {
     /// 行序不一致会产生无意义的 diff。
     #[test]
     fn key_list_matches_upstream_order() {
-        let names: Vec<&str> = Key::ALL.iter().map(|k| k.name()).collect();
+        // 用**上游名**比对：顺序仍要与 C 版一致，这样两边来回读写时
+        // 行序稳定、diff 干净。新名是否唯一由下一个测试保证。
+        let names: Vec<&str> = Key::ALL.iter().map(|k| k.legacy_name()).collect();
         assert_eq!(names.len(), 76, "上游 v1.4.0 是 76 个键");
         // 抽查几个位置：顺序错了这里就会红。
         assert_eq!(names[0], "IconSize");
@@ -1188,14 +1382,208 @@ mod tests {
         ];
         assert_eq!(Key::ALL.len(), UPSTREAM.len());
         for (i, name) in UPSTREAM.iter().enumerate() {
-            assert_eq!(Key::ALL[i].name(), *name, "第 {i} 个键对不上");
+            assert_eq!(Key::ALL[i].legacy_name(), *name, "第 {i} 个键对不上");
         }
         // 名字必须唯一，否则 from_name 会静默取第一个。
+        // 新旧两套名字**各自**都要唯一。
         for (i, k) in Key::ALL.iter().enumerate() {
             for other in &Key::ALL[i + 1..] {
-                assert_ne!(k.name(), other.name());
+                assert_ne!(k.name(), other.name(), "新名重复");
+                assert_ne!(k.legacy_name(), other.legacy_name(), "上游名重复");
             }
         }
+    }
+
+    /// 上游格式（单 `[Settings]` + 驼峰名）必须能直接读。
+    ///
+    /// 这是"老用户把 C 版的 ini 拿过来就能用"的保证。
+    #[test]
+    fn legacy_settings_section_still_loads() {
+        let mut ini = Ini::new();
+        ini.set_i32(LEGACY_SECTION, "IconSize", 64);
+        ini.set_i32(LEGACY_SECTION, "Mode", 2);
+        ini.set_i32(LEGACY_SECTION, "BgMode", 0);
+        let c = Config::from_ini(&ini, 96);
+        assert_eq!(c.icon_size, 64);
+        assert_eq!(c.mode, DockMode::SmartHide);
+        assert_eq!(c.bg_mode, BgMode::Solid);
+    }
+
+    /// 新格式写出来按语义分段，且带版本号。
+    #[test]
+    fn write_ini_uses_semantic_sections() {
+        let mut c = Config::defaults(96);
+        c.icon_size = 64;
+        c.mode = DockMode::AutoHide;
+        let mut ini = Ini::new();
+        c.write_ini(&mut ini);
+
+        assert_eq!(
+            ini.get(META_SECTION, "version"),
+            Some(CONFIG_VERSION.to_string().as_str())
+        );
+        assert_eq!(ini.get("appearance", "icon_size"), Some("64"));
+        assert_eq!(ini.get("layout", "hide_mode"), Some("1"));
+        // 不该再往旧的 [Settings] 里写任何东西。
+        assert!(ini.get(LEGACY_SECTION, "IconSize").is_none());
+    }
+
+    /// 迁移的核心保证：**同一份配置，旧格式读进来与新格式读进来完全等价**。
+    ///
+    /// 只断言"能读"不够 —— 键名映射错一位、分区写错一处，
+    /// 都会表现为某个设置在升级后悄悄变回默认值。这里逐键比对。
+    #[test]
+    fn legacy_and_new_formats_agree_on_every_key() {
+        let dpi = 144;
+        // 先把每个键都改成非默认值，避免"恰好等于默认值"掩盖映射错误。
+        let mut want = Config::defaults(dpi);
+        for key in Key::ALL.iter().copied() {
+            let (lo, hi) = key.range();
+            let cur = want.get_i32(key);
+            // 取一个与当前值不同的合法值。
+            let v = if cur == lo { hi } else { lo };
+            want.apply_i32(key, v);
+        }
+        want.clamp();
+
+        // 用旧格式写一份（手工拼，模拟上游文件）。
+        let mut legacy = Ini::new();
+        for key in Key::ALL.iter().copied() {
+            legacy.set_i32(LEGACY_SECTION, key.legacy_name(), want.get_i32(key));
+        }
+        let from_legacy = Config::from_ini(&legacy, dpi);
+
+        // 用新格式写一份再读回来。
+        let mut fresh = Ini::new();
+        want.write_ini(&mut fresh);
+        let from_new = Config::from_ini(&fresh, dpi);
+
+        for key in Key::ALL.iter().copied() {
+            assert_eq!(
+                from_legacy.get_i32(key),
+                from_new.get_i32(key),
+                "键 {} 在新旧格式下取值不同",
+                key.name()
+            );
+        }
+    }
+
+    /// 升级是"读到就自动升级"：读旧文件 → 保存 → 落盘已是新格式。
+    #[test]
+    fn saving_after_legacy_load_produces_new_format() {
+        let mut legacy = Ini::new();
+        legacy.set_i32(LEGACY_SECTION, "IconSize", 64);
+        let c = Config::from_ini(&legacy, 96);
+
+        let mut out = Ini::new();
+        c.write_ini(&mut out);
+        assert_eq!(out.get("appearance", "icon_size"), Some("64"));
+        assert_eq!(out.get(META_SECTION, "version"), Some("2"));
+    }
+
+    /// 每个键的段名都得是合法且已知的段，否则写出来的文件会散成
+    /// 一堆拼写错误的小段，人看不出哪个键属于哪。
+    #[test]
+    fn every_key_has_a_known_section() {
+        const KNOWN: &[&str] = &[
+            "appearance",
+            "appearance.background",
+            "appearance.plate",
+            "appearance.reflect",
+            "layout",
+            "behavior",
+            "behavior.group",
+            "theme",
+            "widgets.clock",
+            "menu",
+            "advanced",
+        ];
+        for key in Key::ALL.iter().copied() {
+            let sec = key.section();
+            assert!(
+                KNOWN.contains(&sec),
+                "键 {} 的段 {sec} 不在已知列表里",
+                key.name()
+            );
+        }
+    }
+
+    /// 数值键按前缀归类，抽查几个最容易归错的。
+    #[test]
+    fn numeric_keys_land_in_sensible_sections() {
+        let by_name = |want: &str| {
+            Key::ALL
+                .iter()
+                .copied()
+                .find(|k| k.legacy_name() == want)
+                .unwrap_or_else(|| panic!("找不到键 {want}"))
+        };
+        assert_eq!(by_name("PlateMode").section(), "appearance.plate");
+        assert_eq!(by_name("GradAngle").section(), "appearance.background");
+        assert_eq!(by_name("BgColor3").section(), "appearance.background");
+        assert_eq!(by_name("ReflSize").section(), "appearance.reflect");
+        assert_eq!(by_name("ClockShow").section(), "widgets.clock");
+        assert_eq!(by_name("DateFmt").section(), "widgets.clock");
+        assert_eq!(by_name("FanArc").section(), "behavior.group");
+        assert_eq!(by_name("GroupFrost").section(), "behavior.group");
+        assert_eq!(by_name("MnAuto").section(), "menu");
+        assert_eq!(by_name("MenuTheme").section(), "menu");
+        assert_eq!(by_name("Browser").section(), "advanced");
+        assert_eq!(by_name("BorderColor").section(), "appearance");
+    }
+
+    /// 升级：旧格式就地变新格式，且**所有值都不丢**。
+    ///
+    /// 这是"老用户升级后设置全乱"这类事故的唯一防线 ——
+    /// 升级完逐键比对，任何一个键变回默认值都会红。
+    #[test]
+    fn upgrade_legacy_keeps_every_value() {
+        let dpi = 144;
+        let mut want = Config::defaults(dpi);
+        for key in Key::ALL.iter().copied() {
+            let (lo, hi) = key.range();
+            let v = if want.get_i32(key) == lo { hi } else { lo };
+            want.apply_i32(key, v);
+        }
+        want.clamp();
+
+        // 造一份上游格式的文件。
+        let mut ini = Ini::new();
+        for key in Key::ALL.iter().copied() {
+            ini.set_i32(LEGACY_SECTION, key.legacy_name(), want.get_i32(key));
+        }
+        ini.set("Items", "Count", "1");
+        ini.set("Items", "I0", "0|0|记事本|C:/Windows/notepad.exe||0|");
+
+        assert!(Config::upgrade_legacy(&mut ini, dpi), "应当报告发生了升级");
+
+        // 旧段应当被清掉，新段就位，版本号写上。
+        assert_eq!(ini.len_of(LEGACY_SECTION), 0, "旧段没删干净");
+        assert_eq!(ini.get(META_SECTION, "version"), Some("2"));
+        // 条目段必须原样保留 —— 升级只管配置，不碰条目。
+        assert_eq!(ini.get("Items", "Count"), Some("1"));
+
+        let after = Config::from_ini(&ini, dpi);
+        for key in Key::ALL.iter().copied() {
+            assert_eq!(
+                after.get_i32(key),
+                want.get_i32(key),
+                "升级后键 {} 的值变了",
+                key.name()
+            );
+        }
+
+        // 再来一次不该重复动作。
+        assert!(!Config::upgrade_legacy(&mut ini, dpi), "已经是新格式了");
+    }
+
+    /// 新格式文件不该被当成旧格式升级。
+    #[test]
+    fn upgrade_legacy_ignores_new_format() {
+        let mut ini = Ini::new();
+        Config::defaults(96).write_ini(&mut ini);
+        ini.set("Items", "Count", "1");
+        assert!(!Config::upgrade_legacy(&mut ini, 96));
     }
 
     #[test]
@@ -1215,16 +1603,16 @@ mod tests {
     #[test]
     fn legacy_frost_key_migrates() {
         let mut ini = Ini::new();
-        ini.set("Settings", "Frost", "1");
+        ini.set(LEGACY_SECTION, "Frost", "1");
         assert_eq!(Config::from_ini(&ini, 96).bg_mode, BgMode::Frost);
 
         let mut ini = Ini::new();
-        ini.set("Settings", "Frost", "0");
+        ini.set(LEGACY_SECTION, "Frost", "0");
         assert_eq!(Config::from_ini(&ini, 96).bg_mode, BgMode::Solid);
 
         // 新键优先：同时存在时以 BgMode 为准。
         let mut ini = Ini::new();
-        ini.set("Settings", "Frost", "1");
+        ini.set(LEGACY_SECTION, "Frost", "1");
         ini.set("Settings", "BgMode", "0");
         assert_eq!(Config::from_ini(&ini, 96).bg_mode, BgMode::Solid);
     }

@@ -35,6 +35,55 @@
 
 ---
 
+## 0.2.0 — 配置格式 v2（2026-10-30）
+
+「去除对上游依赖」的第一步：配置不再照抄上游的键名与分段。
+**上游格式仍可直接读，打开一次就就地升级，值一个都不会丢。**
+
+### 变更（对外契约）
+
+- 配置按**语义分段**：`[appearance]` / `[appearance.background]` /
+  `[appearance.plate]` / `[appearance.reflect]` / `[layout]` / `[behavior]` /
+  `[behavior.group]` / `[theme]` / `[widgets.clock]` / `[menu]` /
+  `[advanced]`，取代上游的单 `[Settings]`。
+- 键名改小写下划线。两处是修正真实歧义：
+  `Mode` → `hide_mode`（原名看不出是"隐藏方式"，与 `BgMode` 混淆）、
+  `BgMode` → `fill`（控制的是填充方式，不是开关）。
+- 写盘带 `[meta] version=2`。
+- 数值键（41 个，多对应未实现功能）**只分区不改名** —— 等做扇面/组时
+  连同语义一起定，避免现在拍脑袋。
+
+### 新增
+
+- `Config::upgrade_legacy()`：读到上游格式就就地升级（删旧段 → 按新格式重写）。
+- `Config::from_ini` 双格式兼容：新段 + 新键名优先，回退 `[Settings]` + 驼峰名。
+- `Key::section()` / `Key::legacy_name()` / `Config::CONFIG_VERSION`。
+- `from_name` 同时认新旧两套键名（手写配置、从 C 版抄来的片段都能用）。
+
+### 测试（+8）
+
+核心是 `legacy_and_new_formats_agree_on_every_key`：把**每个键**都改成
+非默认值，分别用新旧格式写出读回、逐键比对 —— 键名映射错一位就会红。
+另有升级不丢值、升级后不重复迁移、每个键的段名合法、数值键归类正确。
+
+### 实测
+
+上游格式 ini（`IconSize=64 Mode=2 BgMode=0 Edge=1 Opacity=80 Clock=1`）
+启动后：日志「配置已从上游格式升级到 v2」，`S=64.0 Z=100.0 clockW=249`
+全部取自旧值；落盘为 `[meta] version=2` + `[appearance] icon_size=64`，
+`[Settings]` 消失，`[Items]` 保留；二次启动不重复迁移。
+
+质量门禁：197 条测试、`clippy -D warnings`、`fmt --check` 全绿。
+
+### 已知
+
+- `write_ini` 此前从未被调用，现在也只有"升级"这一条路径会写。
+  设置窗口接入后才有连续写回。
+- 段顺序按首次出现排列，升级后的文件里 `[Items]` 会排在 `[meta]` 之前。
+  不影响解析，等设置窗口落地时统一排序。
+
+---
+
 ## 0.1.10 — 配置热更新（2026-10-30）
 
 条目列表改动现在即时生效，不用重启。窗口尺寸从建窗起第一次变得可变。

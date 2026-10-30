@@ -39,17 +39,29 @@ fn main() {
         "IconSize={} ZoomSize={} Clock={}",
         cfg.icon_size, cfg.zoom_size, cfg.clock
     );
+    // 新旧两种格式都列：一眼看出这份文件是哪一代。
     println!(
-        "[Settings] 共 {} 键 / [Items] 共 {} 键",
-        ini.len_of("Settings"),
+        "[meta] 键数={} / [Settings] 旧段键数={} / [Items] 键数={}",
+        ini.len_of(minidock_core::config::META_SECTION),
+        ini.len_of(minidock_core::config::LEGACY_SECTION),
         ini.len_of("Items")
+    );
+    println!(
+        "格式版本={:?}（{} = 新格式）",
+        ini.get(minidock_core::config::META_SECTION, "version"),
+        minidock_core::config::CONFIG_VERSION
     );
 
     // 原样值：解析结果为默认值时分不清"没读到"和"认不出"，这里补上。
-    for key in ["Edge", "Mode", "Reserve", "IconSize", "Count"] {
-        let sec = if key == "Count" { "Items" } else { "Settings" };
-        println!("raw {key}={:?}", ini.get(sec, key));
+    // 新旧两套键名都打，直接看出走的是哪条分支。
+    for key in ["layout/hide_mode", "layout/edge", "appearance/icon_size"] {
+        let (sec, k) = key.split_once('/').expect("带货");
+        println!("raw {sec}.{k}={:?}", ini.get(sec, k));
     }
+    for key in ["Mode", "Edge", "IconSize"] {
+        println!("raw Settings.{key}(旧)={:?}", ini.get("Settings", key));
+    }
+    println!("raw Items.Count={:?}", ini.get("Items", "Count"));
 
     let items = store::load_items(&ini);
     println!("解析出 {} 个条目", items.len());
