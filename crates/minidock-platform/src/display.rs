@@ -116,6 +116,27 @@ pub fn work_area(index: i32) -> Rect {
     list[idx].work
 }
 
+/// 取第 `index` 个显示器的**完整**区域（含任务栏）。
+///
+/// 与 [`work_area`] 的区别只在 AppBar 上体现：`SHAppBarMessage` 是在整个
+/// 屏幕上切一条，不是在 `rcWork` 里切。传错会算出一条"两次都扣掉任务栏高度"
+/// 的窄条，表现为 Dock 比预期矮一半。
+#[must_use]
+pub fn monitor_rect(index: i32) -> Rect {
+    let list = monitors();
+    list.first().map_or_else(
+        || Rect::new(0, 0, 1920, 1080),
+        |_| {
+            let idx = if index >= 0 && (index as usize) < list.len() {
+                index as usize
+            } else {
+                0
+            };
+            list[idx].rect
+        },
+    )
+}
+
 /// 系统 DPI（见 [`crate::win::system_dpi`] 的说明，为什么要单列一个导出）。
 #[must_use]
 pub fn system_dpi() -> i32 {

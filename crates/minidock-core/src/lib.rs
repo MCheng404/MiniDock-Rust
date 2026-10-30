@@ -10,11 +10,14 @@
 
 #![deny(missing_debug_implementations)]
 
+pub mod clock;
 pub mod color;
 pub mod config;
+pub mod icon;
 pub mod ini;
 pub mod item;
 pub mod layout;
+pub mod running;
 pub mod store;
 pub mod units;
 

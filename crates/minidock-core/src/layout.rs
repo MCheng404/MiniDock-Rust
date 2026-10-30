@@ -40,6 +40,91 @@ impl Rect {
     }
 }
 
+/// 启动弹跳的持续时间（毫秒），对应 C 版 `BounceOff` 里的 `1100`。
+pub const BOUNCE_MS: u64 = 1100;
+
+/// 启动弹跳的偏移量（逻辑像素，向栏体外侧为正）。
+///
+/// 曲线照抄 C 版 `BounceOff()`：
+///
+/// ```text
+/// x = t / 1100
+/// off = |sin(x · 2π)| · (1 − x · 0.55) · S · 0.48
+/// ```
+///
+/// 也就是**两次**完整弹跳（`|sin|` 让它在 0.5 与 1.0 处各达到峰值），
+/// 幅度按 `1 − 0.55x` 线性衰减。返回 0 表示这一帧不动画。
+///
+/// `S` 参与计算意味着高 DPI 下弹得更高 —— 与图标尺寸同比，观感才一致。
+#[must_use]
+pub fn bounce_offset(elapsed_ms: u64, s: f32) -> f32 {
+    if elapsed_ms >= BOUNCE_MS {
+        return 0.0;
+    }
+    let x = elapsed_ms as f32 / BOUNCE_MS as f32;
+    let phase = x * std::f32::consts::PI * 2.0;
+    phase.sin().abs() * (1.0 - x * 0.55) * s * 0.48
+}
+
+/// 这一帧是否需要继续推进弹跳动画。
+#[must_use]
+pub fn bounce_active(elapsed_ms: u64) -> bool {
+    elapsed_ms < BOUNCE_MS
+}
+
+/// Dock 窗口左上角的屏幕坐标（物理像素）。
+///
+/// 对应 C 版 `UpdateGeometry()` 末尾那段 `switch (cfg.edge)`。
+///
+/// `reserved` 是 AppBar 实际拿到的那块矩形（`None` = 没预留桌面空间）。
+/// 预留成功后窗口要**贴在预留区边上**，否则栏体会和"被让出来的桌面"
+/// 差一截，最大化窗口下沿会盖住 Dock。
+///
+/// 竖直方向（左/右停靠）时窗口尺寸是 `(lh, lw)`，调用方负责传入正确的
+/// `win_w` / `win_h` —— 这里只做定位，不猜尺寸。
+#[must_use]
+pub fn window_origin(
+    edge: Edge,
+    work: Rect,
+    reserved: Option<Rect>,
+    win_w: i32,
+    win_h: i32,
+) -> (i32, i32) {
+    let center_x = work.left + (work.width() - win_w) / 2;
+    let center_y = work.top + (work.height() - win_h) / 2;
+    match edge {
+        // 横排：水平居中，纵向贴顶或贴底。
+        Edge::Top => (center_x, reserved.map_or(work.top, |r| r.top)),
+        Edge::Bottom => (center_x, reserved.map_or(work.bottom, |r| r.bottom) - win_h),
+        // 竖排：垂直居中，横向贴左或贴右。
+        Edge::Left => (reserved.map_or(work.left, |r| r.left), center_y),
+        Edge::Right => (reserved.map_or(work.right, |r| r.right) - win_w, center_y),
+    }
+}
+
+/// 窗口的物理尺寸：横排是 `(lw, lh)`，竖排要转置成 `(lh, lw)`。
+///
+/// C 版是 `int ww = Horiz() ? LW : LH, hh = Horiz() ? LH : LW;`，
+/// 这里独立成函数是因为它被"建窗口"和"AppBar 厚度"两处共用，
+/// 抄错一次就会出现竖排 Dock 只有一条细缝的情况。
+#[must_use]
+pub fn physical_size(edge: Edge, lw: i32, lh: i32) -> (i32, i32) {
+    if edge.is_horizontal() {
+        (lw, lh)
+    } else {
+        (lh, lw)
+    }
+}
+
+/// AppBar 需要预留的厚度（物理像素）。
+///
+/// C 版是 `(int)(M.barH + M.margin + 4)`：栏体 + 下方留白 + 4 px 余量。
+/// 多出的 4 px 是为了让"最大化窗口的下沿"不贴住栏体边缘。
+#[must_use]
+pub fn reserve_thickness(bar_h: f32, margin: f32) -> i32 {
+    (bar_h + margin + 4.0) as i32
+}
+
 /// 一帧的度量结果。对应 C 版全局 `Metrics M` + `g_ce` / `g_clockW` / `g_reflH`。
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Metrics {
@@ -443,7 +528,10 @@ pub fn base_centers(m: &Metrics, kinds: &[SlotKind], clock_extra: f32) -> Vec<f3
 /// 一帧的交互状态。三个字段总是一起出现，打包后调用点也更好读。
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct View {
-    /// 鼠标在**逻辑坐标**下的位置；横坐标为负表示不在窗口内。
+    /// 鼠标位置，单位与 `Metrics` 一致（**物理像素**）；横坐标为负表示不在窗口内。
+    ///
+    /// 必须与 `slots.slot_l` / `base_c` 同单位，否则命中与放大权重都会偏移
+    /// 一个 DPI 缩放因子。
     pub mouse: (f32, f32),
     /// 鼠标是否在窗口内。
     pub hover: bool,
@@ -736,6 +824,119 @@ mod tests {
     ///
     /// 放大后相邻图标会重叠，两个都覆盖鼠标点时 C 版选左边那个。
     /// 我们早期实现取最近，与 C 版不一致，命中会差一个图标。
+    /// 弹跳曲线：起止为 0、中途有峰、幅度单调衰减。
+    ///
+    /// 这是"点击启动后图标弹一下"的观感基础。把公式抄错（比如漏掉
+    /// `|sin|` 就会变成半个正弦，图标只会晃一次）不会崩，只会让动效变怪。
+    #[test]
+    fn bounce_curve_starts_and_ends_at_zero() {
+        let s = 52.0;
+        assert_eq!(bounce_offset(0, s), 0.0, "起点必须为 0，否则会瞬移");
+        assert_eq!(bounce_offset(BOUNCE_MS, s), 0.0, "结束必须为 0");
+        assert_eq!(bounce_offset(BOUNCE_MS + 500, s), 0.0, "超出时长后恒为 0");
+        assert!(!bounce_active(BOUNCE_MS));
+    }
+
+    /// 峰值出现在 `|sin|` 的极值处（x = 0.25 / 0.75），且第二次低于第一次。
+    #[test]
+    fn bounce_has_two_decaying_peaks() {
+        let s = 52.0;
+        let p1 = bounce_offset(BOUNCE_MS / 4, s);
+        let p2 = bounce_offset(BOUNCE_MS * 3 / 4, s);
+        assert!(p1 > 0.0 && p2 > 0.0);
+        assert!(p1 > p2, "第二峰应当衰减：{p1} vs {p2}");
+        // 峰值约为 S·0.48·衰减系数：第一次 ≈ 52*0.48*0.8625 ≈ 21.5。
+        assert!((p1 - s * 0.48 * 0.8625).abs() < 0.5, "峰值 {p1} 与公式不符");
+    }
+
+    /// 偏移始终非负：曲线用来"往外弹"，方向由绘制端决定（减还是加）。
+    #[test]
+    fn bounce_offset_is_never_negative() {
+        for t in (0..BOUNCE_MS).step_by(17) {
+            assert!(bounce_offset(t, 52.0) >= 0.0, "t={t}");
+        }
+    }
+
+    /// 四条边的定位规则（对应 C 版 `UpdateGeometry` 末尾那个 switch）。
+    ///
+    /// 底边是最常走的路径，但其余三条写错了不会崩、只会把 Dock 送到屏幕上
+    /// 某个奇怪的位置，所以四条一起测。
+    #[test]
+    fn window_origin_places_the_dock_on_each_edge() {
+        let work = Rect::new(0, 0, 1920, 1040);
+        let (w, h) = (800, 100);
+
+        // 无预留：贴工作区边。
+        assert_eq!(
+            window_origin(Edge::Bottom, work, None, w, h),
+            (560, 940),
+            "底边：水平居中 + 贴底"
+        );
+        assert_eq!(window_origin(Edge::Top, work, None, w, h), (560, 0));
+        assert_eq!(window_origin(Edge::Left, work, None, w, h), (0, 470));
+        assert_eq!(window_origin(Edge::Right, work, None, w, h), (1120, 470));
+
+        // 正常预留：AppBar 是从 `rcWork` **内部**切走一块，两者共享同一条外边，
+        // 所以窗口位置其实不变 —— 变的是**别的窗口**能不能用这块地方。
+        // 这一点很容易误解成"预留后 Dock 会挪位置"，进而把两个坐标系搞混。
+        let bottom_bar = Rect::new(0, 948, 1920, 1040);
+        assert_eq!(
+            window_origin(Edge::Bottom, work, Some(bottom_bar), w, h),
+            (560, 940),
+            "正常预留不改变窗口位置，只改变 rcWork"
+        );
+        let top_bar = Rect::new(0, 0, 1920, 92);
+        assert_eq!(
+            window_origin(Edge::Top, work, Some(top_bar), w, h),
+            (560, 0)
+        );
+        let left_bar = Rect::new(0, 0, 92, 1040);
+        assert_eq!(
+            window_origin(Edge::Left, work, Some(left_bar), w, h),
+            (0, 470)
+        );
+        let right_bar = Rect::new(1828, 0, 1920, 1040);
+        assert_eq!(
+            window_origin(Edge::Right, work, Some(right_bar), w, h),
+            (1120, 470),
+            "右侧预留：窗口右边贴预留区右边"
+        );
+    }
+
+    /// 预留区被别的工具栏挤过时，窗口要跟着让，不能还按 `rcWork` 定位。
+    ///
+    /// `ABM_QUERYPOS` 会把请求的矩形调整到"实际能给"的位置，所以
+    /// `ab.rc` 不一定贴着工作区外边。此时若仍用 `rcWork` 算坐标，
+    /// Dock 会压到邻居的地盘上 —— 两个 AppBar 叠在一起。
+    #[test]
+    fn window_origin_prefers_the_reserved_rect() {
+        let work = Rect::new(0, 0, 1920, 1040);
+        // AppBar 实际只拿到一窄条（被别的工具栏挤过）。
+        let squeezed = Rect::new(0, 1000, 1920, 1020);
+        assert_eq!(
+            window_origin(Edge::Bottom, work, Some(squeezed), 800, 100),
+            (560, 920)
+        );
+    }
+
+    /// 竖排时窗口尺寸要转置，否则 Dock 只有一条细缝。
+    #[test]
+    fn physical_size_transposes_on_vertical_edges() {
+        assert_eq!(physical_size(Edge::Bottom, 1181, 186), (1181, 186));
+        assert_eq!(physical_size(Edge::Top, 1181, 186), (1181, 186));
+        assert_eq!(physical_size(Edge::Left, 1181, 186), (186, 1181));
+        assert_eq!(physical_size(Edge::Right, 1181, 186), (186, 1181));
+    }
+
+    /// 预留厚度 = 栏高 + 留白 + 4（C 版 `(int)(M.barH + M.margin + 4)`）。
+    #[test]
+    fn reserve_thickness_matches_upstream() {
+        // 与 C 版对拍得到的实测值：barH=76, margin=12 → 92
+        assert_eq!(reserve_thickness(76.0, 12.0), 92);
+        // 截断而不是四舍五入：上游是 C 的 (int) 强转。
+        assert_eq!(reserve_thickness(76.9, 12.9), 93);
+    }
+
     #[test]
     fn hit_test_takes_first_from_left() {
         let slot_l = [100.0, 160.0, 220.0];
