@@ -1,7 +1,15 @@
 # 迁移台账
 
-上游 `minidock.c`（4799 行）是**行为基准**。这份文档记录：哪些已经迁完、
+上游 `minidock.c` 是**行为基准**。这份文档记录：哪些已经迁完、
 哪些在哪个里程碑、验收标准是什么、以及**已知会踩的坑**。
+
+> **基线说明（2026-10-31）**：本台账的里程碑与键表按 **v1.4.0**
+> （`minidock.c` 6875 行）写。上游现在已经到 **v1.6.0（9681 行）**，
+> 中间还有 v1.4.5 / v1.5.0 / v1.5.5。增量清单见
+> [第七节](#七上游-v160-增量2026-10-31-比对) —— **先读那一节再动手加功能**，
+> 它列了 23 个新配置键和一处会动到布局的结构变化。
+>
+> 两份源码放在 `D:\work\MiniDock160\{v1.4.0,v1.6.0}\minidock.c`。
 
 ## 一、原则
 
@@ -144,34 +152,40 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 ## 三、函数级台账
 
-| 子系统 | 原版函数 | Rust 目标 | 状态 |
+状态按**代码实际存在与否**标，不按计划标（2026-10-31 核对）。
+
+| 子系统 | 原版函数 | Rust 落点 | 状态 |
 |---|---|---|---|
-| 配置 | `DefaultCfg` `LoadConfig` `SaveSettingsOnly` `g_tab[]` | `core::config` | ✅ |
+| 配置 | `DefaultCfg` `LoadConfig` `SaveSettingsOnly` `g_tab[]` | `core::config` | ✅ 76 键（**v1.6.0 是 99 键**，见 §七） |
 | 条目 | `ParseItemLine` `SaveNow` `LoadItems` `SplitFields` | `core::item` `core::store` | ✅ |
-| 布局 | `CalcMetrics` `MapR` `ToLogical` `HitIndex` `Clampf` | `core::layout` | ✅ |
+| 布局 | `CalcMetrics` `MapR` `ToLogical` `HitIndex` `Clampf` | `core::layout` | ⚠️ 只建模了 v1.4.0 的单个时钟卡片（§7.3） |
 | 缩放 | `Sc` / `MulDiv` | `core::units` | ✅ |
+| 时钟文案 | `ClockLines` | `core::clock` | ✅ |
+| 运行状态 | `ScanProc` | `core::running` + `platform::app_window` | ✅ |
 | 路径 | `InitPaths` `EnsureIni` | `platform::paths` | ✅ |
 | 显示器 | `GetMon` `MonEnum` | `platform::display` | ✅ |
 | 主题 | `SystemDark` `UpdateTheme` | `platform::theme` + `core::config::dock_is_dark` | ✅ |
 | 自启动 | `GetAutostart` `SetAutostart` | `platform::theme` | ✅ |
 | 单实例 | `CreateMutexW` + `FindWindowW` | `platform::single_instance` | ✅ |
-| 设置界面 | `BuildRows` `PaintSettings` `SetProc` `RowHit` `SetSlider` `DoAct` | `settings::pages` | ✅ 9 页壳 |
-| Dock 渲染 | `RenderFrame` `DrawBar` `DrawBubbleAt` `DrawReflection` | `gpu::dock` | ⏳ M1 |
-| 画布 | `CanvasNew` `CanvasPresent` `MakeSurface` `FreeSurface` | `gpu::surface`（ADR-008 后改写） | ⏳ M1 |
-| 图标 | `LoadItemIcon` `HiconToGp` `FitBitmap` `AlphaBBox` `LetterTile` | `platform::icons` | ⏳ M2 |
-| 网址 | `IsUrlStr` `HostOf` `Fnv` `IconFileFor` `FaviconBitmap` | `platform::url` | ⏳ M2 |
-| 快捷方式 | `ReadLnk` `LnkIconBitmap` `ResolveTarget` `BuildItem` | `platform::shell` | ⏳ M2 |
-| 拖放 | `DT_*` `AcceptData` `DropPoint` `GetGlobalText` | `platform::drop` | ⏳ M2 |
-| 分组 | `KidAdd` `MergeInto` `ExtractKid` `DissolveGroup` `BuildGroupIcon` | `core::group` + `gpu::popups` | ⏳ M2 |
-| 菜单 | `ShowMenu` `MenuProc` `MenuDraw` `HandleCmd` | `gpu::menu` | ⏳ M3 |
-| 预览 | `ShowPreview` `PvProc` `PvEnum` `ClosePreview` | `gpu::preview` | ⏳ M3 |
-| 磨砂 | `UpdateFrost` `BlurPass` | `gpu::frost` | ⏳ M3 |
-| 托盘 | `AddTray` `WM_APP_TRAY` | `platform::tray` | ⏳ M4 |
-| 热键 | `RegisterHotKey` `ToggleHide` | `platform::hotkey` | ⏳ M4 |
-| AppBar | `SetupAppBar` `WM_APP_AB` | `platform::appbar` | ⏳ M4 |
-| 最小化 | `SetMinHook` `MinProc` `AnimStep` | `platform::minimize` | ⏳ M4 |
-| 动画 | `Kick` `BounceOff` `Remap` | `gpu::anim` | ⏳ M1 |
-| 设置窗口外壳 | `ShowSettings` `DarkTitle` | `gpu::settings_window` | ⏳ M1 |
+| Dock 渲染 | `RenderFrame` `DrawBar` `DrawBubbleAt` | `gpu::dock` | ✅ |
+| 倒影 | `DrawReflection` | `gpu::dock` | ❌ 未做（v1.6.0 还改成了 12 条细带，§7.5） |
+| 画布/呈现 | `CanvasNew` `CanvasPresent` `MakeSurface` | `gpu::frame` + `gpu::offscreen` + `gpu::present` | ✅ 离屏 + `UpdateLayeredWindow`（ADR-008） |
+| 图标 | `LoadItemIcon` `HiconToGp` `FitBitmap` `AlphaBBox` `LetterTile` | `platform::icon` + `core::icon` + `gpu::worker` | ✅ 含圆角/缩放，工作线程取 |
+| 网址 favicon | `IsUrlStr` `HostOf` `Fnv` `IconFileFor` `FaviconBitmap` | —— | ❌ 未做（网址条目走首字占位） |
+| 快捷方式 | `ReadLnk` `ResolveTarget` `BuildItem` | `platform::shortcut` | ✅ |
+| 拖放 | `DT_*` `AcceptData` `DropPoint` `GetGlobalText` | —— | ❌ 未做（拖进来加条目还没有） |
+| 分组 | `KidAdd` `MergeInto` `ExtractKid` `DissolveGroup` `BuildGroupIcon` | 只有序列化（`core::store`） | ❌ 交互未做，`launch` 明确返回"不支持" |
+| 菜单 | `ShowMenu` `MenuProc` `MenuDraw` `HandleCmd` | `gpu::menu` | ✅ 独立窗口 + 模态捕获（ADR-032） |
+| 预览 | `ShowPreview` `PvProc` `PvEnum` `ClosePreview` | —— | ❌ 未做（只有配置键） |
+| 磨砂 | `UpdateFrost` `BlurPass` | —— | ❌ 未做，`Frost` 退化为渐变 |
+| 托盘 | `AddTray` `WM_APP_TRAY` | —— | ❌ 未做 |
+| 热键 | `RegisterHotKey` `ToggleHide` | `bin/dock.rs` | ✅ `Ctrl+Alt+D` |
+| AppBar | `SetupAppBar` `WM_APP_AB` | `platform::appbar` | ✅ |
+| 最小化动画 | `SetMinHook` `MinProc` `AnimStep` | —— | ❌ 未做 |
+| 动画 | `Kick` `BounceOff` `Remap` | `gpu::dock`（弹跳/隐藏/放大插值） | ✅ |
+| 设置窗口外壳 | `ShowSettings` `DarkTitle` | `gpu::settings_win` | ✅ |
+| 设置内容 | `BuildRows` `PaintSettings` `SetProc` `RowHit` `DoAct` | `settings::pages` | ⚠️ 9 页 / 约 90 项；上游 **10 页**，且项目不全 |
+| 后台任务 | —— | `gpu::worker` | ✅ 本轮新增（ADR-037） |
 
 ## 四、风险清单
 
@@ -202,3 +216,157 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 - **跨平台**：Dock 依赖 shell/DWM/AppBar/托盘，移植到 macOS 等于重写产品。
 - **多进程架构**：单进程足够，IPC 只会增加崩溃面。
 - ~~保留 C 版兼容层~~：已于 0.2.1 删除，见 ADR-035。
+
+## 七、上游 v1.6.0 增量（2026-10-31 比对）
+
+**基线变了。** 本台账此前按 v1.4.0 写（6875 行），上游现在到 **v1.6.0
+（9681 行）**，中间还隔了 v1.4.5 / v1.5.0 / v1.5.5 三个版本。
+
+下面每个数字都是拿两份源码实际 diff 出来的，不是抄发行说明。复核方式：
+
+```bash
+cd /d/work/MiniDock160
+python - <<'PY'
+import re
+def keys(p):
+    s = open(p, encoding='utf-8', errors='replace').read()
+    return re.findall(r'L"([A-Za-z0-9_]+)"',
+                      re.search(r'g_tab\[\] = \{(.*?)\};', s, re.S).group(1))
+a, b = keys('v1.4.0/minidock.c'), keys('v1.6.0/minidock.c')
+print(len(a), '->', len(b), '新增:', [k for k in b if k not in a])
+PY
+```
+
+### 7.1 配置：76 → 99 键（+23，**一个都没删**）
+
+| 键 | 默认 | 语义 |
+|---|---|---|
+| `Launchpad` | 0 | 起动台按钮。上游在 1.4 首次运行时自动置 1 |
+| `WSide` | 0 | 小组件条带在**右**（0）/ **左**（1） |
+| `WOrder` | 0 | 0 = 时钟在前、通知在后；1 = 反过来 |
+| `NotifyW` | 0 | 通知小组件（任务栏闪烁 / 未读 → 图标红点） |
+| `FanBgL` `FanBgD` | -1 | 弧形展开的**标签背景**色（浅 / 深），-1 = 跟随主题 |
+| `FanFgL` `FanFgD` | -1 | 同上，**文字**色 |
+| `PinMenu` | 0 | 资源管理器右键菜单加「固定到 MiniDock」 |
+| `MultiMode` | 0 | 0 = 多窗口应用合并成一个图标；1 = 每个文档窗口一个 |
+| `UpdChk` | 1 | 每天自动查一次更新（只访问 GitHub Releases） |
+| `UpdLast` | 0 | 上次检查的时间戳（天） |
+| `LpCols` `LpRows` | 7 / 4 | 起动台每页列数 / 行数 |
+| `FanDrag` | 1 | 允许从弧形展开里把文件拖出来 |
+| `TrayHide` | 0 | 隐藏通知区域图标 |
+| `CtrlCenter` | 1 | 控制中心小组件 |
+| `CcEnergy` | 1 | 控制中心里额外显示「节能」磁贴 |
+| `CcHotspot` | 1 | 控制中心里额外显示「移动热点」磁贴 |
+| `ResMon` | 1 | 资源监视器小组件 |
+| `ToolW` | 1 | 计时器 / 待办小组件 |
+| `WideMask` | 0 | 位掩码，第 k 位 = 第 k 个小组件双倍宽 |
+| `ModeW` | 1 | 专注模式小组件 |
+
+**键的取值域没变**：新增的全是 0/1 或 -1..16777215，`core::config` 的
+`NUMERIC_KEYS` 表加 23 行即可，不需要新的枚举变体。
+
+### 7.2 配置段：+2，外加一个目录
+
+| 段 | 键 | 说明 |
+|---|---|---|
+| `[Tool]` | `N` / `T0..Tn` / `Total` / `Remain` | 待办条数 + 每条一行；计时器总秒数 + 剩余秒数 |
+| `[M]` | `Name` | 专注模式快照文件里存模式显示名 |
+
+**目录级变化**：`<数据目录>\profiles\<名称>.ini` —— 每个专注模式是一份完整
+配置快照。切换前把当前配置备份成 `MiniDock.ini.bak`。
+
+> 我们现在的 `Ini` 会**原样保留**不认识的段（`unknown_sections_survive_roundtrip`
+> 有测试），所以读 v1.6.0 配置不会丢数据，只是读不出来。在实现对应功能之前，
+> "保留但不解析"就是正确策略。
+
+### 7.3 结构变化：单个时钟卡片 → 小组件条带（**会动布局**）
+
+这是唯一一处会碰到我们已经"逐项对拍通过"的几何的地方。
+
+v1.4.0：
+
+```c
+g_ce = cfg.clock ? (float)g_clockW + M.g + 6 : 0;
+```
+
+v1.6.0：
+
+```c
+g_ce = 0;
+for (int k = 0; k < g_wn; k++) g_ce += (float)g_wWid[g_wk[k]] + M.g + 6;
+```
+
+最多 6 个小组件，宽度按 `M.barH` 的比例算：
+
+| 小组件 | 单倍宽 | 双倍宽 |
+|---|---|---|
+| 时钟 | `g_clockW`（算法与 v1.4.0 相同） | 不支持 |
+| 通知 | `barH * 0.92` | — |
+| 控制中心 | `barH * 0.72` | `barH * 1.6` |
+| 资源监视器 | `barH * 1.16` | `barH * 2.2` |
+| 计时器 | `barH * 0.72` | `barH * 1.6` |
+| 专注模式 | `barH * 0.72` | — |
+
+并且 `WSide=1` 时栏体整体右移 `g_ce`：
+
+```c
+bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
+```
+
+我们现在的 `Metrics::clock_w` / `clock_extra` 只建模了 v1.4.0 的单卡片情形。
+**不换成"小组件条带"模型，后面 6 个小组件一个都放不下。**
+
+### 7.4 新功能：120 个新函数
+
+`v1.4.0` 318 个函数 → `v1.6.0` 433 个。按子系统归类：
+
+| 功能 | 上游函数 | 量级 | 依赖 |
+|---|---|---|---|
+| **起动台**（全屏应用网格、分页、搜索、合并成文件夹） | `Lp*` 共 22 个 + `LpCols/LpRows` | 大 | 独立全屏窗口 + 拖放 + 图标 |
+| **控制中心**（音量滑块、磁贴、Wi‑Fi/蓝牙/热点状态） | `Cc*` 13 个 + `DrawCC` + `ShowCtrlCenter` | 大 | Core Audio（`IAudioEndpointVolume`）、Win+A 转发、`powercfg` |
+| **日历 / 农历**（农历、节气、干支、节日） | `Cal*` 7 个 + `SolarToLunar` + `L*` 5 个 + `GanzhiText` + `TermDate` | 中（纯算法） | 无 Win32，可全进 `core` |
+| **通知小组件** | `Notify*` 3 个 + `Nf*` 3 个 + `ShowNotifyList` + `DrawNotify` | 中 | 任务栏闪烁 / 未读检测 |
+| **资源监视器** | `Res*` 4 个 + `ShowResMon` | 小 | `GetSystemTimes` / `GlobalMemoryStatusEx` / `GetDiskFreeSpaceEx` |
+| **计时器 / 待办** | `Tool*` 6 个 + `ShowTool` | 小 | `[Tool]` 段 |
+| **专注模式（多布局）** | `Profile*` 5 个 + `DrawMode` + `ShowModeMenu` | 中 | `profiles\*.ini` + 整份配置切换 |
+| **动画重做**（genie 变形、飞入飞出、磨砂快照） | `Anim*` 3 个 + `Genie*` 4 个 + `Fly*` 2 个 + `FrostSnap*` 3 个 | 大 | 逐帧位图变形 |
+| **多窗口应用模式** | `ToggleWindow*` 3 个 + `IsDocApp` + `BuildWinIcon` + `SyncWin` | 中 | 文档窗口枚举 + 缩略图 |
+| **系统集成** | `PinPath` `SetPinMenu` `HideTaskbarButton` `TaskbarHidden` `TrayBalloon` | 小 | 注册表 / 托盘 |
+| **更新检查** | `StartUpdateCheck` `UpdThread` `VerNum` | 小 | 联网 + JSON 解析 |
+| **弹窗基础设施** | `PopPaint` `PopProc` `PopRun` + `ShowWidgetMenu` + `WidgetAt` | 中 | 通用弹出面板（多个小组件共用） |
+
+### 7.5 既有功能的 4 处行为变化
+
+| # | 变化 | 出处 |
+|---|---|---|
+| 1 | **最大化闪屏**：还原"最小化前是最大化"的窗口时直接 `SW_MAXIMIZE`，不再"先回原位再最大化" | `v1.6.0:5440`（`WPF_RESTORETOMAXIMIZED`） |
+| 2 | **倒影**：从两段硬接缝改成 12 条细带 + 平方衰减，连续淡出 | `v1.6.0:2803`（`const int N = 12`） |
+| 3 | **设置项搬家**：「显示图标倒影」从「小组件」页搬到「个性化」页下的「图标倒影」小节（长度/间距/浓度仍在独立的「倒影设置」子页） | `v1.6.0:7902`（`RHdr(P, L"图标倒影")`） |
+| 4 | **应用组标题栏加视图切换按钮**：当前网格就显示「列表」图标，点一下切换，状态仍写回组配置 | 发行说明；`BuildGroupIcon` 相关 |
+
+### 7.6 建议的移植顺序
+
+按"能独立验证 + 不引入新窗口"排序，先做便宜的：
+
+1. **小组件条带**（§7.3）—— 先做布局模型。工作量小，但会让 `core::layout`
+   的几何黄金测试全部重算；不先做，后面 6 个小组件一个都放不下。
+2. **资源监视器** —— 三个只读系统调用 + 一个小组件面板，是最小的端到端验证。
+3. **计时器 / 待办** —— `[Tool]` 段 + 一个面板，顺便验证"新配置段"的读写。
+4. **日历 / 农历** —— 纯算法，可以全进 `core` 并写单测（节气表、干支换算），
+   不依赖任何 Win32。
+5. **专注模式** —— 文件快照 + 一个菜单，无新窗口。
+6. **控制中心** —— 最大的一块，音量要接 Core Audio。
+7. **起动台** —— 独立全屏窗口 + 分页 + 拖放，依赖最多。
+
+**暂时不做**：更新检查（要联网 + JSON）、多窗口模式（要逐文档窗口枚举）、
+动画重做（genie 是逐帧位图变形，与我们的 egui 即时模式不搭）。
+
+### 7.7 顺带发现的两处早已存在的偏差
+
+不是 1.6.0 引入的，但既然对着源码核了一遍，一并记下来：
+
+- **设置页数**：上游 10 页（通用 / 个性化 / 位置与显示 / 交互动效 / 小组件 /
+  图标自定义 / 性能 / 配置与备份 / 关于 / 右键菜单配置），我们是 9 页且名称不同。
+  这是 M0 阶段的简化，要补的内容见 §7.4。
+- **`Metrics` 的字段名**：我们叫 `clock_w` / `clock_extra`，上游在 v1.6.0 里
+  已经泛化成 `g_wWid[]` / `g_ce`。改名建议与 §7.3 的重构一起做。
