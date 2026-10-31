@@ -156,9 +156,9 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 | 子系统 | 原版函数 | Rust 落点 | 状态 |
 |---|---|---|---|
-| 配置 | `DefaultCfg` `LoadConfig` `SaveSettingsOnly` `g_tab[]` | `core::config` | ✅ 76 键（**v1.6.0 是 99 键**，见 §七） |
+| 配置 | `DefaultCfg` `LoadConfig` `SaveSettingsOnly` `g_tab[]` | `core::config` | ✅ 99 键（v1.6.0 全量，ADR-038） |
 | 条目 | `ParseItemLine` `SaveNow` `LoadItems` `SplitFields` | `core::item` `core::store` | ✅ |
-| 布局 | `CalcMetrics` `MapR` `ToLogical` `HitIndex` `Clampf` | `core::layout` | ⚠️ 只建模了 v1.4.0 的单个时钟卡片（§7.3） |
+| 布局 | `CalcMetrics` `MapR` `ToLogical` `HitIndex` `Clampf` | `core::layout` | ✅ 含小组件条带模型（ADR-038） |
 | 缩放 | `Sc` / `MulDiv` | `core::units` | ✅ |
 | 时钟文案 | `ClockLines` | `core::clock` | ✅ |
 | 运行状态 | `ScanProc` | `core::running` + `platform::app_window` | ✅ |
@@ -239,6 +239,9 @@ PY
 
 ### 7.1 配置：76 → 99 键（+23，**一个都没删**）
 
+> **已处理（ADR-038）**：23 个键已全部进 `core::config` 的 `NUMERIC_KEYS`，
+> 键表 99 键与上游 `g_tab[]` 逐项一致。
+
 | 键 | 默认 | 语义 |
 |---|---|---|
 | `Launchpad` | 0 | 起动台按钮。上游在 1.4 首次运行时自动置 1 |
@@ -280,6 +283,12 @@ PY
 > "保留但不解析"就是正确策略。
 
 ### 7.3 结构变化：单个时钟卡片 → 小组件条带（**会动布局**）
+
+> **已处理（ADR-038）**：`core::layout::WidgetStrip` 已复刻上游的
+> `ord[]` 顺序、`WOrder` 交换、宽度公式与 `g_ce` 汇总。硬约束：
+> 只开时钟且 `WSide=0` 时几何与 v1.4.0 逐像素一致（实测 A/B 对比
+> `GEOM` 输出逐字节相同）。五个新小组件本身尚未移植，
+> 未实现的不进条带（否则栏体留白）。
 
 这是唯一一处会碰到我们已经"逐项对拍通过"的几何的地方。
 

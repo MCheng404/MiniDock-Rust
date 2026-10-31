@@ -674,7 +674,7 @@ impl Dock {
         self.metrics = m;
 
         // 基准中心：算放大权重用（必须用未放大的位置，见 `map_actual_to_base`）。
-        let base_c = layout::base_centers(&m, &kinds, m.clock_extra);
+        let base_c = layout::base_centers(&m, &kinds, m.widget_extra);
 
         // 放大动画：目标尺寸 → 指数逼近。
         let view = layout::View {
@@ -694,7 +694,7 @@ impl Dock {
 
         // 实际槽位与命中（用本帧槽位，否则气泡会比图标慢一帧）。
         let cur: Vec<f32> = self.items.iter().map(|i| i.cur).collect();
-        let slots = layout::place_slots(&m, &cur, m.clock_extra);
+        let slots = layout::place_slots(&m, &cur, m.widget_extra);
         let bars = layout::bars(&m);
         self.hot = layout::hit_test(&m, &bars, &slots, &cur, view);
 
@@ -894,15 +894,22 @@ impl Dock {
     }
 
     /// 时钟卡片：栏体 + 时间 + 日期（横向/纵向都由 `clock_w` 决定）。
+    ///
+    /// 位置取自小组件条带（`WidgetStrip::left_of`），不是硬编码的
+    /// "栏体右缘 + gap + 6" —— 那样 `WSide=1`（条带放左侧）就不起作用。
     fn paint_clock_card(&self, painter: &egui::Painter, p: Proj, dark: bool, lines: &[ClockLine]) {
         let m = &self.metrics;
-        let c = self.map(
-            self.geom.bar_l + self.geom.bar_w + m.gap + 6.0,
-            self.geom.bar_top,
-            m.clock_w as f32,
-            m.bar_h,
-            p,
-        );
+        // 条带里时钟的序号：目前条带只有时钟，它必是第 0 个。
+        let idx = m
+            .widgets
+            .iter()
+            .position(|(k, _)| k == layout::WidgetKind::Clock)
+            .unwrap_or(0);
+        let left = m
+            .widgets
+            .left_of(idx, self.geom.bar_l, self.geom.bar_w, m.gap)
+            .unwrap_or(self.geom.bar_l + self.geom.bar_w + m.gap + 6.0);
+        let c = self.map(left, self.geom.bar_top, m.clock_w as f32, m.bar_h, p);
         self.paint_bar(painter, c, self.bar_radius(p), dark);
 
         let (tc, dc) = if dark {

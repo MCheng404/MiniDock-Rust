@@ -125,6 +125,272 @@ pub fn reserve_thickness(bar_h: f32, margin: f32) -> i32 {
     (bar_h + margin + 4.0) as i32
 }
 
+/// 小组件类型。对应上游 v1.6.0 的 `enum { W_CLOCK, W_NOTIFY, W_CC, W_RES, W_TOOL, W_MODE }`。
+///
+/// **下标必须与上游一致**：`WideMask` 的位掩码是按这个序号取位的
+/// （上游 `cfg.wideMask & (1 << W_RES)`），换序会让老配置的双倍宽设置错位。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WidgetKind {
+    /// 时钟卡片（v1.4.0 就有的那个）。
+    Clock,
+    /// 通知小组件。
+    Notify,
+    /// 控制中心。
+    CtrlCenter,
+    /// 资源监视器。
+    Resource,
+    /// 计时器 / 待办。
+    Tool,
+    /// 专注模式。
+    Focus,
+}
+
+impl WidgetKind {
+    /// 上游枚举里的序号。`WideMask` 按它取位。
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        match self {
+            Self::Clock => 0,
+            Self::Notify => 1,
+            Self::CtrlCenter => 2,
+            Self::Resource => 3,
+            Self::Tool => 4,
+            Self::Focus => 5,
+        }
+    }
+
+    /// 该小组件是否**已实现**。
+    ///
+    /// 只有已实现的才进条带 —— 没实现的留出位置却画不出东西，
+    /// 栏体上就是一段空白，比不做还糟。
+    ///
+    /// 目前只有时钟。其余五个（通知 / 控制中心 / 资源监视器 / 计时器 /
+    /// 专注模式）是上游 v1.6.0 的新功能，尚未移植。
+    #[must_use]
+    pub const fn is_implemented(self) -> bool {
+        matches!(self, Self::Clock)
+    }
+
+    /// 该小组件是否被配置启用。
+    #[must_use]
+    pub fn is_enabled(self, cfg: &Config) -> bool {
+        match self {
+            Self::Clock => cfg.clock,
+            Self::Notify => cfg.get_i32(Key::NOTIFY_W) != 0,
+            Self::CtrlCenter => cfg.get_i32(Key::CTRL_CENTER) != 0,
+            Self::Resource => cfg.get_i32(Key::RES_MON) != 0,
+            Self::Tool => cfg.get_i32(Key::TOOL_W) != 0,
+            Self::Focus => cfg.get_i32(Key::MODE_W) != 0,
+        }
+    }
+
+    /// 该小组件是否被配置为双倍宽（`WideMask` 的对应位）。
+    #[must_use]
+    pub fn is_wide(self, cfg: &Config) -> bool {
+        cfg.get_i32(Key::WIDE_MASK) & (1 << self.index()) != 0
+    }
+
+    /// 该小组件的宽度（上游 `g_wWid[]`）。
+    ///
+    /// 时钟卡片不走这个公式 —— 它的宽度由内容决定（时间 / 日期的排版），
+    /// 见 [`clock_width`]。
+    #[must_use]
+    pub fn width(self, cfg: &Config, bar_h: f32) -> i32 {
+        match self {
+            Self::Clock => 0, // 由 clock_width 单独算
+            Self::Notify => (bar_h * 0.92) as i32,
+            Self::CtrlCenter => (bar_h * if self.is_wide(cfg) { 1.6 } else { 0.72 }) as i32,
+            Self::Resource => (bar_h * if self.is_wide(cfg) { 2.2 } else { 1.16 }) as i32,
+            Self::Tool => (bar_h * if self.is_wide(cfg) { 1.6 } else { 0.72 }) as i32,
+            Self::Focus => (bar_h * 0.72) as i32,
+        }
+    }
+}
+
+/// 小组件条带：栏体外侧的那一排卡片。
+///
+/// 对应上游 v1.6.0 的 `g_wk[]` / `g_wWid[]` / `g_ce`。
+///
+/// **只有时钟一个成员时，它与 v1.4.0 的行为逐像素一致** ——
+/// 这条等价是本重构的硬约束：v1.4.0 的几何已经逐项对拍通过，
+/// 不能因为上游换了模型就把它弄坏。
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct WidgetStrip {
+    /// 条带里的 widget（按上游的 `ord[]` 顺序：时钟与通知的先后由
+    /// `WOrder` 决定，其余固定在后面）。
+    pub items: [Option<(WidgetKind, i32)>; 6],
+    /// 条带成员数。
+    pub len: usize,
+    /// 条带整体占位（上游 `g_ce`）：各成员宽度 + 间距。
+    ///
+    /// v1.4.0 只有时钟时等于 `clock_w + gap + 6`。
+    pub extra: f32,
+    /// 条带在栏体的哪一侧：右（false）/ 左（true）。上游 `WSide`。
+    pub on_left: bool,
+}
+
+impl WidgetStrip {
+    /// 按上游规则构建条带（上游 v1.6.0 `CalcMetrics()` 的条带段）。
+    ///
+    /// 顺序来自上游的 `ord[]`：
+    /// `ord[6] = { wOrder ? NOTIFY : CLOCK, wOrder ? CLOCK : NOTIFY, CC, RES, TOOL, MODE }`
+    /// —— `WOrder` 只决定时钟与通知谁在前，其余四个位置固定。
+    ///
+    /// `clock_w` 是时钟卡片自己的宽度（由内容决定，不走 `width()` 公式）。
+    #[must_use]
+    pub fn build(cfg: &Config, bar_h: f32, gap: f32, clock_w: i32) -> Self {
+        let order = if cfg.get_i32(Key::W_ORDER) != 0 {
+            [
+                WidgetKind::Notify,
+                WidgetKind::Clock,
+                WidgetKind::CtrlCenter,
+                WidgetKind::Resource,
+                WidgetKind::Tool,
+                WidgetKind::Focus,
+            ]
+        } else {
+            [
+                WidgetKind::Clock,
+                WidgetKind::Notify,
+                WidgetKind::CtrlCenter,
+                WidgetKind::Resource,
+                WidgetKind::Tool,
+                WidgetKind::Focus,
+            ]
+        };
+
+        let mut items = [None; 6];
+        let mut len = 0usize;
+        let mut extra = 0.0f32;
+        for kind in order {
+            if !kind.is_enabled(cfg) || !kind.is_implemented() {
+                continue;
+            }
+            let w = if kind == WidgetKind::Clock {
+                clock_w
+            } else {
+                kind.width(cfg, bar_h)
+            };
+            items[len] = Some((kind, w));
+            len += 1;
+            // 上游：`g_ce += g_wWid[wid] + M.g + 6`。
+            extra += w as f32 + gap + 6.0;
+        }
+        Self {
+            items,
+            len,
+            extra,
+            on_left: cfg.get_i32(Key::W_SIDE) != 0,
+        }
+    }
+
+    /// 条带里某个 widget 的宽度。找不到返回 `None`。
+    #[must_use]
+    pub fn width_of(&self, kind: WidgetKind) -> Option<i32> {
+        self.items[..self.len]
+            .iter()
+            .flatten()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, w)| *w)
+    }
+
+    /// 迭代条带成员（按顺序）。
+    pub fn iter(&self) -> impl Iterator<Item = (WidgetKind, i32)> + '_ {
+        self.items[..self.len].iter().flatten().copied()
+    }
+
+    /// 条带里第 `i` 个 widget 的左边界（逻辑像素）。
+    ///
+    /// 对应上游的 `g_wU[]`：右侧时从栏体右缘往外排，左侧时从栏体左缘往左排。
+    /// `bar_l` / `bar_w` 是栏体的位置与宽度。
+    #[must_use]
+    pub fn left_of(&self, i: usize, bar_l: f32, bar_w: f32, gap: f32) -> Option<f32> {
+        self.items.get(i)?.as_ref()?;
+        let gap_w = gap + 6.0;
+        if self.on_left {
+            // 上游左侧：从栏体左缘往左倒着排。
+            // `u` 从 `bar_l - gap_w` 起，每个成员先减去自己的宽度。
+            let mut u = bar_l - gap_w;
+            for j in (0..self.len).rev() {
+                let (_, wj) = self.items[j].expect("len 之内必有值");
+                u -= wj as f32;
+                if j == i {
+                    return Some(u);
+                }
+                u -= gap_w;
+            }
+            None
+        } else {
+            // 上游右侧：从栏体右缘往外排。
+            let mut u = bar_l + bar_w + gap_w;
+            for j in 0..self.len {
+                if j == i {
+                    return Some(u);
+                }
+                u += self.items[j].expect("len 之内必有值").1 as f32 + gap_w;
+            }
+            None
+        }
+    }
+}
+
+/// 时钟卡片宽度（上游 `g_clockW`）。
+///
+/// 显示内容 `ClockShow`：0 = 都显示，1 = 只日期，2 = 只时间。
+/// 日期格式 `DateFmt`：0 = 中文（月日），1 = 短格式。
+/// `ClockWeek` / `ClockSec` 都会改变宽度。
+#[must_use]
+pub fn clock_width(cfg: &Config, dpi: i32) -> i32 {
+    if !cfg.clock {
+        return 0;
+    }
+    let has_time = cfg.get_i32(Key::CLOCK_SHOW) != 2;
+    let has_date = cfg.get_i32(Key::CLOCK_SHOW) != 1;
+    if cfg.edge.is_horizontal() {
+        let wt = if has_time {
+            units::scale(
+                if cfg.get_i32(Key::CLOCK_SEC) != 0 {
+                    92
+                } else {
+                    74
+                },
+                dpi,
+            )
+        } else {
+            0
+        };
+        let wd = if has_date {
+            let base = if cfg.get_i32(Key::DATE_FMT) == 0 {
+                if cfg.get_i32(Key::CLOCK_WEEK) != 0 {
+                    166
+                } else {
+                    124
+                }
+            } else if cfg.get_i32(Key::CLOCK_WEEK) != 0 {
+                146
+            } else {
+                110
+            };
+            units::scale(base, dpi)
+        } else {
+            0
+        };
+        wt.max(wd)
+    } else {
+        let lines = i32::from(has_time)
+            + if has_date {
+                if cfg.get_i32(Key::CLOCK_WEEK) != 0 {
+                    2
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+        units::scale(lines * 21 + 14, dpi)
+    }
+}
+
 /// 一帧的度量结果。对应 C 版全局 `Metrics M` + `g_ce` / `g_clockW` / `g_reflH`。
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Metrics {
@@ -146,9 +412,15 @@ pub struct Metrics {
     pub overhang: f32,
     /// 距屏幕边缘 + 倒影预留（`M.margin`）。
     pub margin: f32,
-    /// 时钟卡片占位（横向 = 时钟宽度 + gap + 6；纵向另有上限）。
-    pub clock_extra: f32,
-    /// 时钟卡片宽度。
+    /// 小组件条带（上游 v1.6.0 的 `g_wk[]` / `g_wWid[]` / `g_ce`）。
+    ///
+    /// v1.4.0 只有一个时钟卡片，v1.6.0 把它泛化成"一排卡片"。
+    pub widgets: WidgetStrip,
+    /// 条带整体占位：栏体要让出这么宽的地方给卡片们。
+    ///
+    /// 等于上游的 `g_ce`。v1.4.0 只有时钟时 = `clock_w + gap + 6`。
+    pub widget_extra: f32,
+    /// 时钟卡片宽度（绘制时钟卡片时要用；条带里 Clock 成员的宽度）。
     pub clock_w: i32,
     /// 倒影高度（未开启时为 0）。
     pub refl_h: f32,
@@ -235,64 +507,11 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     let margin = cfg.margin as f32 + refl_h;
     let bar_h = s + 2.0 * pad + 4.0;
 
-    // 时钟卡片宽度。上游 v1.4.0 起按"显示什么 / 什么格式"算出来，
-    // 不再是写死的两个 DPI 常量：
-    //   显示内容 `ClockShow`：0 = 都显示，1 = 只日期，2 = 只时间
-    //   日期格式 `DateFmt`：0 = 中文（月日），1 = 短格式
-    //   显示周几 `ClockWeek` / 显示秒 `ClockSec` 都会改变宽度。
-    let mut clock_w = 0;
-    if cfg.clock {
-        let has_time = cfg.get_i32(Key::CLOCK_SHOW) != 2;
-        let has_date = cfg.get_i32(Key::CLOCK_SHOW) != 1;
-        if cfg.edge.is_horizontal() {
-            let wt = if has_time {
-                units::scale(
-                    if cfg.get_i32(Key::CLOCK_SEC) != 0 {
-                        92
-                    } else {
-                        74
-                    },
-                    dpi,
-                )
-            } else {
-                0
-            };
-            let wd = if has_date {
-                let base = if cfg.get_i32(Key::DATE_FMT) == 0 {
-                    if cfg.get_i32(Key::CLOCK_WEEK) != 0 {
-                        166
-                    } else {
-                        124
-                    }
-                } else if cfg.get_i32(Key::CLOCK_WEEK) != 0 {
-                    146
-                } else {
-                    110
-                };
-                units::scale(base, dpi)
-            } else {
-                0
-            };
-            clock_w = wt.max(wd);
-        } else {
-            let lines = i32::from(has_time)
-                + if has_date {
-                    if cfg.get_i32(Key::CLOCK_WEEK) != 0 {
-                        2
-                    } else {
-                        1
-                    }
-                } else {
-                    0
-                };
-            clock_w = units::scale(lines * 21 + 14, dpi);
-        }
-    }
-    let clock_extra = if cfg.clock {
-        clock_w as f32 + gap + 6.0
-    } else {
-        0.0
-    };
+    // 小组件条带（上游 v1.6.0）。v1.4.0 只有时钟一个成员，
+    // 这里的 `extra` 恰好等于旧版的 `clock_extra`。
+    let clock_w = clock_width(cfg, dpi);
+    let widgets = WidgetStrip::build(cfg, bar_h, gap, clock_w);
+    let widget_extra = widgets.extra;
 
     // 栏体之上要留出的空间：放大溢出 + 半个图标（标签气泡）+ 固定余量。
     let mut overhang = (z - s - pad).max(0.0) + s * 0.55 + 34.0 + 8.0;
@@ -301,7 +520,7 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
         overhang += 170.0;
     }
 
-    let mut w = wb * fit + (z - s) * 6.0 + s + 260.0 + clock_extra;
+    let mut w = wb * fit + (z - s) * 6.0 + s + 260.0 + widget_extra;
     if n_items == 0 {
         w = wb + 260.0;
     }
@@ -319,7 +538,8 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
         bar_h,
         overhang,
         margin,
-        clock_extra,
+        widgets,
+        widget_extra,
         clock_w,
         refl_h,
         lw: w as i32,
@@ -511,10 +731,10 @@ pub fn base_width(m: &Metrics, kinds: &[SlotKind]) -> f32 {
 
 /// 基准中心（未放大时的槽位中心），用于算放大权重。
 ///
-/// `clock_extra` 是右侧时钟卡片的占位宽度：有它时整条栏体要左移一半。
+/// `widget_extra` 是小组件条带的占位宽度：有它时整条栏体要左移一半。
 #[must_use]
-pub fn base_centers(m: &Metrics, kinds: &[SlotKind], clock_extra: f32) -> Vec<f32> {
-    let left = (m.lw as f32 - base_width(m, kinds) - clock_extra) / 2.0;
+pub fn base_centers(m: &Metrics, kinds: &[SlotKind], widget_extra: f32) -> Vec<f32> {
+    let left = (m.lw as f32 - base_width(m, kinds) - widget_extra) / 2.0;
     let mut x = left + m.pad_x;
     let mut out = Vec::with_capacity(kinds.len());
     for &kind in kinds {
@@ -604,15 +824,15 @@ pub struct Slots {
 /// 栏宽超过可用宽度时整体截断（`max_w`），此时右端图标会被裁掉 ——
 /// 与 C 版一致：宁可裁边，也不要让栏体溢出屏幕。
 #[must_use]
-pub fn place_slots(m: &Metrics, cur: &[f32], clock_extra: f32) -> Slots {
+pub fn place_slots(m: &Metrics, cur: &[f32], widget_extra: f32) -> Slots {
     let n = cur.len();
     let total = if n == 0 {
         2.0 * m.pad_x + m.s * 4.0
     } else {
         2.0 * m.pad_x + cur.iter().sum::<f32>() + m.gap * (n - 1) as f32
     };
-    let bar_w = total.min(m.lw as f32 - 4.0 - clock_extra);
-    let bar_l = (m.lw as f32 - bar_w - clock_extra) / 2.0;
+    let bar_w = total.min(m.lw as f32 - 4.0 - widget_extra);
+    let bar_l = (m.lw as f32 - bar_w - widget_extra) / 2.0;
 
     let mut x = bar_l + m.pad_x;
     let mut slot_l = Vec::with_capacity(n);
@@ -701,7 +921,7 @@ mod tests {
         let without = calc_metrics(&c, 96, 3, 0, work());
         c.clock = true;
         let with = calc_metrics(&c, 96, 3, 0, work());
-        assert!(with.clock_extra > 0.0);
+        assert!(with.widget_extra > 0.0);
         // 上游 v1.4.0：默认同时显示时间与日期、带周几、中文日期格式
         // → 宽度取日期那一项（Sc(166)）。
         assert_eq!(with.clock_w, 166);
@@ -736,6 +956,149 @@ mod tests {
         // 短格式 + 不带周几 → Sc(110)。
         c.apply_i32(Key::CLOCK_WEEK, 0);
         assert_eq!(calc_metrics(&c, 96, 3, 0, work()).clock_w, 110);
+    }
+
+    /// 小组件条带（上游 v1.6.0）—— 只开时钟时必须与 v1.4.0 等价。
+    ///
+    /// 这是本次重构的硬约束：v1.4.0 的几何已经逐项对拍通过，
+    /// 换成条带模型后不能有一像素的差别。
+    #[test]
+    fn widget_strip_matches_v140_when_only_clock() {
+        let mut c = cfg96();
+        c.clock = true;
+        let m = calc_metrics(&c, 96, 3, 0, work());
+
+        // 条带里只有时钟一个成员。
+        assert_eq!(m.widgets.len, 1);
+        assert_eq!(m.widgets.width_of(WidgetKind::Clock), Some(166));
+
+        // v1.4.0 的 `g_ce = g_clockW + M.g + 6`。
+        let legacy = m.clock_w as f32 + m.gap + 6.0;
+        assert!(
+            (m.widget_extra - legacy).abs() < 0.01,
+            "条带占位 {} 与 v1.4.0 的 {} 不一致",
+            m.widget_extra,
+            legacy
+        );
+        // 旧的 `clock_extra` 概念已被 `widget_extra` 取代。
+        assert!((m.widget_extra - m.clock_w as f32 - m.gap - 6.0).abs() < 0.01);
+    }
+
+    /// 时钟关闭时条带为空，占位为 0。
+    #[test]
+    fn widget_strip_is_empty_without_clock() {
+        let c = cfg96();
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        assert_eq!(m.widgets.len, 0);
+        assert_eq!(m.widget_extra, 0.0);
+        assert!(m.widgets.width_of(WidgetKind::Clock).is_none());
+    }
+
+    /// 未实现的小组件不进条带 —— 否则栏体上会留出一段空白。
+    ///
+    /// 上游 v1.6.0 默认把控制中心 / 资源监视器 / 计时器 / 专注模式全打开，
+    /// 我们还没移植它们，所以这些键虽然是 1，也不该占位。
+    #[test]
+    fn unimplemented_widgets_do_not_take_space() {
+        let mut c = cfg96();
+        c.clock = true;
+        // 上游 v1.6.0 的默认值就是这些全开。
+        assert_eq!(c.get_i32(Key::CTRL_CENTER), 1);
+        assert_eq!(c.get_i32(Key::RES_MON), 1);
+        assert_eq!(c.get_i32(Key::TOOL_W), 1);
+        assert_eq!(c.get_i32(Key::MODE_W), 1);
+
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        assert_eq!(m.widgets.len, 1, "只有时钟进条带");
+        assert!(m.widgets.width_of(WidgetKind::Resource).is_none());
+        assert!(m.widgets.width_of(WidgetKind::CtrlCenter).is_none());
+    }
+
+    /// 条带在右侧时：第一个成员紧贴栏体右缘，间隔 `gap + 6`。
+    #[test]
+    fn widget_strip_positions_on_the_right() {
+        let mut c = cfg96();
+        c.clock = true;
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let strip = &m.widgets;
+        let bar_l = 100.0_f32;
+        let bar_w = 300.0_f32;
+
+        let left = strip.left_of(0, bar_l, bar_w, m.gap).expect("应当有位置");
+        assert!(
+            (left - (bar_l + bar_w + m.gap + 6.0)).abs() < 0.01,
+            "左侧条带的第一个成员应当紧贴栏体右缘，实际 {left}"
+        );
+    }
+
+    /// 条带在左侧时（`WSide=1`）：紧贴栏体左缘，往左排。
+    #[test]
+    fn widget_strip_positions_on_the_left() {
+        let mut c = cfg96();
+        c.clock = true;
+        c.apply_i32(Key::W_SIDE, 1);
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        assert!(m.widgets.on_left, "应当记为左侧条带");
+
+        let bar_l = 100.0_f32;
+        let bar_w = 300.0_f32;
+        let left = m
+            .widgets
+            .left_of(0, bar_l, bar_w, m.gap)
+            .expect("应当有位置");
+        // 上游左侧：`u = barL - gapW` 再减去自身宽度。
+        let want = bar_l - (m.gap + 6.0) - m.clock_w as f32;
+        assert!(
+            (left - want).abs() < 0.01,
+            "左侧条带位置 {left} 与预期 {want} 不符"
+        );
+    }
+
+    /// `WSide` 不改变占位宽度，只改变位置。
+    #[test]
+    fn widget_side_does_not_change_extra() {
+        let mut c = cfg96();
+        c.clock = true;
+        let right = calc_metrics(&c, 96, 3, 0, work());
+        c.apply_i32(Key::W_SIDE, 1);
+        let left = calc_metrics(&c, 96, 3, 0, work());
+        assert!(
+            (right.widget_extra - left.widget_extra).abs() < 0.01,
+            "左右两侧的占位应当相同"
+        );
+        assert_ne!(right.widgets.on_left, left.widgets.on_left);
+    }
+
+    /// 小组件宽度公式（上游 v1.6.0 `g_wWid[]`）。
+    ///
+    /// 只测已实现的时钟（宽度由内容定），其余的按公式核对，
+    /// 等移植时直接可用。
+    #[test]
+    fn widget_widths_follow_upstream_formulas() {
+        let c = cfg96();
+        let bar_h = 76.0_f32; // 上游默认栏高（48 + 2*8 + 4）
+        assert_eq!(WidgetKind::Notify.width(&c, bar_h), (bar_h * 0.92) as i32);
+        assert_eq!(
+            WidgetKind::CtrlCenter.width(&c, bar_h),
+            (bar_h * 0.72) as i32
+        );
+        assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 1.16) as i32);
+        assert_eq!(WidgetKind::Tool.width(&c, bar_h), (bar_h * 0.72) as i32);
+        assert_eq!(WidgetKind::Focus.width(&c, bar_h), (bar_h * 0.72) as i32);
+    }
+
+    /// 双倍宽由 `WideMask` 的对应位决定（位序 = 上游枚举序号）。
+    #[test]
+    fn wide_mask_doubles_widget_width() {
+        let mut c = cfg96();
+        let bar_h = 76.0_f32;
+        assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 1.16) as i32);
+        // 第 3 位 = W_RES（上游枚举：CLOCK=0 NOTIFY=1 CC=2 RES=3）。
+        c.apply_i32(Key::WIDE_MASK, 1 << 3);
+        assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 2.2) as i32);
+        // 别的位不影响它。
+        c.apply_i32(Key::WIDE_MASK, 1 << 5);
+        assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 1.16) as i32);
     }
 
     /// 分割线宽度改由 `SepGap` 决定（上游 v1.4.0）。
@@ -1056,9 +1419,9 @@ mod tests {
         assert!((mid - m.lw as f32 / 2.0).abs() < 0.01, "mid={mid}");
     }
 
-    /// 时钟占位会把整条栏体左移半个占位宽。
+    /// 小组件条带占位会把整条栏体左移半个占位宽。
     #[test]
-    fn clock_extra_shifts_the_bar_left() {
+    fn widget_extra_shifts_the_bar_left() {
         let c = cfg96();
         let m = calc_metrics(&c, 96, 3, 0, work());
         let plain = base_centers(&m, &kinds(3), 0.0);

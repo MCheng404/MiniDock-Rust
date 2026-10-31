@@ -1101,7 +1101,7 @@ fn dump_geometry(dock: &Dock, dpi: i32) {
         m.overhang,
         m.margin,
         m.clock_w,
-        m.clock_extra,
+        m.widget_extra,
         m.refl_h,
         m.lw,
         m.lh

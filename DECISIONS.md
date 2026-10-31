@@ -1447,3 +1447,99 @@ sw.attach();                              // 把这时的地址写进 USERDATA
 **重新考虑**：若将来真的要 60 fps 连续动画，瓶颈会回到每帧的同步回读
 （`device.poll(wait_indefinitely)`）。届时的解法是双缓冲 + 延迟一帧呈现，
 代价是交互延迟 +16 ms —— 对一个"只在悬停时动"的 Dock 不划算，所以现在不做。
+
+
+## ADR-038 · 吸收上游 v1.6.0：23 个新键与小组件条带
+
+上游从 v1.4.0（6875 行）走到了 v1.6.0（9681 行）。本轮处理其中**唯一会动
+已对拍通过的几何**的那部分，以及配置层必须跟进的键表变化。
+
+### 一、配置层：76 → 99 键
+
+上游新增 23 个键，全部追加在 `g_tab[]` 末尾。逐键加进
+`core::config::NUMERIC_KEYS` 表（加一个上游键的代价仍然是一行），
+默认值与值域照抄上游 `DefaultCfg()`。
+
+**这不只是"跟上上游"。** `Config::upgrade_legacy` 的做法是"读 → 删掉
+`[Settings]` 整段 → 按新格式重写"。凡是 `Key::ALL` 里没有的键，删段时
+就一起没了 —— 上游 v1.6.0 新增的 23 个键正好撞在这个缺口上。症状是
+"用户从 1.4 升到 1.6，配置被清空一半"。
+
+新增 `upgrade_legacy_keeps_upstream_v160_keys` 守着这条。
+
+新键按语义分了段（前缀规则已经不够用，新键跨了四个语义段）：
+
+| 段 | 键 |
+|---|---|
+| `widgets` | `WSide` `WOrder` `WideMask` `NotifyW` `CtrlCenter` `CcEnergy` `CcHotspot` `ResMon` `ToolW` `ModeW` |
+| `widgets.launchpad` | `Launchpad` `LpCols` `LpRows` |
+| `advanced` | `PinMenu` `TrayHide` `UpdChk` `UpdLast` |
+| `behavior` | `MultiMode` |
+| `behavior.group` | `FanBgL` `FanBgD` `FanFgL` `FanFgD` `FanDrag` |
+
+### 二、布局层：单个时钟卡片 → 小组件条带
+
+上游 v1.4.0 的模型是"栏体右边挂一个时钟卡片"：
+
+```c
+g_ce = cfg.clock ? g_clockW + M.g + 6 : 0;
+```
+
+v1.6.0 把它泛化成"栏体外侧的一排卡片"：
+
+```c
+enum { W_CLOCK, W_NOTIFY, W_CC, W_RES, W_TOOL, W_MODE, W_N };
+int ord[6] = { cfg.wOrder ? W_NOTIFY : W_CLOCK, cfg.wOrder ? W_CLOCK : W_NOTIFY,
+                W_CC, W_RES, W_TOOL, W_MODE };
+g_ce = 0;
+for (int k = 0; k < g_wn; k++) g_ce += (float)g_wWid[g_wk[k]] + M.g + 6;
+```
+
+Rust 侧对应新增 `core::layout::WidgetKind` 与 `WidgetStrip`：
+
+- `WidgetKind::index()` **必须与上游枚举同序** —— `WideMask` 是位掩码，
+  按序号取位（上游 `cfg.wideMask & (1 << W_RES)`），换序会让老配置的
+  双倍宽设置错位。
+- `WidgetStrip::build()` 复刻上游的 `ord[]` 顺序、`WOrder` 交换、
+  宽度公式（`barH × 0.92 / 0.72 / 1.16 / 2.2 / 1.6`）与 `g_ce` 汇总。
+- `WidgetStrip::left_of()` 复刻上游的 `g_wU[]` 定位：右侧时从栏体右缘
+  往外排，左侧（`WSide=1`）时从栏体左缘往左排。
+
+`Metrics.clock_extra` 随之改成 `widget_extra`（= 上游 `g_ce`）。
+
+### 三、关键约束：v1.4.0 的几何一个像素都不能动
+
+v1.4.0 的几何已经逐项对拍通过（`lw` / `lh` / `slot_l` 全部相等），
+换模型不能把它弄坏。三条保证：
+
+1. **只开时钟且 `WSide=0` 时，`widget_extra` 恒等于
+   `clock_w + gap + 6`** —— 与 v1.4.0 的 `g_ce` 逐位相等。
+   测试 `widget_strip_matches_v140_when_only_clock` 守着。
+2. **实测 A/B 对比**：同一份对拍 ini，重构前后各跑一次 Dock，
+   `GEOM` 输出**逐字节相同**（时钟开与关两种配置各测一次）。
+3. **时钟卡片的绘制位置改走条带定位**
+   （`WidgetStrip::left_of`），不再硬编码"栏体右缘 + gap + 6" ——
+   否则 `WSide=1` 只是配置项，不起作用。
+
+### 四、未实现的小组件不进条带
+
+上游 v1.6.0 默认把控制中心 / 资源监视器 / 计时器 / 专注模式**全部打开**
+（`CtrlCenter=1` `ResMon=1` `ToolW=1` `ModeW=1`）。但这五个我们一个都
+没移植。
+
+若照上游把它们算进条带，栏体上会留出四段**画不出东西的空白** ——
+比不做还糟。所以 `WidgetKind::is_implemented()` 目前只对时钟返回真，
+其余五个即使配置为开也不占位。等真正移植时把 `is_implemented` 打开，
+条带、定位、宽度公式全都现成。
+
+> 这是"读得进、存得住、但不占位"的策略：配置不丢，功能没做之前
+> 不假装做了。
+
+### 五、本轮没做的
+
+- **五个新小组件本身**（通知 / 控制中心 / 资源监视器 / 计时器 / 专注模式）：
+  都要新窗口或新面板，属于 M3。
+- **起动台**（`Launchpad`）：独立全屏窗口 + 分页 + 拖放，依赖最多。
+- **`[Tool]` / `[M]` 两个新配置段**：我们的 `Ini` 原样保留不认识的段，
+  读 v1.6.0 配置不会丢数据，只是读不出来 —— 在实现对应功能之前，
+  "保留但不解析"就是正确策略。

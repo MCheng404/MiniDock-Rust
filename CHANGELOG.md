@@ -103,6 +103,46 @@
 
 ---
 
+## 0.4.0 — 吸收上游 v1.6.0：23 个新键与小组件条带（ADR-038，2026-10-31）
+
+### 新增
+
+- **上游 v1.6.0 的 23 个配置键全部入库**（`Launchpad` `WSide` `WOrder`
+  `NotifyW` `FanBg{L,D}` `FanFg{L,D}` `PinMenu` `MultiMode` `UpdChk`
+  `UpdLast` `LpCols` `LpRows` `FanDrag` `TrayHide` `CtrlCenter`
+  `CcEnergy` `CcHotspot` `ResMon` `ToolW` `WideMask` `ModeW`），
+  键表 76 → 99，顺序与上游 `g_tab[]` 一致。
+- **小组件条带模型**（`core::layout::WidgetKind` / `WidgetStrip`）：
+  把"栏体右边挂一个时钟卡片"泛化成"栏体外侧的一排卡片"，
+  支持 `WSide`（左右）、`WOrder`（时钟与通知的先后）、`WideMask`
+  （双倍宽）。这是上游六个新小组件的共同前提。
+
+### 缺陷修复
+
+- **从上游 v1.6.0 配置升级到我们的格式会丢 23 个键**。
+  `upgrade_legacy` 的做法是"删掉 `[Settings]` 整段再重写"，凡是
+  `Key::ALL` 里没有的键就一起没了。新增 `upgrade_legacy_keeps_upstream_v160_keys`
+  守着这条。
+
+### 变更
+
+- `Metrics.clock_extra` 更名为 `widget_extra`（= 上游 `g_ce`），
+  语义从"时钟卡片占位"变为"小组件条带占位"。
+- 时钟卡片的绘制位置改走条带定位（`WidgetStrip::left_of`），
+  `WSide=1` 现在真的会生效。
+
+### 已知限制
+
+- 通知 / 控制中心 / 资源监视器 / 计时器 / 专注模式这五个小组件**尚未移植**，
+  它们即使配置为开也不占位（`WidgetKind::is_implemented` 只对时钟为真）——
+  否则栏体上会留出画不出东西的空白。
+
+### 实测
+
+- 几何回归：同一份对拍 ini，重构前后各跑一次 Dock，`GEOM` 输出逐字节相同
+  （时钟开 / 关两种配置各测一次）。v1.4.0 已对拍通过的几何未被破坏。
+- 质量门禁：`fmt --check`、`clippy -D warnings`、209 条测试全绿。
+
 ## 0.3.0 — 设置窗口接进 Dock 进程（ADR-036，2026-10-31）
 
 ### 新增

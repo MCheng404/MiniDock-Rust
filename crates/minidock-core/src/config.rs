@@ -79,6 +79,24 @@ pub const LEGACY_SECTION: &str = "Settings";
 /// 用前缀而不是给表加两列：表已有 41 行，加列要动全部数据；
 /// 而前缀规则本身就把"这是什么功能"表达清楚了。
 fn section_of_numeric(name: &str) -> &'static str {
+    // 上游 v1.6.0 的 23 个新键分属好几个语义段，前缀规则已经不够用，
+    // 先按名字精确匹配，剩下的再走前缀。
+    match name {
+        // 小组件条带：位置 / 顺序 / 开关 / 双倍宽掩码。
+        "WSide" | "WOrder" | "WideMask" | "NotifyW" | "CtrlCenter" | "CcEnergy" | "CcHotspot"
+        | "ResMon" | "ToolW" | "ModeW" => return "widgets",
+        // 起动台。
+        "Launchpad" | "LpCols" | "LpRows" => return "widgets.launchpad",
+        // 系统集成：资源管理器右键菜单 / 托盘图标 / 自动更新。
+        "PinMenu" | "TrayHide" | "UpdChk" | "UpdLast" => return "advanced",
+        // 多窗口应用模式。
+        "MultiMode" => return "behavior",
+        // 弧形展开的标签配色（与 `FanArc` / `FanGap` 同属弧形展开）。
+        "FanBgL" | "FanBgD" | "FanFgL" | "FanFgD" | "FanDrag" => {
+            return "behavior.group";
+        }
+        _ => {}
+    }
     if name.starts_with("Plate") {
         "appearance.plate"
     } else if name.starts_with("Grad") || name.starts_with("BgColor") {
@@ -154,6 +172,51 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("MnAuto", 0, 1, 1, true, false),
     ("MnNotes", 0, 1, 1, true, false),
     ("MnAdd", 0, 1, 1, true, false),
+    // ---- 上游 v1.6.0 新增的 23 个键 ----
+    // 顺序照抄上游 `g_tab[]`：新键全部追加在 `MnAdd` 之后。
+    //
+    // 值域与默认值取自上游 `DefaultCfg()`（v1.6.0 minidock.c:335-345）。
+    // 颜色键沿用 `-1 = 跟随主题` 的约定（与 `BgColor1` / `GrpBg` 一致）。
+    ("Launchpad", 0, 1, 0, true, false),
+    // WSide：小组件条带在栏体右侧（0）/ 左侧（1）。
+    ("WSide", 0, 1, 0, true, false),
+    // WOrder：时钟在前（0）/ 通知在前（1）。
+    ("WOrder", 0, 1, 0, true, false),
+    // NotifyW：通知小组件。
+    ("NotifyW", 0, 1, 0, true, false),
+    // Fan{Bg,Fg}{L,D}：弧形展开的标签背景 / 文字颜色（浅色 / 深色主题）。
+    ("FanBgL", -1, 16777215, -1, false, false),
+    ("FanBgD", -1, 16777215, -1, false, false),
+    ("FanFgL", -1, 16777215, -1, false, false),
+    ("FanFgD", -1, 16777215, -1, false, false),
+    // PinMenu：资源管理器右键菜单加「固定到 MiniDock」。
+    ("PinMenu", 0, 1, 0, true, false),
+    // MultiMode：多窗口应用合并成一个图标（0）/ 每个文档窗口一个（1）。
+    ("MultiMode", 0, 1, 0, false, false),
+    // UpdChk：每天自动检查一次更新；UpdLast：上次检查的日期戳（天）。
+    ("UpdChk", 0, 1, 1, true, false),
+    ("UpdLast", 0, 100000, 0, false, false),
+    // LpCols / LpRows：起动台每页列数 / 行数。
+    // 上游在用的时候才夹（`3..12` / `2..8`，v1.6.0:6930），这里提前夹。
+    ("LpCols", 3, 12, 7, false, false),
+    ("LpRows", 2, 8, 4, false, false),
+    // FanDrag：允许从弧形展开里把文件拖出来。
+    ("FanDrag", 0, 1, 1, true, false),
+    // TrayHide：隐藏通知区域图标。
+    ("TrayHide", 0, 1, 0, true, false),
+    // CtrlCenter：控制中心小组件。CcEnergy / CcHotspot：磁贴开关。
+    ("CtrlCenter", 0, 1, 1, true, false),
+    ("CcEnergy", 0, 1, 1, true, false),
+    ("CcHotspot", 0, 1, 1, true, false),
+    // ResMon：资源监视器小组件。
+    ("ResMon", 0, 1, 1, true, false),
+    // ToolW：计时器 / 待办小组件。
+    ("ToolW", 0, 1, 1, true, false),
+    // WideMask：位掩码，第 k 位 = 第 k 个小组件双倍宽。
+    // 上游只有 6 个小组件，位宽取 6。
+    ("WideMask", 0, 63, 0, false, false),
+    // ModeW：专注模式小组件。
+    ("ModeW", 0, 1, 1, true, false),
 ];
 
 impl Key {
@@ -243,6 +306,52 @@ impl Key {
     pub const MN_NOTES: Key = Key::Numeric(39);
     /// `MnAdd`
     pub const MN_ADD: Key = Key::Numeric(40);
+    /// `Launchpad`
+    pub const LAUNCHPAD: Key = Key::Numeric(41);
+    /// `WSide`
+    pub const W_SIDE: Key = Key::Numeric(42);
+    /// `WOrder`
+    pub const W_ORDER: Key = Key::Numeric(43);
+    /// `NotifyW`
+    pub const NOTIFY_W: Key = Key::Numeric(44);
+    /// `FanBgL`
+    pub const FAN_BG_L: Key = Key::Numeric(45);
+    /// `FanBgD`
+    pub const FAN_BG_D: Key = Key::Numeric(46);
+    /// `FanFgL`
+    pub const FAN_FG_L: Key = Key::Numeric(47);
+    /// `FanFgD`
+    pub const FAN_FG_D: Key = Key::Numeric(48);
+    /// `PinMenu`
+    pub const PIN_MENU: Key = Key::Numeric(49);
+    /// `MultiMode`
+    pub const MULTI_MODE: Key = Key::Numeric(50);
+    /// `UpdChk`
+    pub const UPD_CHK: Key = Key::Numeric(51);
+    /// `UpdLast`
+    pub const UPD_LAST: Key = Key::Numeric(52);
+    /// `LpCols`
+    pub const LP_COLS: Key = Key::Numeric(53);
+    /// `LpRows`
+    pub const LP_ROWS: Key = Key::Numeric(54);
+    /// `FanDrag`
+    pub const FAN_DRAG: Key = Key::Numeric(55);
+    /// `TrayHide`
+    pub const TRAY_HIDE: Key = Key::Numeric(56);
+    /// `CtrlCenter`
+    pub const CTRL_CENTER: Key = Key::Numeric(57);
+    /// `CcEnergy`
+    pub const CC_ENERGY: Key = Key::Numeric(58);
+    /// `CcHotspot`
+    pub const CC_HOTSPOT: Key = Key::Numeric(59);
+    /// `ResMon`
+    pub const RES_MON: Key = Key::Numeric(60);
+    /// `ToolW`
+    pub const TOOL_W: Key = Key::Numeric(61);
+    /// `WideMask`
+    pub const WIDE_MASK: Key = Key::Numeric(62);
+    /// `ModeW`
+    pub const MODE_W: Key = Key::Numeric(63);
 }
 
 impl Key {
@@ -327,6 +436,30 @@ impl Key {
         Key::MN_AUTO,
         Key::MN_NOTES,
         Key::MN_ADD,
+        // 上游 v1.6.0 新增（顺序 = 上游 `g_tab[]` 的追加顺序）。
+        Key::LAUNCHPAD,
+        Key::W_SIDE,
+        Key::W_ORDER,
+        Key::NOTIFY_W,
+        Key::FAN_BG_L,
+        Key::FAN_BG_D,
+        Key::FAN_FG_L,
+        Key::FAN_FG_D,
+        Key::PIN_MENU,
+        Key::MULTI_MODE,
+        Key::UPD_CHK,
+        Key::UPD_LAST,
+        Key::LP_COLS,
+        Key::LP_ROWS,
+        Key::FAN_DRAG,
+        Key::TRAY_HIDE,
+        Key::CTRL_CENTER,
+        Key::CC_ENERGY,
+        Key::CC_HOTSPOT,
+        Key::RES_MON,
+        Key::TOOL_W,
+        Key::WIDE_MASK,
+        Key::MODE_W,
     ];
 
     /// 新配置格式里该键所属的段。
@@ -1179,7 +1312,7 @@ mod tests {
     /// 任何一次调整 [`NUMERIC_KEYS`] 的顺序，都必须先更新常量再改这里。
     #[test]
     fn numeric_constants_match_table_rows() {
-        let pairs: [(Key, &str); 41] = [
+        let pairs: [(Key, &str); 64] = [
             (Key::PLATE_MODE, "PlateMode"),
             (Key::PLATE_THEME, "PlateTheme"),
             (Key::PLATE_OPACITY, "PlateOpacity"),
@@ -1221,6 +1354,29 @@ mod tests {
             (Key::MN_AUTO, "MnAuto"),
             (Key::MN_NOTES, "MnNotes"),
             (Key::MN_ADD, "MnAdd"),
+            (Key::LAUNCHPAD, "Launchpad"),
+            (Key::W_SIDE, "WSide"),
+            (Key::W_ORDER, "WOrder"),
+            (Key::NOTIFY_W, "NotifyW"),
+            (Key::FAN_BG_L, "FanBgL"),
+            (Key::FAN_BG_D, "FanBgD"),
+            (Key::FAN_FG_L, "FanFgL"),
+            (Key::FAN_FG_D, "FanFgD"),
+            (Key::PIN_MENU, "PinMenu"),
+            (Key::MULTI_MODE, "MultiMode"),
+            (Key::UPD_CHK, "UpdChk"),
+            (Key::UPD_LAST, "UpdLast"),
+            (Key::LP_COLS, "LpCols"),
+            (Key::LP_ROWS, "LpRows"),
+            (Key::FAN_DRAG, "FanDrag"),
+            (Key::TRAY_HIDE, "TrayHide"),
+            (Key::CTRL_CENTER, "CtrlCenter"),
+            (Key::CC_ENERGY, "CcEnergy"),
+            (Key::CC_HOTSPOT, "CcHotspot"),
+            (Key::RES_MON, "ResMon"),
+            (Key::TOOL_W, "ToolW"),
+            (Key::WIDE_MASK, "WideMask"),
+            (Key::MODE_W, "ModeW"),
         ];
         for (key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");
@@ -1237,7 +1393,7 @@ mod tests {
         // 用**上游名**比对：顺序仍要与 C 版一致，这样两边来回读写时
         // 行序稳定、diff 干净。新名是否唯一由下一个测试保证。
         let names: Vec<&str> = Key::ALL.iter().map(|k| k.legacy_name()).collect();
-        assert_eq!(names.len(), 76, "上游 v1.4.0 是 76 个键");
+        assert_eq!(names.len(), 99, "上游 v1.6.0 是 99 个键");
         // 抽查几个位置：顺序错了这里就会红。
         assert_eq!(names[0], "IconSize");
         assert_eq!(names[25], "PlateMode");
@@ -1246,6 +1402,9 @@ mod tests {
         assert_eq!(names[38], "UiTheme");
         assert_eq!(names[39], "MenuTheme");
         assert_eq!(names[75], "MnAdd");
+        // v1.6.0 的 23 个新键全部追加在末尾。
+        assert_eq!(names[76], "Launchpad");
+        assert_eq!(names[98], "ModeW");
         // 不许有重复键名。
         let mut seen = std::collections::HashSet::new();
         for n in &names {
@@ -1274,6 +1433,28 @@ mod tests {
         assert_eq!(c.get_i32(Key::MN_AUTO), 1);
         assert_eq!(c.get_i32(Key::MN_NOTES), 1);
         assert_eq!(c.get_i32(Key::MN_ADD), 1);
+        // 上游 v1.6.0 新键的默认值（DefaultCfg，v1.6.0 minidock.c:335-345）。
+        assert_eq!(c.get_i32(Key::LAUNCHPAD), 0);
+        assert_eq!(c.get_i32(Key::W_SIDE), 0);
+        assert_eq!(c.get_i32(Key::W_ORDER), 0);
+        assert_eq!(c.get_i32(Key::NOTIFY_W), 0);
+        assert_eq!(c.get_i32(Key::FAN_BG_L), -1);
+        assert_eq!(c.get_i32(Key::FAN_FG_D), -1);
+        assert_eq!(c.get_i32(Key::PIN_MENU), 0);
+        assert_eq!(c.get_i32(Key::MULTI_MODE), 0);
+        assert_eq!(c.get_i32(Key::UPD_CHK), 1);
+        assert_eq!(c.get_i32(Key::UPD_LAST), 0);
+        assert_eq!(c.get_i32(Key::LP_COLS), 7);
+        assert_eq!(c.get_i32(Key::LP_ROWS), 4);
+        assert_eq!(c.get_i32(Key::FAN_DRAG), 1);
+        assert_eq!(c.get_i32(Key::TRAY_HIDE), 0);
+        assert_eq!(c.get_i32(Key::CTRL_CENTER), 1);
+        assert_eq!(c.get_i32(Key::CC_ENERGY), 1);
+        assert_eq!(c.get_i32(Key::CC_HOTSPOT), 1);
+        assert_eq!(c.get_i32(Key::RES_MON), 1);
+        assert_eq!(c.get_i32(Key::TOOL_W), 1);
+        assert_eq!(c.get_i32(Key::WIDE_MASK), 0);
+        assert_eq!(c.get_i32(Key::MODE_W), 1);
         // SepGap 的默认值随 DPI 缩放（上游是 Sc(4)）。
         assert_eq!(c.get_i32(Key::SEP_GAP), 4);
         assert_eq!(Config::defaults(144).get_i32(Key::SEP_GAP), 6);
@@ -1302,7 +1483,7 @@ mod tests {
     fn key_table_matches_c_g_tab() {
         // 76 个键（上游 v1.4.0），顺序即保存顺序；顺序错了会造成 ini diff 噪音。
         // 这里直接把上游的键名列出来，顺序错一个字符都会红。
-        const UPSTREAM: [&str; 76] = [
+        const UPSTREAM: [&str; 99] = [
             "IconSize",
             "ZoomSize",
             "Spacing",
@@ -1379,6 +1560,30 @@ mod tests {
             "MnAuto",
             "MnNotes",
             "MnAdd",
+            // 上游 v1.6.0 追加的 23 个键。
+            "Launchpad",
+            "WSide",
+            "WOrder",
+            "NotifyW",
+            "FanBgL",
+            "FanBgD",
+            "FanFgL",
+            "FanFgD",
+            "PinMenu",
+            "MultiMode",
+            "UpdChk",
+            "UpdLast",
+            "LpCols",
+            "LpRows",
+            "FanDrag",
+            "TrayHide",
+            "CtrlCenter",
+            "CcEnergy",
+            "CcHotspot",
+            "ResMon",
+            "ToolW",
+            "WideMask",
+            "ModeW",
         ];
         assert_eq!(Key::ALL.len(), UPSTREAM.len());
         for (i, name) in UPSTREAM.iter().enumerate() {
@@ -1494,7 +1699,9 @@ mod tests {
             "behavior",
             "behavior.group",
             "theme",
+            "widgets",
             "widgets.clock",
+            "widgets.launchpad",
             "menu",
             "advanced",
         ];
@@ -1575,6 +1782,70 @@ mod tests {
 
         // 再来一次不该重复动作。
         assert!(!Config::upgrade_legacy(&mut ini, dpi), "已经是新格式了");
+    }
+
+    /// 上游 v1.6.0 的配置升级到我们的格式时，那 23 个新键**不能丢**。
+    ///
+    /// 这条测试对应一个真实缺陷：`upgrade_legacy` 的做法是"读 → 删掉
+    /// `[Settings]` 整段 → 按新格式重写"。凡是 `Key::ALL` 里没有的键，
+    /// 删段时就一起没了 —— 上游 v1.6.0 加的 23 个键正好撞在这个缺口上。
+    /// 症状是"用户从 1.4 升到 1.6，配置被清空一半"。
+    #[test]
+    fn upgrade_legacy_keeps_upstream_v160_keys() {
+        let mut ini = Ini::new();
+        // 上游 v1.6.0 风格的一整段配置。
+        ini.set_i32(LEGACY_SECTION, "IconSize", 64);
+        ini.set_i32(LEGACY_SECTION, "MnAdd", 1);
+        ini.set_i32(LEGACY_SECTION, "Launchpad", 1);
+        ini.set_i32(LEGACY_SECTION, "WSide", 1);
+        ini.set_i32(LEGACY_SECTION, "WOrder", 1);
+        ini.set_i32(LEGACY_SECTION, "NotifyW", 1);
+        ini.set_i32(LEGACY_SECTION, "FanBgL", 0x00FF_0000);
+        ini.set_i32(LEGACY_SECTION, "FanBgD", 0x0012_3456);
+        ini.set_i32(LEGACY_SECTION, "FanFgL", 0x00AB_CDEF);
+        ini.set_i32(LEGACY_SECTION, "FanFgD", 0x0000_00FF);
+        ini.set_i32(LEGACY_SECTION, "PinMenu", 1);
+        ini.set_i32(LEGACY_SECTION, "MultiMode", 1);
+        ini.set_i32(LEGACY_SECTION, "UpdChk", 0);
+        ini.set_i32(LEGACY_SECTION, "UpdLast", 12345);
+        ini.set_i32(LEGACY_SECTION, "LpCols", 9);
+        ini.set_i32(LEGACY_SECTION, "LpRows", 6);
+        ini.set_i32(LEGACY_SECTION, "FanDrag", 0);
+        ini.set_i32(LEGACY_SECTION, "TrayHide", 1);
+        ini.set_i32(LEGACY_SECTION, "CtrlCenter", 0);
+        ini.set_i32(LEGACY_SECTION, "CcEnergy", 0);
+        ini.set_i32(LEGACY_SECTION, "CcHotspot", 0);
+        ini.set_i32(LEGACY_SECTION, "ResMon", 0);
+        ini.set_i32(LEGACY_SECTION, "ToolW", 0);
+        ini.set_i32(LEGACY_SECTION, "WideMask", 0b101010);
+        ini.set_i32(LEGACY_SECTION, "ModeW", 0);
+
+        assert!(Config::upgrade_legacy(&mut ini, 96), "应当报告发生了升级");
+
+        let after = Config::from_ini(&ini, 96);
+        assert_eq!(after.get_i32(Key::LAUNCHPAD), 1);
+        assert_eq!(after.get_i32(Key::W_SIDE), 1);
+        assert_eq!(after.get_i32(Key::W_ORDER), 1);
+        assert_eq!(after.get_i32(Key::NOTIFY_W), 1);
+        assert_eq!(after.get_i32(Key::FAN_BG_L), 0x00FF_0000);
+        assert_eq!(after.get_i32(Key::FAN_BG_D), 0x0012_3456);
+        assert_eq!(after.get_i32(Key::FAN_FG_L), 0x00AB_CDEF);
+        assert_eq!(after.get_i32(Key::FAN_FG_D), 0x0000_00FF);
+        assert_eq!(after.get_i32(Key::PIN_MENU), 1);
+        assert_eq!(after.get_i32(Key::MULTI_MODE), 1);
+        assert_eq!(after.get_i32(Key::UPD_CHK), 0);
+        assert_eq!(after.get_i32(Key::UPD_LAST), 12345);
+        assert_eq!(after.get_i32(Key::LP_COLS), 9);
+        assert_eq!(after.get_i32(Key::LP_ROWS), 6);
+        assert_eq!(after.get_i32(Key::FAN_DRAG), 0);
+        assert_eq!(after.get_i32(Key::TRAY_HIDE), 1);
+        assert_eq!(after.get_i32(Key::CTRL_CENTER), 0);
+        assert_eq!(after.get_i32(Key::CC_ENERGY), 0);
+        assert_eq!(after.get_i32(Key::CC_HOTSPOT), 0);
+        assert_eq!(after.get_i32(Key::RES_MON), 0);
+        assert_eq!(after.get_i32(Key::TOOL_W), 0);
+        assert_eq!(after.get_i32(Key::WIDE_MASK), 0b101010);
+        assert_eq!(after.get_i32(Key::MODE_W), 0);
     }
 
     /// 新格式文件不该被当成旧格式升级。
