@@ -68,551 +68,738 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 循环只在 WM_QUIT 时返回。
-    // DPI 感知必须在建窗之前（M0 的教训）。
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    match App::boot()? {
+        // `None` = 已有实例在跑。这是正常退出，不是错误。
+        None => Ok(()),
+        Some(mut app) => app.run(),
+    }
+}
+
+// ============================ 调试开关 ============================
+
+/// `MINIDOCK_*` 调试开关。**启动时读一次**，之后只读缓存。
+///
+/// 原先这些判断散在主循环里共 16 处 `std::env::var_os("MINIDOCK_GEOM")`，
+/// 每帧各锁一次进程环境块再线性扫描一遍字符串。60 fps 下是白花的开销，
+/// 而且 16 份重复的魔法字符串里拼错一个，那个开关就静默失效 —— 排查时
+/// 最难受的一类问题。
+mod trace {
+    use std::sync::LazyLock;
+
+    fn flag(name: &'static str) -> bool {
+        std::env::var_os(name).is_some()
     }
 
-    // 单实例。**Dock 也必须接这个**：两个 Dock 会叠出两个分层窗口，
-    // 而且 `FindWindow` 只会抓到一个，外部工具/测试会操作错的那个。
-    // 互斥体本身失败时不阻止启动 —— 宁可多一份 Dock，也不要起不来。
-    let _guard = match SingleInstance::acquire() {
-        Ok(Some(guard)) => Some(guard),
-        Ok(None) => {
-            eprintln!("MiniDock 已在运行，本次启动退出。");
-            return Ok(());
-        }
-        Err(e) => {
-            eprintln!("单实例互斥体失败：{e}（继续启动）");
-            None
-        }
-    };
-
-    let paths = Paths::resolve()?;
-    let dpi = display::system_dpi();
-    let mut ini = Ini::load(&paths.ini)?;
-    // 上游格式就地升级：读一次就变成新格式，用户不需要知道有这回事。
-    // 只在这一步写盘 —— 迁移失败也不影响本次运行（`from_ini` 两种格式都认）。
-    if Config::upgrade_legacy(&mut ini, dpi) {
-        match ini.save(&paths.ini) {
-            Ok(()) => eprintln!(
-                "配置已从上游格式升级到 v{}（各设置保持不变）。",
-                minidock_core::config::CONFIG_VERSION
-            ),
-            Err(e) => eprintln!("配置升级后保存失败（本次仍按新格式使用）：{e}"),
-        }
-    }
-    let cfg = Config::from_ini(&ini, dpi);
-    // 可变：拖拽重排要跟着 Dock 一起调整，顺序才与屏幕一致。
-    let mut raw: Vec<Item> = store::load_items(&ini);
-    let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
-
-    // 工作区（物理像素）：C 版用 `g_mi.rcWork`。
-    let work: LRect = display::work_area(0);
-    let mut dock = Box::new(Dock::new(cfg, items, work));
-    dock.mode = dock.cfg.mode;
-    dock.update(dpi);
-
-    let (mut win_w, mut win_h) = dock.physical_size_i32();
-    // `MINIDOCK_GEOM=1` 打印度量，用于与 C 版逐项对拍（验收 ≤1 px 时靠它定位）。
-    if std::env::var_os("MINIDOCK_GEOM").is_some() {
-        let m = &dock.metrics;
-        eprintln!(
-            "GEOM dpi={dpi} S={:.1} Z={:.1} g={:.1} sep={:.1} pad={:.1} padX={:.1} barH={:.1}              over={:.1} margin={:.1} clockW={} clockExtra={:.1} reflH={:.1} lw={} lh={}",
-            m.s, m.z, m.gap, m.sep_w, m.pad, m.pad_x, m.bar_h, m.overhang, m.margin,
-            m.clock_w, m.clock_extra, m.refl_h, m.lw, m.lh
-        );
-        eprintln!(
-            "GEOM bar_l={:.1} bar_w={:.1} bar_top={:.1} bar_bottom={:.1} icon_bottom={:.1}",
-            dock.geom.bar_l,
-            dock.geom.bar_w,
-            dock.geom.bar_top,
-            dock.geom.bar_bottom,
-            dock.geom.icon_bottom
-        );
-        eprintln!("GEOM slot_l={:?}", dock.geom.slot_l);
-    }
-    let ppp = dpi as f32 / 96.0;
-
-    let hinstance = unsafe { GetModuleHandleW(None) }?;
-    let wc = WNDCLASSW {
-        hInstance: HINSTANCE(hinstance.0),
-        lpfnWndProc: Some(wndproc),
-        lpszClassName: w!("MiniDockWindow"),
-        ..Default::default()
-    };
-    unsafe {
-        RegisterClassW(&wc);
+    /// 几何 / 重排 / 点击 / 扫描的详细日志，用于与 C 版逐项对拍。
+    pub fn geom() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_GEOM"));
+        *V
     }
 
-    // 先按"没有预留区"的位置建窗：AppBar 的 `ABM_NEW` 需要 hwnd，
-    // 而位置又要用到 AppBar 拿回来的矩形 —— 顺序上只能先建后挪。
-    // C 版也是这么做的（`UpdateGeometry` 里先建后 `SetWindowPos`）。
-    let (mut x, mut y) = layout::window_origin(dock.cfg.edge, work, None, win_w, win_h);
-    let hwnd = unsafe {
-        CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            w!("MiniDockWindow"),
-            w!("MiniDock"),
-            WS_POPUP,
-            x,
-            y,
-            win_w,
-            win_h,
-            None,
-            None,
-            Some(hinstance.into()),
-            None,
-        )?
-    };
+    /// 全屏检测的判定过程。
+    pub fn fs() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_FS_TRACE"));
+        *V
+    }
 
-    // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
-    // 留着那块空白反而更怪（C 版同样是 `cfg.reserve && cfg.mode == 0`）。
-    let mut appbar = AppBar::new(hwnd);
-    let mut reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
-        appbar.apply(
-            dock.cfg.edge,
-            dock.reserve_thickness(),
-            display::monitor_rect(0),
-        )
-    } else {
-        None
-    };
-    (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
-    if reserved.is_some() {
-        // 申请成功才移动窗口：失败时保持原位置，宁可少预留也不要跑到屏幕外。
+    /// 菜单窗口的消息流。
+    pub fn menu() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_MENU_TRACE"));
+        *V
+    }
+}
+
+// ============================ 应用状态 ============================
+
+/// 一次 Dock 会话的全部可变状态。
+///
+/// 以前这些是 `main` 里的 16 个局部变量，循环体一路写到 500 多行；
+/// 后来每加一个功能只能按 `②.52` / `②.535` 这种编号插进去，编号本身
+/// 已经重复（两个 `②.1`、两个 `②.4`）。收进结构体之后主循环变成一串
+/// 有名字的步骤，每一步都能单独读、单独改、单独加。
+struct App {
+    hwnd: HWND,
+    gpu: Gpu,
+    frame: FrameRenderer,
+    /// 必须在堆上：`wndproc` 通过 `GWLP_USERDATA` 存的是它的地址，
+    /// `Box` 的内容不会因为 `App` 本身移动而搬家。
+    dock: Box<Dock>,
+    paths: Paths,
+    /// 完整条目（含启动路径与 `.lnk` 解析结果）。`dock.items` 只有显示用的
+    /// 子集，两份必须同步，否则"点了图标启动的是别人"。
+    raw: Vec<Item>,
+    dpi: i32,
+    ppp: f32,
+    /// 目标显示器的工作区（物理像素），C 版用 `g_mi.rcWork`。
+    work: LRect,
+    appbar: AppBar,
+    /// AppBar 申请到的预留矩形；`None` = 没有预留（或申请失败）。
+    reserved: Option<LRect>,
+    /// 窗口左上角的屏幕坐标（物理像素）。
+    pos: (i32, i32),
+    /// 窗口尺寸（物理像素）。
+    size: (i32, i32),
+    menu_slot: MenuSlot,
+    settings_slot: Option<Pin<Box<SettingsWindow>>>,
+    /// 配置改动到写盘的防抖起点（`None` = 没有待写内容）。
+    cfg_dirty_at: Option<Instant>,
+    last_fs_check: Instant,
+    fs_hidden: bool,
+    last_scan: Instant,
+    /// `MINIDOCK_FAKE_MOUSE="u,v"`：把光标钉在指定位置（无人值守截图用）。
+    fake_mouse: Option<(f32, f32)>,
+    /// `MINIDOCK_FAKE_COVERED=0/1`：覆盖遮挡判定结果。
+    fake_covered: Option<bool>,
+    start: Instant,
+    /// 单实例互斥体。**必须是字段**：它是 RAII 锁，放成 `boot` 的局部变量
+    /// 会在 `boot` 返回时立刻释放，第二个实例就能起来了。
+    _guard: Option<SingleInstance>,
+}
+
+/// 消息泵的结论。
+enum Pumped {
+    /// 处理过消息，需要重绘。
+    Frames,
+    /// 队列已空。
+    Idle,
+    /// 收到 `WM_QUIT`。
+    Quit,
+}
+
+impl App {
+    /// 建窗口、装资源，直到可以进消息循环为止。
+    ///
+    /// `Ok(None)` 表示已有实例在跑 —— 调用方应当正常退出，不是报错。
+    fn boot() -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        // DPI 感知必须在建窗之前（M0 的教训：未声明时 Windows 会拉伸窗口
+        // 位图，表面尺寸与客户区错位）。
         unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+
+        // 单实例。**Dock 也必须接这个**：两个 Dock 会叠出两个分层窗口，
+        // 而且 `FindWindow` 只会抓到一个，外部工具/测试会操作错的那个。
+        // 互斥体本身失败时不阻止启动 —— 宁可多一份 Dock，也不要起不来。
+        let guard = match SingleInstance::acquire() {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => {
+                eprintln!("MiniDock 已在运行，本次启动退出。");
+                return Ok(None);
+            }
+            Err(e) => {
+                eprintln!("单实例互斥体失败：{e}（继续启动）");
+                None
+            }
+        };
+
+        let paths = Paths::resolve()?;
+        let dpi = display::system_dpi();
+        let mut ini = Ini::load(&paths.ini)?;
+        // 上游格式就地升级：读一次就变成新格式，用户不需要知道有这回事。
+        // 只在这一步写盘 —— 迁移失败也不影响本次运行（`from_ini` 两种格式都认）。
+        if Config::upgrade_legacy(&mut ini, dpi) {
+            match ini.save(&paths.ini) {
+                Ok(()) => eprintln!(
+                    "配置已从上游格式升级到 v{}（各设置保持不变）。",
+                    minidock_core::config::CONFIG_VERSION
+                ),
+                Err(e) => eprintln!("配置升级后保存失败（本次仍按新格式使用）：{e}"),
+            }
+        }
+        let cfg = Config::from_ini(&ini, dpi);
+        // 可变：拖拽重排要跟着 Dock 一起调整，顺序才与屏幕一致。
+        let mut raw: Vec<Item> = store::load_items(&ini);
+        let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
+
+        let work: LRect = display::work_area(0);
+        let mut dock = Box::new(Dock::new(cfg, items, work));
+        dock.mode = dock.cfg.mode;
+        dock.update(dpi);
+
+        let (win_w, win_h) = dock.physical_size_i32();
+        dump_geometry(&dock, dpi);
+        let ppp = dpi as f32 / 96.0;
+
+        let hinstance = unsafe { GetModuleHandleW(None) }?;
+        let wc = WNDCLASSW {
+            hInstance: HINSTANCE(hinstance.0),
+            lpfnWndProc: Some(wndproc),
+            lpszClassName: w!("MiniDockWindow"),
+            ..Default::default()
+        };
+        unsafe {
+            RegisterClassW(&wc);
+        }
+
+        // 先按"没有预留区"的位置建窗：AppBar 的 `ABM_NEW` 需要 hwnd，
+        // 而位置又要用到 AppBar 拿回来的矩形 —— 顺序上只能先建后挪。
+        // C 版也是这么做的（`UpdateGeometry` 里先建后 `SetWindowPos`）。
+        let (mut x, mut y) = layout::window_origin(dock.cfg.edge, work, None, win_w, win_h);
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                w!("MiniDockWindow"),
+                w!("MiniDock"),
+                WS_POPUP,
                 x,
                 y,
                 win_w,
                 win_h,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )?
+        };
+
+        // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
+        // 留着那块空白反而更怪（C 版同样是 `cfg.reserve && cfg.mode == 0`）。
+        let mut appbar = AppBar::new(hwnd);
+        let reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
+            appbar.apply(
+                dock.cfg.edge,
+                dock.reserve_thickness(),
+                display::monitor_rect(0),
+            )
+        } else {
+            None
+        };
+        (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
+        if reserved.is_some() {
+            // 申请成功才移动窗口：失败时保持原位置，宁可少预留也不要跑到屏幕外。
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    win_w,
+                    win_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        if dock.cfg.reserve && dock.mode != DockMode::Always {
+            // 不预留在隐藏模式下是**故意的**（Dock 会滑走，留一块空白更怪），
+            // 但用户既然开了开关就该知道它没生效，否则会当成 bug 报上来。
+            eprintln!("`Reserve` 只在常显模式（Mode=0）下生效，当前已忽略。");
+        }
+        if trace::geom() {
+            eprintln!(
+                "[layout] edge={:?} reserve={} -> pos=({x},{y}) reserved={reserved:?}",
+                dock.cfg.edge, dock.cfg.reserve
+            );
+        }
+
+        let gpu = Gpu::new("")?;
+        let frame = FrameRenderer::new(&gpu, win_w as u32, win_h as u32, ppp)?;
+        let start = Instant::now();
+
+        // 先把 `.lnk` 解析成真实 exe 路径：判断"是否在运行"和"点击该切过去"
+        // 都要靠它。解析有 COM 开销，所以只在启动时做一次，结果缓存在
+        // `Item.target` 里（不写回 ini，那是运行时缓存）。
+        resolve_targets(&mut raw);
+        // 初次扫描：让指示点在第一帧就正确，而不是等 1.2 秒后才亮。
+        refresh_running(&mut raw, &mut dock);
+
+        // 图标在 egui 上下文就绪之后装：纹理要 ctx 才能建。
+        load_icons(&mut dock, frame.ctx(), &raw);
+
+        // 全局快捷键 `Ctrl+Alt+D`：强制收起 / 恢复。原版用 `cfg.hotkey` 开关。
+        // 注册失败（被别的程序占了）只警告，不影响启动。
+        if dock.cfg.hotkey {
+            let ok = unsafe {
+                RegisterHotKey(
+                    Some(hwnd),
+                    1,
+                    HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0),
+                    u32::from(b'D'),
+                )
+            };
+            if ok.is_err() {
+                eprintln!("快捷键 Ctrl+Alt+D 注册失败（可能被占用），强制收起不可用。");
+            }
+        }
+
+        let mut app = Self {
+            hwnd,
+            gpu,
+            frame,
+            dock,
+            paths,
+            raw,
+            dpi,
+            ppp,
+            work,
+            appbar,
+            reserved,
+            pos: (x, y),
+            size: (win_w, win_h),
+            menu_slot: None,
+            settings_slot: None,
+            cfg_dirty_at: None,
+            last_fs_check: Instant::now(),
+            fs_hidden: false,
+            last_scan: Instant::now(),
+            fake_mouse: fake_mouse_from_env(),
+            fake_covered: fake_covered_from_env(),
+            start,
+            _guard: guard,
+        };
+
+        // Dock 指针挂到窗口上，供 wndproc 回传鼠标位置。
+        // 取的是 `Box` 里那块堆内存的地址，与 `App` 自身是否再移动无关。
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&raw mut *app.dock) as isize);
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = UpdateWindow(hwnd);
+        }
+        Ok(Some(app))
+    }
+
+    /// 消息循环。只在 `WM_QUIT` 时返回。
+    ///
+    /// 每一步返回"本轮是否需要出帧"。**顺序有意义**：菜单是模态的（会阻塞），
+    /// 必须排在点击之后、设置窗口之前；写盘放在设置之后，否则当轮改动还没
+    /// 落到 `cfg` 里。
+    fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut msg = MSG::default();
+        loop {
+            let mut need_frame = false;
+
+            // ① 抽干消息队列：一条消息一帧会造成抖动。
+            match pump(&mut msg) {
+                Pumped::Quit => return Ok(()),
+                Pumped::Frames => need_frame = true,
+                Pumped::Idle => {}
+            }
+
+            // ② 重布局。**两个条件缺一不可**：`dirty`（鼠标进出/按下抬起
+            //    改变了输入状态，必须重算 `hot`）与 `anim`（放大曲线还在走）。
+            //    早先只写了 `anim`，结果动画一收敛鼠标再进来也不会放大 ——
+            //    因为 `hot` 只在 `update` 里算，而 `update` 不再被调用。
+            need_frame |= self.step_layout();
+            // ③ 窗口尺寸/位置跟着条目数走。
+            need_frame |= self.step_relayout()?;
+            // ④ 拖拽重排同步到配置副本并写盘。
+            self.step_reorder();
+            // ⑤ 点击启动（`ShellExecuteW` 可能阻塞，不能放在窗口过程里）。
+            self.step_click();
+            // ⑥ 右键菜单（模态）。
+            need_frame |= self.step_menu()?;
+            // ⑦ 设置窗口（非模态）。
+            need_frame |= self.step_settings()?;
+            // ⑧ 配置落盘（防抖）。
+            self.step_save_config();
+            // ⑨ 全屏时整体隐藏。
+            need_frame |= self.step_fullscreen();
+            // ⑩ 运行状态扫描。
+            need_frame |= self.step_running_scan();
+            // ⑪ 自动隐藏 / 智能隐藏。
+            need_frame |= self.step_auto_hide();
+
+            if need_frame || self.dock.anim {
+                self.render()?;
+            }
+            self.wait();
+        }
+    }
+
+    /// 推进一帧布局。返回是否需要出帧。
+    fn step_layout(&mut self) -> bool {
+        // 无人值守截图用：`MINIDOCK_FAKE_MOUSE="u,v"` 把鼠标钉在指定位置。
+        // 自动化验证时物理光标会被用户挪走，靠它才能稳定复现悬停态。
+        if let Some((u, v)) = self.fake_mouse {
+            self.dock.mouse = (u, v);
+            self.dock.hover = true;
+        }
+        if !self.dock.take_dirty() && !self.dock.anim {
+            return false;
+        }
+        self.dock.update(self.dpi);
+        true
+    }
+
+    /// 配置热更新：条目数变了 → 栏体宽度变了 → 窗口尺寸与位置都要改。
+    ///
+    /// 这条路径的风险在于离屏纹理与 DIB 必须跟着换成新尺寸，否则
+    /// `UpdateLayeredWindow` 提交的还是一块旧尺寸的位图 —— 表现为
+    /// "只有左上角一部分被画出来"。
+    fn step_relayout(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let (nw, nh) = self.dock.physical_size_i32();
+        if nw == self.size.0 && nh == self.size.1 {
+            return Ok(false);
+        }
+        self.size = (nw, nh);
+        self.frame.resize(&self.gpu, nw as u32, nh as u32)?;
+        self.reposition();
+        if trace::geom() {
+            eprintln!(
+                "[relayout] 窗口 -> ({},{}) {nw}x{nh}",
+                self.pos.0, self.pos.1
+            );
+        }
+        Ok(true)
+    }
+
+    /// 把拖拽产生的重排同步到配置副本，并写回 ini。
+    ///
+    /// 不需要额外出帧：`move_item` 会把 `moved` 置真，下一轮 `update`
+    /// 据此补位移动画，而 `update` 自身就会要求出帧。
+    fn step_reorder(&mut self) {
+        while let Some((from, to)) = self.dock.take_pending_move() {
+            if from < self.raw.len() && to < self.raw.len() {
+                let moved = self.raw.remove(from);
+                self.raw.insert(to, moved);
+            }
+        }
+        if self.dock.take_order_changed() {
+            if let Err(e) = save_order(&self.paths, &self.raw) {
+                eprintln!("保存条目顺序失败：{e}");
+            }
+        }
+    }
+
+    /// 点击启动。放在主循环而不是窗口过程里：`ShellExecuteW` 可能阻塞
+    /// 几十毫秒，不该占着消息处理。
+    fn step_click(&mut self) {
+        let Some((i, force)) = self.dock.take_click() else {
+            return;
+        };
+        if trace::geom() {
+            eprintln!(
+                "[click] 第 {i} 项 force={force} mouse={:?} slot_l={:?}",
+                self.dock.mouse, self.dock.geom.slot_l
+            );
+        }
+        // 图标数与配置不一致时不要静默吞掉，这类错配要能看见。
+        let Some(item) = self.raw.get(i) else {
+            eprintln!("点击了第 {i} 项，但配置里没有对应条目");
+            return;
+        };
+
+        // `force`（Shift+点击 / 中键）= 不管有没有在跑，都新起一个。
+        // 原版 `LaunchItem(i, force)` 的同一个开关：开了 force 就连
+        // "激活已有窗口"都跳过 —— 否则想开第二个实例永远开不出来。
+        let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+        let switched = !force
+            && running::running_key(item).is_some_and(|exe| app_window::activate(&exe, toggle));
+        if switched {
+            if trace::geom() {
+                eprintln!("[click] 切换到已运行实例：{}", item.name);
+            }
+        } else if let Err(e) = launch::launch(item) {
+            eprintln!("启动「{}」失败：{e}", item.name);
+        }
+        // 启动/切换之后弹一下，给一个"点到了"的反馈。
+        // 弹跳只在真的发生了动作时播，失败不弹（否则会误导）。
+        self.dock.start_bounce(i);
+    }
+
+    /// 右键菜单。**模态**：会阻塞到用户选择或取消。
+    fn step_menu(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some((u, v)) = self.dock.take_menu_request() else {
+            return Ok(false);
+        };
+        let hit = self.dock.hit_at(u, v);
+        let target = hit.and_then(|i| self.raw.get(i));
+        let running = target.is_some_and(|it| it.running);
+        let Some(menu) = Menu::build(target, running) else {
+            return Ok(false);
+        };
+
+        // 光标位置决定菜单弹出点；工作区边界决定往哪边翻。
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&raw mut pt) };
+        let cursor = (pt.x as f32 / self.ppp, pt.y as f32 / self.ppp);
+        // 边界用**工作区**而不是整块屏幕：菜单不该压到任务栏上。
+        let w = self.work;
+        let bounds = (
+            w.left as f32 / self.ppp,
+            w.top as f32 / self.ppp,
+            w.right as f32 / self.ppp,
+            w.bottom as f32 / self.ppp,
+        );
+        let dark = self.dock.cfg.dock_is_dark(theme::is_dark());
+        let cmd = match show_menu(
+            &self.gpu,
+            &mut self.menu_slot,
+            menu,
+            cursor,
+            bounds,
+            dark,
+            self.ppp,
+            self.start,
+        ) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                eprintln!("菜单显示失败：{e}");
+                None
+            }
+        };
+
+        if let Some(cmd) = cmd {
+            if trace::geom() {
+                eprintln!(
+                    "[menu] 命中 hit={hit:?} name={:?} cmd={cmd:?}",
+                    hit.and_then(|i| self.raw.get(i)).map(|it| it.name.clone())
+                );
+            }
+            if cmd == MenuCmd::Settings {
+                // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
+                // 那儿没有 `gpu`，也不该有。
+                let sw =
+                    ensure_settings(&self.gpu, &mut self.settings_slot, &self.paths, self.ppp)?;
+                // 每次打开都重读：用户可能刚在任务管理器里改过它。
+                sw.state.auto_start = theme::get_autostart();
+                sw.show();
+            } else {
+                run_menu_cmd(cmd, hit, &mut self.raw, &mut self.dock, &self.paths);
+            }
+        }
+
+        // 菜单期间 Dock 没有重绘，回来后强制出帧并刷新悬停。
+        self.dock.mark_dirty();
+        // 取消悬停：光标多半已经不在图标上了。
+        self.dock.hover = false;
+        self.dock.mouse = (-1.0, -1.0);
+        Ok(true)
+    }
+
+    /// 设置窗口。**非模态**：改参数时要能一边拖动滑块一边看栏体的变化，
+    /// 所以不像菜单那样把整条消息循环堵住。
+    fn step_settings(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let (changed, remount) = tick_settings(
+            &self.gpu,
+            &mut self.settings_slot,
+            &mut self.dock,
+            &mut self.raw,
+            &self.paths,
+            self.dpi,
+        )?;
+        let mut need_frame = false;
+
+        if changed {
+            // 配置是 Dock 与设置窗口共用的同一份：`update()` 在下一轮用它
+            // 重算几何，这里只需要要求出帧 + 排一次写盘。
+            self.cfg_dirty_at = Some(Instant::now());
+            need_frame = true;
+            self.dock.mark_dirty();
+            if trace::geom() {
+                eprintln!("[settings] 配置有改动，排定写盘");
+            }
+        }
+
+        if remount {
+            // 停靠边 / 预留 / 隐藏模式变了：AppBar 得重新注册，窗口位置
+            // 得跟着新边算。尺寸若也变了（左右停靠要转置 lw/lh），下一轮
+            // `step_relayout` 会 resize —— 这里先按旧尺寸摆到新位置，差的是一帧。
+            self.dock.mode = self.dock.cfg.mode;
+            self.reserved = if self.dock.cfg.reserve && self.dock.mode == DockMode::Always {
+                self.appbar.apply(
+                    self.dock.cfg.edge,
+                    self.dock.reserve_thickness(),
+                    display::monitor_rect(0),
+                )
+            } else {
+                self.appbar.remove();
+                None
+            };
+            self.reposition();
+            if trace::geom() {
+                eprintln!(
+                    "[settings] 重挂 edge={:?} reserve={} mode={:?} -> pos=({},{}) reserved={:?}",
+                    self.dock.cfg.edge,
+                    self.dock.cfg.reserve,
+                    self.dock.mode,
+                    self.pos.0,
+                    self.pos.1,
+                    self.reserved
+                );
+            }
+            need_frame = true;
+        }
+
+        Ok(need_frame)
+    }
+
+    /// 配置落盘。滑块一次拖动会连着产生几十次 `changed`，每条都写一次
+    /// 等于每帧一次 UTF-16 全量回写，所以走 400 ms 防抖。
+    fn step_save_config(&mut self) {
+        let Some(at) = self.cfg_dirty_at else {
+            return;
+        };
+        if at.elapsed() < Duration::from_millis(CFG_SAVE_DEBOUNCE_MS) {
+            return;
+        }
+        self.cfg_dirty_at = None;
+        if let Err(e) = save_config(&self.paths, &self.dock.cfg) {
+            eprintln!("保存配置失败（改动仍在本进程内生效）：{e}");
+            return;
+        }
+        settings_status(&mut self.settings_slot, "已保存");
+        if trace::geom() {
+            eprintln!("[settings] 已写回 {}", self.paths.ini.display());
+        }
+    }
+
+    /// 前台是沉浸式全屏（视频/游戏）时整体隐藏 Dock。
+    ///
+    /// 一秒查一次足够 —— 从全屏切回来到 Dock 重新出现，1 秒内感知不到延迟，
+    /// 而检查本身只是两个只读查询，不触发任何渲染。
+    fn step_fullscreen(&mut self) -> bool {
+        if self.last_fs_check.elapsed() < Duration::from_millis(u64::from(FS_CHECK_MS)) {
+            return false;
+        }
+        self.last_fs_check = Instant::now();
+        let fs = occlusion::is_fullscreen_foreground();
+        if trace::fs() {
+            eprintln!("[fs] {} -> {}", occlusion::fullscreen_trace(), fs);
+        }
+        if fs == self.fs_hidden {
+            return false;
+        }
+        self.fs_hidden = fs;
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
+        }
+        if trace::geom() {
+            eprintln!(
+                "[fullscreen] {}",
+                if fs { "隐藏 Dock" } else { "恢复 Dock" }
+            );
+        }
+        // 显示回来时立刻画一帧，否则会白屏到下一次事件。
+        !fs
+    }
+
+    /// 扫描运行中的应用并刷新指示点。
+    ///
+    /// 原版只在"要画指示点 / 显示运行应用 / 最小化动画"时才扫；我们把它当作
+    /// "点击能否切到已运行实例"的前提，所以只要有条目就扫（一次约 1 ms，
+    /// 1.2 s 一轮可以忽略）。
+    fn step_running_scan(&mut self) -> bool {
+        if self.raw.is_empty()
+            || self.last_scan.elapsed() < Duration::from_millis(u64::from(Dock::SCAN_INTERVAL_MS))
+        {
+            return false;
+        }
+        self.last_scan = Instant::now();
+        refresh_running(&mut self.raw, &mut self.dock)
+    }
+
+    /// 自动隐藏 / 智能隐藏。**必须轮询光标**，不能只靠窗口消息：收起后
+    /// 窗口内容被推到可视区外，那片区域的 alpha 是 0，鼠标事件会直接穿透，
+    /// 永远等不到 `WM_MOUSEMOVE`。
+    fn step_auto_hide(&mut self) -> bool {
+        if !self.dock.needs_hide_tick() {
+            return false;
+        }
+        let now_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(0);
+        let near = cursor_near(&self.dock, self.hwnd);
+        let busy = self.dock.dragging().is_some();
+        // 智能隐藏才需要枚举窗口。按需调用：`EnumWindows` 要遍历桌面上
+        // 所有顶层窗口，100 ms 一次也吃不住白跑的代价。
+        // `MINIDOCK_FAKE_COVERED=0/1` 覆盖遮挡判定结果：桌面环境不可控，
+        // 要验证"遮挡消失就展开"这条分支不能真去最小化别人的窗口。
+        let covered = self.dock.mode == DockMode::SmartHide
+            && self
+                .fake_covered
+                .unwrap_or_else(|| dock_bar_covered(&self.dock, self.hwnd, self.pos.0, self.pos.1));
+        let before = self.dock.hide_target;
+        self.dock.tick_auto_hide(near, busy, covered, now_ms);
+        if before == self.dock.hide_target {
+            return false;
+        }
+        if trace::geom() {
+            // 智能隐藏时点名盖住者："为什么躲起来"要能一眼看出，
+            // 否则只能对着一个 bool 猜是哪个窗口。
+            let by = if self.dock.mode == DockMode::SmartHide {
+                let left = self.dock.geom.bar_l.round() as i32;
+                let top = self.dock.geom.bar_top.round() as i32;
+                let right = (self.dock.geom.bar_l + self.dock.geom.bar_w).round() as i32;
+                let bottom = (self.dock.geom.bar_bottom + self.dock.metrics.margin).round() as i32;
+                occlusion::covering_window(
+                    LRect::new(
+                        self.pos.0 + left,
+                        self.pos.1 + top,
+                        self.pos.0 + right,
+                        self.pos.1 + bottom,
+                    ),
+                    &[self.hwnd],
+                )
+                .1
+                .map_or_else(String::new, |t| format!(" by {t:?}"))
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "[hide] target={} near={near} busy={busy} covered={covered}{by} cur={:.3}",
+                self.dock.hide_target, self.dock.hide_cur
+            );
+        }
+        true
+    }
+
+    /// 画一帧：egui 画 Dock → 离屏 → 回读 → 分层窗口。
+    fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // **Dock 主题**，不是设置窗口主题：`UiTheme` 与 `DockTheme` 的 0/1
+        // 含义相反（见 `config.rs` 里那条防回归测试）。用错会把整个 Dock
+        // 画成另一套配色，而且看起来"只是颜色不对"，很难察觉是取值取错了。
+        let dark = self.dock.cfg.dock_is_dark(theme::is_dark());
+        // 文字由 `core::clock` 生成：日期格式、周几、行数、顺序都在那里，
+        // 与 C 版 `ClockLines()` 一一对应（曾经在 bin 里手拼，少了年份）。
+        let clock: Option<Vec<ClockLine>> = if self.dock.cfg.clock {
+            Some(clock::clock_lines(&self.dock.cfg, &now_parts()))
+        } else {
+            None
+        };
+
+        let ppp = self.ppp;
+        let dock = &*self.dock;
+        let raw = raw_input(self.frame.size(), ppp, self.start);
+        self.frame
+            .render(&self.gpu, raw, self.hwnd, self.pos, |ui| {
+                dock.paint(ui, ppp, dark, clock.as_deref());
+            })?;
+        Ok(())
+    }
+
+    /// 按当前停靠边 / 预留区 / 尺寸重算窗口位置并移动。
+    fn reposition(&mut self) {
+        self.pos = layout::window_origin(
+            self.dock.cfg.edge,
+            self.work,
+            self.reserved,
+            self.size.0,
+            self.size.1,
+        );
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                self.pos.0,
+                self.pos.1,
+                self.size.0,
+                self.size.1,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
     }
-    if dock.cfg.reserve && dock.mode != DockMode::Always {
-        // 不预留在隐藏模式下是**故意的**（Dock 会滑走，留一块空白更怪），
-        // 但用户既然开了开关就该知道它没生效，否则会当成 bug 报上来。
-        eprintln!("`Reserve` 只在常显模式（Mode=0）下生效，当前已忽略。");
-    }
-    if std::env::var_os("MINIDOCK_GEOM").is_some() {
-        eprintln!(
-            "[layout] edge={:?} reserve={} -> pos=({x},{y}) reserved={reserved:?}",
-            dock.cfg.edge, dock.cfg.reserve
-        );
-    }
 
-    let gpu = Gpu::new("")?;
-    let mut frame = FrameRenderer::new(&gpu, win_w as u32, win_h as u32, ppp)?;
-    let start = Instant::now();
-
-    // 先把 `.lnk` 解析成真实 exe 路径：判断"是否在运行"和"点击该切过去"
-    // 都要靠它。解析有 COM 开销，所以只在启动时做一次，结果缓存在
-    // `Item.target` 里（不写回 ini，那是运行时缓存）。
-    resolve_targets(&mut raw);
-    // 初次扫描：让指示点在第一帧就正确，而不是等 1.2 秒后才亮。
-    refresh_running(&mut raw, &mut dock);
-
-    // 图标在 egui 上下文就绪之后装：纹理要 ctx 才能建。
-    load_icons(&mut dock, frame.ctx(), &raw);
-
-    // 全局快捷键 `Ctrl+Alt+D`：强制收起 / 恢复。
-    // 原版用 `cfg.hotkey` 开关，这里同样尊重配置。
-    // 注册失败（被别的程序占了）只警告，不影响启动。
-    if dock.cfg.hotkey {
-        let ok = unsafe {
-            RegisterHotKey(
-                Some(hwnd),
-                1,
-                HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0),
-                u32::from(b'D'),
-            )
-        };
-        if ok.is_err() {
-            eprintln!("快捷键 Ctrl+Alt+D 注册失败（可能被占用），强制收起不可用。");
-        }
-    }
-
-    // Dock 指针挂到窗口上，供 wndproc 回传鼠标位置。
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&raw mut *dock) as isize);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = UpdateWindow(hwnd);
-    }
-
-    // 菜单窗口与它的渲染器：懒建、复用（见 `show_menu`）。
-    let mut menu_slot: MenuSlot = None;
-    // 设置窗口同样是懒建的：第一次打开才付"装字体 + 编译 GPU 管线"那几十毫秒，
-    // 代价与取舍记在 `SettingsWindow::new` 里。
-    let mut settings_slot: Option<Pin<Box<SettingsWindow>>> = None;
-    // 设置面板改动到写盘的防抖窗口。滑块拖动会连着产生几十次改动，
-    // 每次都 `Ini::save` 等于每帧一次 UTF-16 全量回写。
-    let mut cfg_dirty_at: Option<Instant> = None;
-
-    // 全屏检测：前台是沉浸式全屏（视频/游戏）时整体隐藏 Dock。
-    // 一秒一次足够 —— 用户从全屏切回来到 Dock 重新出现，1 秒内感知不到延迟，
-    // 而检查本身只是两个只读查询，不触发任何渲染。
-    let mut last_fs_check = Instant::now();
-    let mut fs_hidden = false;
-
-    let fake_mouse: Option<(f32, f32)> = std::env::var("MINIDOCK_FAKE_MOUSE").ok().and_then(|s| {
-        let (a, b) = s.split_once(',')?;
-        Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
-    });
-    let fake_covered: Option<bool> =
-        std::env::var("MINIDOCK_FAKE_COVERED")
-            .ok()
-            .and_then(|s| match s.trim() {
-                "1" | "true" => Some(true),
-                "0" | "false" => Some(false),
-                _ => None,
-            });
-
-    let mut last_scan = Instant::now();
-
-    let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
-    loop {
-        // 本轮是否需要出帧。自动隐藏要按 100 ms 轮询光标，如果每轮都重绘，
-        // 空闲时就是 10 fps 的无谓渲染（M0 的"空闲 CPU 0%"会直接失守）。
-        let mut need_frame = false;
-
-        // ① 抽干消息队列：一条消息一帧会造成抖动。
-        loop {
-            let has = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) };
-            if !has.as_bool() {
-                break;
-            }
-            need_frame = true;
-            if msg.message == WM_QUIT {
-                return Ok(());
-            }
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-
-        // ② 重布局。**两个条件缺一不可**：
-        //    - `dirty`：鼠标进出/按下抬起改变了输入状态，必须重算 `hot`；
-        //    - `anim`：放大曲线还在走，必须推进。
-        //    早先只写了 `anim`，结果动画一收敛，鼠标再进来也不会放大 ——
-        //    因为 `hot` 只在 `update` 里算，而 `update` 不再被调用。
-        // 无人值守截图用：`MINIDOCK_FAKE_MOUSE="u,v"` 把鼠标钉在指定位置。
-        // 自动化验证时物理光标会被用户挪走，靠它才能稳定复现悬停态。
-        if let Some((u, v)) = fake_mouse {
-            dock.mouse = (u, v);
-            dock.hover = true;
-        }
-        let dirty = dock.take_dirty();
-        if dirty || dock.anim {
-            dock.update(dpi);
-            need_frame = true;
-        }
-
-        // ②.1 配置热更新：条目数变了 → 栏体宽度变了 → 窗口尺寸与位置都要改。
-        //
-        // 这条路径此前从未走过（窗口尺寸从建窗起就是固定的），风险在于
-        // 离屏纹理与 DIB 必须跟着换成新尺寸，否则 `UpdateLayeredWindow`
-        // 提交的还是一块旧尺寸的位图 —— 表现为"只有左上角一部分被画出来"。
-        let (nw, nh) = dock.physical_size_i32();
-        if nw != win_w || nh != win_h {
-            win_w = nw;
-            win_h = nh;
-            frame.resize(&gpu, nw as u32, nh as u32)?;
-            (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    x,
-                    y,
-                    win_w,
-                    win_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-            need_frame = true;
-            if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                eprintln!("[relayout] 窗口 -> ({x},{y}) {win_w}x{win_h}");
-            }
-        }
-
-        // ②.4 把拖拽产生的重排同步到配置副本，并写回 ini。
-        //
-        // `Dock` 只持有名称与类型，启动用的完整条目在主循环这边。
-        // 两边必须同步，否则"点了图标启动的是别人"。
-        while let Some((from, to)) = dock.take_pending_move() {
-            if from < raw.len() && to < raw.len() {
-                let moved = raw.remove(from);
-                raw.insert(to, moved);
-            }
-        }
-        if dock.take_order_changed() {
-            if let Err(e) = save_order(&paths, &raw) {
-                eprintln!("保存条目顺序失败：{e}");
-            }
-        }
-
-        // ②.5 点击启动。放在主循环而不是窗口过程里：
-        //      `ShellExecuteW` 可能阻塞几十毫秒，不该占着消息处理。
-        if let Some((i, force)) = dock.take_click() {
-            if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                eprintln!(
-                    "[click] 第 {i} 项 force={force} mouse={:?} slot_l={:?}",
-                    dock.mouse, dock.geom.slot_l
-                );
-            }
-            match raw.get(i) {
-                Some(item) => {
-                    // `force`（Shift+点击 / 中键）= 不管有没有在跑，都新起一个。
-                    // 原版 `LaunchItem(i, force)` 的同一个开关：开了 force 就连
-                    // "激活已有窗口"都跳过 —— 否则想开第二个实例永远开不出来。
-                    let switched = !force
-                        && running::running_key(item).is_some_and(|exe| {
-                            let toggle = dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
-                            app_window::activate(&exe, toggle)
-                        });
-                    if !switched {
-                        match launch::launch(item) {
-                            Ok(()) => {}
-                            Err(e) => eprintln!("启动「{}」失败：{e}", item.name),
-                        }
-                    } else if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                        eprintln!("[click] 切换到已运行实例：{}", item.name);
-                    }
-                    // 启动/切换之后弹一下，给一个"点到了"的反馈。
-                    // 弹跳只在真的发生了动作时播，失败不弹（否则会误导）。
-                    dock.start_bounce(i);
-                }
-                // 图标数与配置不一致时不要静默吞掉，这类错配要能看见。
-                None => eprintln!("点击了第 {i} 项，但配置里没有对应条目"),
-            }
-        }
-
-        // ②.52 右键菜单。模态：这里会阻塞到用户选择或取消。
-        if let Some((u, v)) = dock.take_menu_request() {
-            let hit = dock.hit_at(u, v);
-            let running = hit.and_then(|i| raw.get(i)).is_some_and(|it| it.running);
-            if let Some(menu) = Menu::build(hit.and_then(|i| raw.get(i)), running) {
-                // 光标位置决定菜单弹出点；工作区边界决定往哪边翻。
-                let mut pt = POINT::default();
-                let _ = unsafe { GetCursorPos(&raw mut pt) };
-                let cursor = (pt.x as f32 / ppp, pt.y as f32 / ppp);
-                // 边界用**工作区**而不是整块屏幕：菜单不该压到任务栏上。
-                let w = dock.work;
-                let bounds = (
-                    w.left as f32 / ppp,
-                    w.top as f32 / ppp,
-                    w.right as f32 / ppp,
-                    w.bottom as f32 / ppp,
-                );
-                let dark = dock.cfg.dock_is_dark(theme::is_dark());
-                match show_menu(&gpu, &mut menu_slot, menu, cursor, bounds, dark, ppp, start) {
-                    Ok(cmd) => {
-                        if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                            eprintln!(
-                                "[menu] 命中 hit={hit:?} name={:?} cmd={cmd:?}",
-                                hit.and_then(|i| raw.get(i)).map(|it| it.name.clone())
-                            );
-                        }
-                        // 设置窗口要激活另一个 HWND，不能在 `run_menu_cmd`
-                        // 里做：那儿没有 `gpu`，也不该有。
-                        // 菜单已经在上面收起，这里只是把请求带出去。
-                        let mut open_settings = false;
-                        if let Some(cmd) = cmd {
-                            if cmd == MenuCmd::Settings {
-                                open_settings = true;
-                            } else {
-                                run_menu_cmd(cmd, hit, &mut raw, &mut dock, &paths);
-                            }
-                        }
-                        if open_settings {
-                            let sw = ensure_settings(&gpu, &mut settings_slot, &paths, ppp)?;
-                            // 每次打开都重读：用户可能刚在任务管理器里改过它。
-                            sw.state.auto_start = theme::get_autostart();
-                            sw.show();
-                        }
-                    }
-                    Err(e) => eprintln!("菜单显示失败：{e}"),
-                }
-                // 菜单期间 Dock 没有重绘，回来后强制出帧并刷新悬停。
-                need_frame = true;
-                dock.mark_dirty();
-                // 取消悬停：光标多半已经不在图标上了。
-                dock.hover = false;
-                dock.mouse = (-1.0, -1.0);
-            }
-        }
-
-        // ②.53 设置窗口。**非模态**：改参数时要能一边拖动滑块一边看栏体
-        //       的变化，所以不像菜单那样把整条消息循环堵住。
-        let (changed, remount) =
-            tick_settings(&gpu, &mut settings_slot, &mut dock, &mut raw, &paths, dpi)?;
-        if changed {
-            // 配置是 Dock 与设置窗口共用的同一份：`update()` 在下一轮用它
-            // 重算几何，这里只需要要求出帧 + 排一次写盘。
-            cfg_dirty_at = Some(Instant::now());
-            need_frame = true;
-            dock.mark_dirty();
-            if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                eprintln!("[settings] 配置有改动，排定写盘");
-            }
-        }
-        if remount {
-            // 停靠边 / 预留 / 隐藏模式变了：AppBar 得重新注册，窗口位置
-            // 得跟着新边算。尺寸若也变了（左右停靠要转置 lw/lh），下一轮
-            // ②.1 会 resize —— 这里先按旧尺寸摆到新位置，差的是一帧。
-            dock.mode = dock.cfg.mode;
-            reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
-                appbar.apply(
-                    dock.cfg.edge,
-                    dock.reserve_thickness(),
-                    display::monitor_rect(0),
-                )
-            } else {
-                appbar.remove();
-                None
-            };
-            (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    x,
-                    y,
-                    win_w,
-                    win_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-            if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                eprintln!(
-                    "[settings] 重挂 edge={:?} reserve={} mode={:?} -> pos=({x},{y}) reserved={reserved:?}",
-                    dock.cfg.edge, dock.cfg.reserve, dock.mode
-                );
-            }
-            need_frame = true;
-        }
-
-        // ②.535 配置落盘。滑块一次拖动会连着产生几十次 `changed`，
-        //        每条都写一次等于每帧一次 UTF-16 全量回写。
-        if let Some(at) = cfg_dirty_at {
-            if at.elapsed() >= Duration::from_millis(CFG_SAVE_DEBOUNCE_MS) {
-                cfg_dirty_at = None;
-                if let Err(e) = save_config(&paths, &dock.cfg) {
-                    eprintln!("保存配置失败（改动仍在本进程内生效）：{e}");
-                } else {
-                    settings_status(&mut settings_slot, "已保存");
-                    if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                        eprintln!("[settings] 已写回 {}", paths.ini.display());
-                    }
-                }
-            }
-        }
-
-        // ②.55 全屏时整体隐藏。
-        if last_fs_check.elapsed() >= Duration::from_millis(u64::from(FS_CHECK_MS)) {
-            last_fs_check = Instant::now();
-            let fs = occlusion::is_fullscreen_foreground();
-            if std::env::var_os("MINIDOCK_FS_TRACE").is_some() {
-                eprintln!("[fs] {} -> {}", occlusion::fullscreen_trace(), fs);
-            }
-            if fs != fs_hidden {
-                fs_hidden = fs;
-                unsafe {
-                    let _ = ShowWindow(hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
-                }
-                if !fs {
-                    // 显示回来时立刻画一帧，否则会白屏到下一次事件。
-                    need_frame = true;
-                }
-                if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                    eprintln!(
-                        "[fullscreen] {}",
-                        if fs { "隐藏 Dock" } else { "恢复 Dock" }
-                    );
-                }
-            }
-        }
-
-        // ②.6 自动隐藏。**必须轮询光标**，不能只靠窗口消息：
-        //      收起后窗口内容被推到可视区外，那片区域的 alpha 是 0，
-        //      鼠标事件会直接穿透，永远等不到 `WM_MOUSEMOVE`。
-        // ②.4 运行状态扫描。原版只在"要画指示点 / 显示运行应用 / 最小化动画"
-        //      时才扫；我们把它当作"点击能否切到已运行实例"的前提，
-        //      所以只要有条目就扫（一次约 1 ms，1.2 s 一轮可以忽略）。
-        if !raw.is_empty()
-            && last_scan.elapsed()
-                >= std::time::Duration::from_millis(u64::from(Dock::SCAN_INTERVAL_MS))
-        {
-            last_scan = Instant::now();
-            if refresh_running(&mut raw, &mut dock) {
-                need_frame = true;
-            }
-        }
-
-        let now_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(0);
-        if dock.needs_hide_tick() {
-            let near = cursor_near(&dock, hwnd);
-            let busy = dock.dragging().is_some();
-            // 智能隐藏才需要枚举窗口。按需调用：`EnumWindows` 要遍历桌面上
-            // 所有顶层窗口，100 ms 一次也吃不住白跑的代价。
-            // `MINIDOCK_FAKE_COVERED=0/1` 覆盖遮挡判定结果。
-            // 桌面环境不可控（用户随时开着窗口），要验证"遮挡消失就展开"
-            // 这条分支，不能真去最小化别人的窗口 —— 用注入把外部条件固定住。
-            let covered = dock.mode == DockMode::SmartHide
-                && fake_covered.unwrap_or_else(|| dock_bar_covered(&dock, hwnd, x, y));
-            let before = dock.hide_target;
-            dock.tick_auto_hide(near, busy, covered, now_ms);
-            if before != dock.hide_target {
-                need_frame = true;
-                if std::env::var_os("MINIDOCK_GEOM").is_some() {
-                    // 智能隐藏时点名盖住者："为什么躲起来"要能一眼看出，
-                    // 否则只能对着一个 bool 猜是哪个窗口。
-                    let by = if dock.mode == DockMode::SmartHide {
-                        let left = dock.geom.bar_l.round() as i32;
-                        let top = dock.geom.bar_top.round() as i32;
-                        let right = (dock.geom.bar_l + dock.geom.bar_w).round() as i32;
-                        let bottom = (dock.geom.bar_bottom + dock.metrics.margin).round() as i32;
-                        occlusion::covering_window(
-                            LRect::new(x + left, y + top, x + right, y + bottom),
-                            &[hwnd],
-                        )
-                        .1
-                        .map_or_else(String::new, |t| format!(" by {t:?}"))
-                    } else {
-                        String::new()
-                    };
-                    eprintln!(
-                        "[hide] target={} near={near} busy={busy} covered={covered}{by} cur={:.3}",
-                        dock.hide_target, dock.hide_cur
-                    );
-                }
-            }
-        }
-
-        // ③ 出帧。动画中的隐藏/展开由 `dock.anim` 驱动，这里一并覆盖：
-        //    `tick_hide` 推进时会把 `anim` 置真，下一轮 `update` 会设 `need_frame`。
-        if need_frame || dock.anim {
-            render(&dock, &mut frame, &gpu, hwnd, (x, y), ppp, start)?;
-        }
-
-        // ④ 等待：有消息就醒；动画中按 16 ms 醒一次；自动隐藏 / 强制收起
-        //    开着时按 100 ms 轮询光标。
-        //
-        // 扫描周期与全屏检测都要参与超时，否则常显模式下会一直睡着 ——
-        // `INFINITE` 等不到"时间过去"这种事件，指示点与全屏状态都不会更新。
-        // 取两者较小值：全屏检测 1 s 一次，扫描间隔通常更长。
-        let timeout = if dock.anim {
+    /// 等下一个事件。有消息就醒；动画中按 16 ms 醒一次；自动隐藏 / 强制
+    /// 收起开着时按 100 ms 轮询光标。
+    ///
+    /// 扫描周期与全屏检测都要参与超时，否则常显模式下会一直睡着 ——
+    /// `INFINITE` 等不到"时间过去"这种事件，指示点与全屏状态都不会更新。
+    /// 取两者较小值：全屏检测 1 s 一次，扫描间隔通常更长。
+    fn wait(&self) {
+        let timeout = if self.dock.anim {
             16
-        } else if dock.needs_hide_tick() {
+        } else if self.dock.needs_hide_tick() {
             100
-        } else if raw.is_empty() {
+        } else if self.raw.is_empty() {
             FS_CHECK_MS
         } else {
             Dock::SCAN_INTERVAL_MS.min(FS_CHECK_MS)
@@ -623,54 +810,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// 画一帧：egui 画 Dock → 离屏 → 回读 → 分层窗口。
-#[allow(clippy::too_many_arguments)]
-fn render(
-    dock: &Dock,
-    frame: &mut FrameRenderer,
-    gpu: &Gpu,
-    hwnd: HWND,
-    pos: (i32, i32),
-    ppp: f32,
-    start: Instant,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // **Dock 主题**，不是设置窗口主题：`UiTheme` 与 `DockTheme` 的 0/1
-    // 含义相反（见 `config.rs` 里那条防回归测试）。用错会把整个 Dock
-    // 画成另一套配色，而且看起来"只是颜色不对"，很难察觉是取值取错了。
-    let dark = dock.cfg.dock_is_dark(theme::is_dark());
-    // 文字由 `core::clock` 生成：日期格式、周几、行数、顺序都在那里，
-    // 与 C 版 `ClockLines()` 一一对应（曾经在 bin 里手拼，少了年份）。
-    let clock: Option<Vec<ClockLine>> = if dock.cfg.clock {
-        Some(clock::clock_lines(&dock.cfg, &now_parts()))
+/// 把队列里的消息一次处理完：逐条唤醒会造成"一帧一消息"的抖动。
+///
+/// 做成自由函数而不是 `App` 的方法：处理消息期间不需要碰 `App`，
+/// 少一层借用关系。
+fn pump(msg: &mut MSG) -> Pumped {
+    let mut saw = false;
+    loop {
+        let has = unsafe { PeekMessageW(msg, None, 0, 0, PM_REMOVE) };
+        if !has.as_bool() {
+            break;
+        }
+        saw = true;
+        if msg.message == WM_QUIT {
+            return Pumped::Quit;
+        }
+        unsafe {
+            let _ = TranslateMessage(msg);
+            DispatchMessageW(msg);
+        }
+    }
+    if saw {
+        Pumped::Frames
     } else {
-        None
-    };
+        Pumped::Idle
+    }
+}
 
-    // `screen_rect` 必须给对：egui 用它决定根 Ui 的尺寸。
-    // 不给的话画布是默认大小，栏体就会被画在错误的位置（M1 第一版就踩了）。
-    let (w, h) = frame.size();
-    let mut raw = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(w as f32 / ppp, h as f32 / ppp),
-        )),
-        time: Some(start.elapsed().as_secs_f64()),
-        ..Default::default()
-    };
-    // egui 0.37 通过 `ViewportInfo::native_pixels_per_point` 接收原生缩放。
-    // 不设的话 egui 按 1.0 缩放：画面只占表面的 1/ppp（偏左上、尺寸偏小）。
-    raw.viewports.insert(
-        egui::ViewportId::ROOT,
-        egui::ViewportInfo {
-            native_pixels_per_point: Some(ppp),
-            ..Default::default()
-        },
+/// `MINIDOCK_FAKE_MOUSE="u,v"`：解析成钉住的光标位置（逻辑/物理同单位的
+/// Dock 内部坐标）。格式不对就当没设。
+fn fake_mouse_from_env() -> Option<(f32, f32)> {
+    let s = std::env::var("MINIDOCK_FAKE_MOUSE").ok()?;
+    let (a, b) = s.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// `MINIDOCK_FAKE_COVERED=0/1`：覆盖智能隐藏的遮挡判定。
+fn fake_covered_from_env() -> Option<bool> {
+    let s = std::env::var("MINIDOCK_FAKE_COVERED").ok()?;
+    match s.trim() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// `MINIDOCK_GEOM=1` 时打印度量与槽位，用于与 C 版逐项对拍
+/// （验收 ≤1 px 时靠它定位）。
+fn dump_geometry(dock: &Dock, dpi: i32) {
+    if !trace::geom() {
+        return;
+    }
+    let m = &dock.metrics;
+    eprintln!(
+        "GEOM dpi={dpi} S={:.1} Z={:.1} g={:.1} sep={:.1} pad={:.1} padX={:.1} barH={:.1} \
+         over={:.1} margin={:.1} clockW={} clockExtra={:.1} reflH={:.1} lw={} lh={}",
+        m.s,
+        m.z,
+        m.gap,
+        m.sep_w,
+        m.pad,
+        m.pad_x,
+        m.bar_h,
+        m.overhang,
+        m.margin,
+        m.clock_w,
+        m.clock_extra,
+        m.refl_h,
+        m.lw,
+        m.lh
     );
-
-    frame.render(gpu, raw, hwnd, pos, |ui| {
-        dock.paint(ui, ppp, dark, clock.as_deref());
-    })?;
-    Ok(())
+    eprintln!(
+        "GEOM bar_l={:.1} bar_w={:.1} bar_top={:.1} bar_bottom={:.1} icon_bottom={:.1}",
+        dock.geom.bar_l,
+        dock.geom.bar_w,
+        dock.geom.bar_top,
+        dock.geom.bar_bottom,
+        dock.geom.icon_bottom
+    );
+    eprintln!("GEOM slot_l={:?}", dock.geom.slot_l);
 }
 
 /// 取本地时间，转成 `core` 用的结构（去掉 Win32 依赖）。
@@ -913,7 +1131,7 @@ fn load_icons(dock: &mut Dock, ctx: &egui::Context, raw: &[Item]) {
         }
     }
     eprintln!("图标: 已装 {ok} 个，未取到 {miss} 个（未取到的画首字占位）");
-    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+    if trace::geom() {
         for (i, item) in raw.iter().enumerate() {
             eprintln!(
                 "  [{i}] kind={:?} path=<{}> args=<{}>",
@@ -1015,7 +1233,7 @@ fn resolve_targets(items: &mut [Item]) {
             resolved += 1;
         }
     }
-    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+    if trace::geom() {
         eprintln!("[scan] 解析出 {resolved} 个可执行目标");
     }
 }
@@ -1032,7 +1250,7 @@ fn refresh_running(raw: &mut [Item], dock: &mut Dock) -> bool {
         for (slot, item) in dock.items.iter_mut().zip(raw.iter()) {
             slot.running = item.running;
         }
-        if std::env::var_os("MINIDOCK_GEOM").is_some() {
+        if trace::geom() {
             let names: Vec<&str> = raw
                 .iter()
                 .filter(|i| i.running)
@@ -1079,7 +1297,7 @@ unsafe extern "system" fn menu_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
-        if std::env::var_os("MINIDOCK_MENU_TRACE").is_some() {
+        if trace::menu() {
             eprintln!("[menu-proc] msg=0x{msg:04X} wparam=0x{:X}", wparam.0);
         }
         match msg {
@@ -1213,7 +1431,11 @@ fn show_menu(
         }
     }
 
-    let (hwnd, renderer) = slot.as_mut().expect("上一段刚建好");
+    // 上面刚保证 `Some`；用 `ok_or` 而不是 `expect`：万一将来改动破坏了这个
+    // 不变量，应当报错而不是把进程打崩。
+    let Some((hwnd, renderer)) = slot.as_mut() else {
+        return Err("菜单窗口未初始化".into());
+    };
     renderer.resize(gpu, pw as u32, ph as u32)?;
 
     // 位置与尺寸一起改：菜单每次打开的高度都可能不同。
@@ -1221,7 +1443,7 @@ fn show_menu(
         let _ = SetWindowPos(*hwnd, Some(HWND_TOPMOST), px, py, pw, ph, SWP_NOACTIVATE);
     }
 
-    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+    if trace::geom() {
         eprintln!(
             "[menu] items={} labels={:?} logical=({lw},{lh}) physical=({pw},{ph}) at=({px},{py})",
             menu.entries.len(),
@@ -1265,7 +1487,7 @@ fn show_menu(
             let dark = state.dark;
             renderer.render(
                 gpu,
-                menu_raw(renderer.size(), ppp, start),
+                raw_input(renderer.size(), ppp, start),
                 *hwnd,
                 (px, py),
                 |ui| menu.paint(ui, dark),
@@ -1276,7 +1498,7 @@ fn show_menu(
         }
     }
 
-    if std::env::var_os("MINIDOCK_GEOM").is_some() {
+    if trace::geom() {
         eprintln!("[menu] 关闭 cmd={:?}", state.cmd);
     }
     unsafe {
@@ -1418,7 +1640,9 @@ fn ensure_settings<'a>(
         // `new` 返回的是 pin 住的装箱值：窗口过程按地址找它，地址不能变。
         *slot = Some(SettingsWindow::new(gpu, state, ppp)?);
     }
-    Ok(slot.as_mut().expect("上一段刚塞进去"))
+    // 同上：刚塞进去就取不出来说明逻辑有 bug，返回错误比 panic 好定位。
+    let sw = slot.as_mut().ok_or("设置窗口未初始化")?;
+    Ok(&mut **sw)
 }
 
 /// 每轮给设置窗口一次机会。
@@ -1581,8 +1805,13 @@ fn settings_status(slot: &mut Option<Pin<Box<SettingsWindow>>>, text: &str) {
     }
 }
 
-/// 菜单的单帧输入。与 Dock 的 `render` 同口径，只是没有时钟与鼠标状态。
-fn menu_raw(size: (u32, u32), ppp: f32, start: Instant) -> egui::RawInput {
+/// 构造单帧 `RawInput`。Dock 与菜单共用同一口径 —— 这两处原来各写一遍。
+///
+/// - `screen_rect` 必须给对：egui 用它决定根 Ui 的尺寸，给错栏体会被画在
+///   错误的位置（M1 第一版就踩了）。
+/// - `native_pixels_per_point` 决定原生缩放，不设的话 egui 按 1.0 算，
+///   画面只占表面的 1/ppp（偏左上、尺寸偏小）。
+fn raw_input(size: (u32, u32), ppp: f32, start: Instant) -> egui::RawInput {
     let (w, h) = size;
     let mut raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(

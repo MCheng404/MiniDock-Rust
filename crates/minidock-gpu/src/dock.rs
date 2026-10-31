@@ -1234,6 +1234,13 @@ impl Dock {
             Color32::from_rgba_unmultiplied(c1.0 as u8, c1.1 as u8, c1.2 as u8, (op * 255.0) as u8),
             Color32::from_rgba_unmultiplied(c2.0 as u8, c2.1 as u8, c2.2 as u8, (op * 255.0) as u8),
         );
+        // `BgMode::Solid` 画纯色；`Gradient` 与 `Frost` 都走渐变。
+        //
+        // 磨砂**还没实现**（PORTING.md 的 M3：需要桌面捕获 + compute 模糊），
+        // 而 `Frost` 恰好是默认值 —— 所以开箱看到的是渐变，而设置界面里
+        // 那一项仍写着"磨砂玻璃"，看起来像 bug。这是有意的降级
+        // （PORTING.md 第 11 行："关闭磨砂 = 退回渐变"），M3 落地后这里
+        // 才需要分成两支。
         if self.cfg.get_i32(Key::BgMode) == 0 {
             painter.rect_filled(rect, CornerRadius::same(r8(rad)), c1);
         } else {
