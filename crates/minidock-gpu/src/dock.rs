@@ -203,6 +203,14 @@ pub struct DockGeom {
 /// Dock 本体。
 #[derive(Debug)]
 pub struct Dock {
+    /// 待处理的小组件点击（资源监视器卡片被点了）。
+    ///
+    /// 小组件卡片不在条目槽位里，所以走单独一条命中路径。
+    pub widget_click: Option<layout::WidgetKind>,
+    /// CPU 占用率采样器（需要前后两次采样才能算出差值）。
+    cpu_sampler: minidock_platform::CpuSampler,
+    /// 最近一次系统采样结果。
+    sysinfo: minidock_platform::SysInfo,
     pub cfg: Config,
     pub items: Vec<DockItem>,
     /// 工作区（物理像素），用于算可用边长。
@@ -284,6 +292,9 @@ impl Dock {
     #[must_use]
     pub fn new(cfg: Config, items: Vec<DockItem>, work: LRect) -> Self {
         Self {
+            widget_click: None,
+            cpu_sampler: minidock_platform::CpuSampler::new(),
+            sysinfo: minidock_platform::SysInfo::default(),
             cfg,
             items,
             work,
@@ -340,6 +351,40 @@ impl Dock {
             self.metrics.z,
             self.metrics.lh as f32,
         )
+    }
+
+    /// 鼠标落在哪个小组件卡片上。
+    ///
+    /// 对应上游 v1.6.0 的 `WidgetAt()`（minidock.c:9092）：
+    /// 卡片在栏体的外侧，纵向范围是栏体上下各放宽 4 px。
+    #[must_use]
+    pub fn widget_at(&self, u: f32, v: f32) -> Option<layout::WidgetKind> {
+        let m = &self.metrics;
+        for (i, (kind, w)) in m.widgets.iter().enumerate() {
+            let Some(left) = m
+                .widgets
+                .left_of(i, self.geom.bar_l, self.geom.bar_w, m.gap)
+            else {
+                continue;
+            };
+            let right = left + w as f32;
+            let top = self.geom.bar_top - 4.0;
+            let bottom = self.geom.bar_top + m.bar_h + 4.0;
+            if u >= left && u <= right && v >= top && v <= bottom {
+                return Some(kind);
+            }
+        }
+        None
+    }
+
+    /// 记下一次小组件点击。
+    pub fn click_widget(&mut self, kind: layout::WidgetKind) {
+        self.widget_click = Some(kind);
+    }
+
+    /// 取走待处理的小组件点击。
+    pub fn take_widget_click(&mut self) -> Option<layout::WidgetKind> {
+        self.widget_click.take()
     }
 
     /// 左键按下：记下命中项，并准备拖拽。返回是否需要 `SetCapture`。
@@ -840,11 +885,14 @@ impl Dock {
                 Color32::from_rgba_unmultiplied(255, 255, 255, 190),
             );
         }
+        // 小组件条带（上游 v1.6.0）：时钟卡片与资源监视器。
+        // 位置由 `WidgetStrip::left_of` 给，不是硬编码的"栏体右缘"。
         if let Some(lines) = clock {
             if !lines.is_empty() {
                 self.paint_clock_card(painter, p, dark, lines);
             }
         }
+        self.paint_resource_card(painter, p, dark, ui.ctx());
         self.paint_separators(painter, p, dark);
         self.paint_icons(painter, p, dark);
         // 残影必须画在所有槽位内容之后，否则会被后面画的图标盖住。
@@ -891,6 +939,108 @@ impl Dock {
     fn bar_radius(&self, p: Proj) -> f32 {
         let r = (self.cfg.radius as f32).min(self.metrics.bar_h / 2.0);
         r * p.k
+    }
+
+    /// 资源监视器卡片：栏体 + "CPU xx%"（双倍宽时加内存）。
+    ///
+    /// 对应上游 v1.6.0 的 `DrawRes()`（minidock.c:6521）。
+    /// 上游的文案是 `CPU %d%%`，双倍宽时是 `CPU %d%%   RAM %d%%`。
+    fn paint_resource_card(
+        &self,
+        painter: &egui::Painter,
+        p: Proj,
+        dark: bool,
+        ctx: &egui::Context,
+    ) {
+        let m = &self.metrics;
+        let Some(idx) = m
+            .widgets
+            .iter()
+            .position(|(k, _)| k == layout::WidgetKind::Resource)
+        else {
+            return; // 条带里没有资源监视器
+        };
+        let Some(left) = m
+            .widgets
+            .left_of(idx, self.geom.bar_l, self.geom.bar_w, m.gap)
+        else {
+            return;
+        };
+        let width = m
+            .widgets
+            .width_of(layout::WidgetKind::Resource)
+            .unwrap_or(0);
+        if width <= 0 {
+            return;
+        }
+        let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
+        self.paint_bar(painter, c, self.bar_radius(p), dark);
+
+        // 上游双倍宽时把内存也塞进同一张卡片。
+        let text = if m.widgets.on_left || layout::WidgetKind::Resource.is_wide(&self.cfg) {
+            format!(
+                "CPU {}%   RAM {}%",
+                self.sysinfo.cpu_percent, self.sysinfo.mem_percent
+            )
+        } else {
+            format!("CPU {}%", self.sysinfo.cpu_percent)
+        };
+        let color = if dark {
+            Color32::from_rgba_unmultiplied(232, 240, 240, 245)
+        } else {
+            Color32::from_rgba_unmultiplied(232, 30, 32, 40)
+        };
+        // 上游靠 GDI+ 的 fit-to-rect 自动缩字，egui 不会 ——
+        // 这里量一次宽度，装不下就缩字号。卡片留 4 px 内边距。
+        let mut size = self.small_font_size();
+        let avail = c.width() - 8.0;
+        // 用 galley 量真实文字宽度（`row_height` 只给行高，量不出字宽）。
+        let galley = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                text.clone(),
+                FontId::proportional(size),
+                egui::Color32::WHITE,
+            )
+        });
+        if galley.size().x > avail && galley.size().x > 0.0 {
+            size *= avail / galley.size().x;
+        }
+        painter.text(
+            c.center(),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(size),
+            color,
+        );
+    }
+
+    /// 资源监视器卡片用的字号。
+    ///
+    /// 上游用 `Sc(10)`（固定 10 逻辑像素，`v1.6.0:9505`）。
+    /// 这里不能照抄成固定值 —— 卡片宽度是 `barH × 1.16`，栏高会随
+    /// 条目数量被压缩（128 个条目时 `barH` 从 76 掉到 37），
+    /// 固定 10pt 在窄卡片里会被裁成 "PU%"。
+    ///
+    /// 所以按**栏高**的比例走：`barH × 0.27` 在 76 栏高下约 20 物理像素
+    /// （= 13.5 逻辑点，与上游 `Sc(10)` 同量级），栏高被压缩时同比缩小，
+    /// 文字始终装得下。
+    fn small_font_size(&self) -> f32 {
+        (self.metrics.bar_h * 0.27).max(8.0)
+    }
+
+    /// 刷新系统采样。
+    ///
+    /// **不能每帧都调**：`GetSystemTimes` 与 `GlobalMemoryStatusEx` 都不是
+    /// 便宜调用，而 CPU 占用率本身要 1 秒才有意义。1 秒一次足够，
+    /// 上游的绘制也是每次重绘才重新采样。
+    pub fn refresh_sysinfo(&mut self) {
+        self.sysinfo = minidock_platform::sysinfo::sample(&mut self.cpu_sampler);
+    }
+
+    /// 最近一次采样结果。
+    #[must_use]
+    pub const fn sysinfo(&self) -> minidock_platform::SysInfo {
+        self.sysinfo
     }
 
     /// 时钟卡片：栏体 + 时间 + 日期（横向/纵向都由 `clock_w` 决定）。
@@ -1642,6 +1792,42 @@ mod tests {
         }
         // 栏体之外的左侧不该命中任何条目。
         assert_eq!(dock.hit_at(dock.geom.bar_l - 30.0, 120.0), None);
+    }
+
+    /// 小组件卡片的命中判定（上游 `WidgetAt()`）。
+    #[test]
+    fn widget_at_finds_the_card() {
+        let mut c = Config::defaults(96);
+        c.clock = true;
+        c.apply_i32(Key::RES_MON, 1);
+        let mut dock = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
+        dock.update(96);
+
+        // 条带里有资源卡片。
+        let idx = dock
+            .metrics
+            .widgets
+            .iter()
+            .position(|(k, _)| k == layout::WidgetKind::Resource);
+        let idx = idx.expect("条带里应当有资源卡片");
+        let left = dock
+            .metrics
+            .widgets
+            .left_of(idx, dock.geom.bar_l, dock.geom.bar_w, dock.metrics.gap)
+            .expect("应当有位置");
+        let w = dock
+            .metrics
+            .widgets
+            .width_of(layout::WidgetKind::Resource)
+            .expect("应当有宽度");
+        let y = dock.geom.bar_top + dock.metrics.bar_h / 2.0;
+
+        assert_eq!(
+            dock.widget_at(left + w as f32 / 2.0, y),
+            Some(layout::WidgetKind::Resource)
+        );
+        // 栏体中央（图标区）不该命中卡片。
+        assert_eq!(dock.widget_at(dock.geom.bar_l + 10.0, y), None);
     }
 
     /// 点击必须"按下与抬起在同一个图标上"，否则从图标拖到别处松手会误启动。

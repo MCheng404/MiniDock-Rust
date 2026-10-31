@@ -27,6 +27,7 @@ use minidock_gpu::dock::{Dock, DockItem};
 use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
 use minidock_gpu::menu::{Menu, MenuCmd};
+use minidock_gpu::resmon_win::ResMonWindow;
 use minidock_gpu::settings_win::SettingsWindow;
 use minidock_gpu::worker::{
     DiskWriter, IconLoader, IconRequest, OpenJob, Opener, ScanInput, Scanner, Waker, WriteJob,
@@ -148,6 +149,10 @@ struct App {
     icons: IconLoader,
     /// 运行状态 + 遮挡检测（两者都要 `EnumWindows`，合并到一条线程）。
     scanner: Scanner,
+    /// 上一次刷新系统采样的时刻（资源监视器卡片用）。
+    last_sysinfo: std::time::Instant,
+    /// 资源监视器详情面板。懒建：大部分会话不会点开它。
+    resmon_slot: Option<Pin<Box<ResMonWindow>>>,
     /// 写 ini（串行，天然保序）。
     disk: DiskWriter,
     /// 启动 / 激活应用（`ShellExecuteW`）。
@@ -334,6 +339,8 @@ impl App {
         let waker = Waker::new(hwnd);
         let icons = IconLoader::spawn(waker)?;
         let scanner = Scanner::spawn(hwnd.0 as isize, waker)?;
+        let last_sysinfo = std::time::Instant::now();
+        let resmon_slot: Option<Pin<Box<ResMonWindow>>> = None;
         let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
         let opener = Opener::spawn()?;
         // 先把所有图标排进队列：工作线程攒批处理，UI 线程立刻返回。
@@ -373,6 +380,8 @@ impl App {
             settings_slot: None,
             icons,
             scanner,
+            last_sysinfo,
+            resmon_slot,
             disk,
             opener,
             dirty_at: None,
@@ -434,6 +443,9 @@ impl App {
             // ⑧ 后台结果：图标、运行状态、遮挡。全部 `try_recv`，不等。
             need_frame |= self.step_icons();
             need_frame |= self.step_scan();
+            // ⑧.5 资源监视器小组件：按秒刷新采样 + 详情面板。
+            need_frame |= self.step_sysinfo();
+            need_frame |= self.step_resmon()?;
             self.sync_cover_target();
             // ⑨ 写盘（防抖到期才发，写本身在别的线程，不需要出帧）。
             self.step_disk();
@@ -850,6 +862,69 @@ impl App {
         need_frame
     }
 
+    /// 刷新资源监视器小组件的采样。
+    ///
+    /// **按秒来**，不能每帧都调：`GetSystemTimes` 与
+    /// `GlobalMemoryStatusEx` 都不是便宜调用，而 CPU 占用率本身
+    /// 也只有秒级意义。
+    ///
+    /// 上游是"每次重绘才重新采样"，但它的重绘频率本来就低；
+    /// 我们这边空闲时几乎不出帧，所以改成定时更合适。
+    fn step_sysinfo(&mut self) -> bool {
+        // 条带里没有资源监视器就不用采样。
+        if self
+            .dock
+            .metrics
+            .widgets
+            .iter()
+            .all(|(k, _)| k != minidock_core::layout::WidgetKind::Resource)
+        {
+            return false;
+        }
+        if self.last_sysinfo.elapsed() < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        self.last_sysinfo = std::time::Instant::now();
+        let before = self.dock.sysinfo();
+        self.dock.refresh_sysinfo();
+        let after = self.dock.sysinfo();
+        // 数值没变就不用重画：CPU 占用率常年是 0，每秒重画一次太浪费。
+        before != after
+    }
+
+    /// 资源监视器详情面板。
+    ///
+    /// 面板是懒建的：第一次点卡片才建窗口（建窗口要编译渲染管线，
+    /// 几十毫秒，不能记在启动时间上）。
+    fn step_resmon(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        // 卡片被点了 → 打开面板。
+        if let Some(kind) = self.dock.take_widget_click() {
+            if kind == minidock_core::layout::WidgetKind::Resource {
+                if self.resmon_slot.is_none() {
+                    let dark = self
+                        .dock
+                        .cfg
+                        .dock_is_dark(minidock_platform::theme::is_dark());
+                    let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
+                    win.attach_public();
+                    self.resmon_slot = Some(win);
+                }
+                if let Some(win) = self.resmon_slot.as_mut() {
+                    win.show();
+                }
+            }
+        }
+        // 面板到期就重绘（数据每秒变一次）。
+        let Some(win) = self.resmon_slot.as_mut() else {
+            return Ok(false);
+        };
+        if win.visible() && win.due() {
+            win.render(&self.gpu)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// 把"该检测哪块矩形被遮挡"同步给扫描线程。
     ///
     /// 只在矩形真的变了时才发：主循环一秒跑几十轮，每轮都发会把队列灌满，
@@ -972,6 +1047,33 @@ impl App {
     }
 
     /// 画一帧：egui 画 Dock → 离屏 → 回读 → 分层窗口。
+    /// 打印小组件条带里每个卡片的**屏幕**坐标。
+    ///
+    /// 栏体坐标是窗口内的，自动化脚本要点击就得知道屏幕坐标 ——
+    /// 让程序自己报，比脚本自己推算靠谱（推算过一次，忘了加窗口偏移，
+    /// 点在了空气里）。
+    fn dump_widgets(&self) {
+        if !trace::geom() {
+            return;
+        }
+        let dock = &*self.dock;
+        for (i, (kind, w)) in dock.metrics.widgets.iter().enumerate() {
+            if let Some(left) =
+                dock.metrics
+                    .widgets
+                    .left_of(i, dock.geom.bar_l, dock.geom.bar_w, dock.metrics.gap)
+            {
+                eprintln!(
+                    "GEOM widget={kind:?} screen=({x},{y}) size=({w},{h})",
+                    x = left as i32 + self.pos.0,
+                    y = dock.geom.bar_top as i32 + self.pos.1,
+                    w = w,
+                    h = dock.metrics.bar_h as i32
+                );
+            }
+        }
+    }
+
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // **Dock 主题**，不是设置窗口主题：`UiTheme` 与 `DockTheme` 的 0/1
         // 含义相反（见 `config.rs` 里那条防回归测试）。用错会把整个 Dock
@@ -992,6 +1094,7 @@ impl App {
             .render(&self.gpu, raw, self.hwnd, self.pos, |ui| {
                 dock.paint(ui, ppp, dark, clock.as_deref());
             })?;
+        self.dump_widgets();
         Ok(())
     }
 
@@ -1222,10 +1325,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if GetCapture() == hwnd {
                         let _ = ReleaseCapture();
                     }
-                    // 只记录"点了哪个"，真正的启动放在主循环里做：
-                    // `ShellExecuteW` 可能阻塞几十毫秒，不该占着窗口过程。
-                    let _ = (*ptr).release_at(u, v);
-                    (*ptr).mark_dirty();
+                    // 小组件卡片在栏体外侧，不在条目槽位里 ——
+                    // 先判它，命中就记卡片点击，不当条目点击。
+                    if let Some(kind) = (*ptr).widget_at(u, v) {
+                        (*ptr).click_widget(kind);
+                        (*ptr).mark_dirty();
+                    } else {
+                        // 只记录"点了哪个"，真正的启动放在主循环里做：
+                        // `ShellExecuteW` 可能阻塞几十毫秒，不该占着窗口过程。
+                        let _ = (*ptr).release_at(u, v);
+                        (*ptr).mark_dirty();
+                    }
                 }
             }
             LRESULT(0)

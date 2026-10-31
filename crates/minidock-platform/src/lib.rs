@@ -16,6 +16,7 @@ pub mod occlusion;
 pub mod paths;
 pub mod shortcut;
 pub mod single_instance;
+pub mod sysinfo;
 pub mod theme;
 pub mod win;
 
@@ -25,3 +26,4 @@ pub use gpu::{AdapterInfo, AdapterKind};
 pub use icon::IconBitmap;
 pub use paths::Paths;
 pub use single_instance::SingleInstance;
+pub use sysinfo::{CpuSampler, SysInfo};

@@ -103,6 +103,32 @@
 
 ---
 
+## 0.5.0 — 资源监视器小组件（ADR-039，2026-10-31）
+
+### 新增
+
+- **资源监视器小组件**：条带上多一张「CPU xx%」卡片（双倍宽时显示
+  CPU + RAM），点它弹出详情面板 —— 处理器 / 内存 / 磁盘（C:）三条进度条。
+  对应上游 v1.6.0 的 `DrawRes()` / `ShowResMon()`。
+- **`platform::sysinfo`**：CPU 占用率（`GetSystemTimes` 差值）、
+  内存占用（`GlobalMemoryStatusEx`）、磁盘占用（`GetDiskFreeSpaceExW`）。
+- **按秒采样、数值变了才出帧** —— 不是每帧调系统 API。
+- **`MINIDOCK_GEOM=1` 新增一行** `GEOM widget=... screen=(x,y) size=(w,h)`，
+  报小组件卡片的屏幕坐标，自动化脚本照着点。
+
+### 缺陷修复
+
+- **卡片文字会溢出**：上游靠 GDI+ 的 fit-to-rect 自动缩字，egui 不会。
+  改为字号按栏高走 + 量了字宽再缩。
+- **详情面板半透明且数值消失**：面板传了 `RawInput::default()`，
+  没有 `screen_rect`，egui 的绘制区只有一小块。改用 `Input::take()`。
+
+### 实测
+
+- 截图确认：条带上「CPU 11%」完整显示在卡片内；面板显示
+  「处理器 4% / 内存 20152 / 64733 MB / 磁盘 可用 50 / 299 GB」。
+- 质量门禁：`fmt --check`、`clippy -D warnings`、218 条测试全绿。
+
 ## 0.4.0 — 吸收上游 v1.6.0：23 个新键与小组件条带（ADR-038，2026-10-31）
 
 ### 新增

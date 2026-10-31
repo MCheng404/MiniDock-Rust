@@ -186,6 +186,7 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 | 设置窗口外壳 | `ShowSettings` `DarkTitle` | `gpu::settings_win` | ✅ |
 | 设置内容 | `BuildRows` `PaintSettings` `SetProc` `RowHit` `DoAct` | `settings::pages` | ⚠️ 9 页 / 约 90 项；上游 **10 页**，且项目不全 |
 | 后台任务 | —— | `gpu::worker` | ✅ 本轮新增（ADR-037） |
+| 资源监视器 | `ResCpuPercent` `ResSample` `DrawRes` `ShowResMon` | `platform::sysinfo` + `gpu::resmon_win` | ✅ 卡片 + 详情面板（ADR-039） |
 
 ## 四、风险清单
 
@@ -360,6 +361,7 @@ bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
 1. **小组件条带**（§7.3）—— 先做布局模型。工作量小，但会让 `core::layout`
    的几何黄金测试全部重算；不先做，后面 6 个小组件一个都放不下。
 2. **资源监视器** —— 三个只读系统调用 + 一个小组件面板，是最小的端到端验证。
+   > **已做（ADR-039）**：条带卡片 + 点击弹详情面板。
 3. **计时器 / 待办** —— `[Tool]` 段 + 一个面板，顺便验证"新配置段"的读写。
 4. **日历 / 农历** —— 纯算法，可以全进 `core` 并写单测（节气表、干支换算），
    不依赖任何 Win32。

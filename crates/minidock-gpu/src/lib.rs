@@ -29,6 +29,7 @@ pub mod mem;
 pub mod menu;
 pub mod offscreen;
 pub mod present;
+pub mod resmon_win;
 pub mod settings_win;
 pub mod worker;
 
