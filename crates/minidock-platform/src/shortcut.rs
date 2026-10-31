@@ -20,8 +20,7 @@
 
 use windows::core::{Interface, PCWSTR, PWSTR};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-    STGM_READ,
+    CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
@@ -34,23 +33,12 @@ pub struct Shortcut {
     pub args: String,
 }
 
-/// 保证 COM 初始化一次。
+/// 保证 COM 初始化。
 ///
-/// 选 STA（`COINIT_APARTMENTTHREADED`）而不是 MTA：shell 的 IShellLink
-/// 在 STA 下行为最稳。我们不 `CoUninitialize` —— 进程退出时系统会回收，
-/// 而提前反初始化会让之后任何 COM 调用都失败。
-///
-/// 若调用方已经把线程初始化成 MTA，这里会返回 `RPC_E_CHANGED_MODE`，
-/// 此时**仍然可以**用 IShellLink（它不要求特定套间），所以忽略错误。
+/// 实现在 [`crate::win::ensure_com`] —— 那里说明了为什么必须**按线程**
+/// 而不是按进程初始化（原先是 `static Once`，一引入工作线程就出问题）。
 fn ensure_com() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: 只执行一次，且没有配对的反初始化（见函数文档）。
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
-    });
+    crate::win::ensure_com();
 }
 
 /// 解析 `.lnk`，取它指向的 exe。

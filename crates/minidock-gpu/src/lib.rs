@@ -11,7 +11,9 @@
 //! - `settings_win` —— 设置窗口的建窗、输入、呈现（ADR-036，Dock 进程内）；
 //! - `dock` —— Dock 的布局状态机与 egui 绘制；
 //! - `gpu` / `offscreen` / `present` —— 设备、离屏目标、DIB 呈现；
-//! - `input` —— Win32 消息 → `egui::RawInput`。
+//! - `input` —— Win32 消息 → `egui::RawInput`；
+//! - `menu` / `settings_win` —— 右键菜单与设置窗口（各自一个分层窗口）；
+//! - `worker` —— 后台线程：取图标、扫描运行状态/遮挡、写盘、启动应用。
 //!
 //! 依赖里**没有 eframe / winit**：消息循环由我们自己持有，因为托盘、
 //! 全局热键、AppBar 预留、逐像素命中都需要在 `WndProc` 里说话。
@@ -28,6 +30,7 @@ pub mod menu;
 pub mod offscreen;
 pub mod present;
 pub mod settings_win;
+pub mod worker;
 
 pub use dock::{Dock, DockItem};
 pub use frame::{FrameOutcome, FrameRenderer};
@@ -37,3 +40,4 @@ pub use menu::{Menu, MenuCmd, MenuEntry};
 pub use offscreen::Offscreen;
 pub use present::LayeredPresenter;
 pub use settings_win::SettingsWindow;
+pub use worker::{DiskWriter, IconLoader, Opener, Scanner};

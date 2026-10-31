@@ -19,10 +19,11 @@
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect as EguiRect, Stroke, StrokeKind};
 use std::time::Instant;
 
+use crate::worker::ReadyIcon;
 use minidock_core::clock::ClockLine;
 use minidock_core::color;
 use minidock_core::config::{Config, DockMode, Edge, Key};
-use minidock_core::icon::{apply_round_mask, fit_icon, BBox, FitMode};
+use minidock_core::icon::BBox;
 use minidock_core::item::{Item, ItemKind};
 use minidock_core::layout::{self, Metrics, Rect as LRect, SlotKind};
 
@@ -596,31 +597,22 @@ impl Dock {
         self.click.take()
     }
 
-    /// 按条目下标装载一个图标（`mode` 来自条目的 `fit` 字段）。
+    /// 装一块**已经处理过**的图标。
     ///
-    /// 圆角遮罩在这里做一次：半径按**源像素**给，缩放后等比，
-    /// 所以放大动画的任意尺寸下圆角比例都一致。
+    /// 像素处理（缩放判定、圆角遮罩）在 [`crate::worker::IconLoader`] 的
+    /// 工作线程上完成、且可并行；这里只上传纹理 —— 纹理必须在持有
+    /// `egui::Context` 的线程上建，所以只能留在 UI 线程。
     ///
     /// 索引越界会被忽略 —— 调用方通常是"遍历条目 + 逐个装图标"，
     /// 中途换配置导致数量不一致时不该崩。
-    pub fn load_icon(
-        &mut self,
-        index: usize,
-        ctx: &egui::Context,
-        bmp: &minidock_platform::icon::IconBitmap,
-        mode: FitMode,
-    ) {
+    pub fn install_icon(&mut self, index: usize, ctx: &egui::Context, ready: &ReadyIcon) {
         if index >= self.items.len() {
             return;
         }
-        let fit = fit_icon(&bmp.rgba, bmp.width, bmp.height, mode);
-        let mut rgba = bmp.rgba.clone();
-        if let Some(r) = fit.rounded {
-            apply_round_mask(&mut rgba, bmp.width, fit.bbox, r);
-        }
-
-        let size = [bmp.width as usize, bmp.height as usize];
-        let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [ready.width as usize, ready.height as usize],
+            &ready.rgba,
+        );
         let tex = ctx.load_texture(
             format!("dock-icon-{index}"),
             image,
@@ -633,10 +625,10 @@ impl Dock {
         }
         self.icons[index] = Some(IconTex {
             tex,
-            src_w: bmp.width,
-            src_h: bmp.height,
-            bbox: fit.bbox,
-            fill: fit.fill,
+            src_w: ready.width,
+            src_h: ready.height,
+            bbox: ready.fit.bbox,
+            fill: ready.fit.fill,
         });
     }
 
@@ -748,12 +740,6 @@ impl Dock {
     /// 给宽限期是必要的：鼠标划过屏幕底边去点任务栏时不该把 Dock 弹出来，
     /// 反过来刚离开 Dock 立刻缩回去也很烦躁。
     pub const HIDE_GRACE_MS: u64 = 450;
-
-    /// 运行状态扫描周期（毫秒）。与 C 版 `T_SCAN` 的 1200 ms 一致。
-    ///
-    /// 更短没有意义：用户点开一个程序的感知延迟远大于这个量级，
-    /// 而每次扫描要 `EnumWindows` + 为每个窗口 `OpenProcess`。
-    pub const SCAN_INTERVAL_MS: u32 = 1200;
 
     /// 自动隐藏的每 tick 决策。
     ///

@@ -13,6 +13,7 @@ minidock-settings.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 pollster.workspace = true
+rayon.workspace = true
 windows.workspace = true
 
 # 三个可执行文件全部显式声明。`src/bin/` 下的文件本来会被自动发现，

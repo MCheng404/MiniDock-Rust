@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 use minidock_core::clock;
 use minidock_core::clock::ClockLine;
 use minidock_core::config::{Config, DockMode, Edge, Key};
-use minidock_core::icon::FitMode;
 use minidock_core::ini::Ini;
 use minidock_core::item::{Item, ItemKind};
 use minidock_core::layout;
@@ -29,10 +28,12 @@ use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
 use minidock_gpu::menu::{Menu, MenuCmd};
 use minidock_gpu::settings_win::SettingsWindow;
+use minidock_gpu::worker::{
+    DiskWriter, IconLoader, IconRequest, OpenJob, Opener, ScanInput, Scanner, Waker, WriteJob,
+};
 use minidock_platform::app_window;
 use minidock_platform::appbar::AppBar;
 use minidock_platform::display;
-use minidock_platform::icon::{self, IconBitmap};
 use minidock_platform::launch;
 use minidock_platform::occlusion;
 use minidock_platform::shortcut;
@@ -141,11 +142,34 @@ struct App {
     size: (i32, i32),
     menu_slot: MenuSlot,
     settings_slot: Option<Pin<Box<SettingsWindow>>>,
-    /// 配置改动到写盘的防抖起点（`None` = 没有待写内容）。
-    cfg_dirty_at: Option<Instant>,
+
+    // ---- 后台线程。UI 线程只 `try_recv`，永远不等它们 ----
+    /// 取图标（shell / COM，串行）。
+    icons: IconLoader,
+    /// 运行状态 + 遮挡检测（两者都要 `EnumWindows`，合并到一条线程）。
+    scanner: Scanner,
+    /// 写 ini（串行，天然保序）。
+    disk: DiskWriter,
+    /// 启动 / 激活应用（`ShellExecuteW`）。
+    opener: Opener,
+
+    /// 最早一次未落盘的改动；`None` = 没有待写内容。
+    ///
+    /// 条目与配置**共用一个防抖窗口**：一次拖拽可能连着改顺序，一次滑块
+    /// 拖动可能连着改几十个值，逐次写盘等于每帧一次 UTF-16 全量回写。
+    dirty_at: Option<Instant>,
+    /// 待写回的条目；`None` = `[Items]` 段没变。
+    dirty_items: Option<Vec<Item>>,
+    /// 待写回的设置；`None` = `[Settings]` 段没变。
+    dirty_cfg: Option<Box<Config>>,
+
+    /// 扫描线程最近一次给出的遮挡结果（仅智能隐藏用）。
+    covered: bool,
+    /// 已发给扫描线程的遮挡检测矩形；`None` = 不检测。
+    cover_target: Option<LRect>,
+
     last_fs_check: Instant,
     fs_hidden: bool,
-    last_scan: Instant,
     /// `MINIDOCK_FAKE_MOUSE="u,v"`：把光标钉在指定位置（无人值守截图用）。
     fake_mouse: Option<(f32, f32)>,
     /// `MINIDOCK_FAKE_COVERED=0/1`：覆盖遮挡判定结果。
@@ -296,14 +320,24 @@ impl App {
         let start = Instant::now();
 
         // 先把 `.lnk` 解析成真实 exe 路径：判断"是否在运行"和"点击该切过去"
-        // 都要靠它。解析有 COM 开销，所以只在启动时做一次，结果缓存在
-        // `Item.target` 里（不写回 ini，那是运行时缓存）。
+        // 都要靠它。结果缓存在 `Item.target` 里（不写回 ini，那是运行时缓存）。
+        //
+        // **这一步仍留在 UI 线程**：它发生在建窗之前，用户看不到"卡"，
+        // 而且它决定第一次运行状态扫描准不准 —— 挪到工作线程反而会让指示点
+        // 在头一秒全灭。真正拖慢启动的是 GPU 建设备，不是这里。
         resolve_targets(&mut raw);
-        // 初次扫描：让指示点在第一帧就正确，而不是等 1.2 秒后才亮。
-        refresh_running(&mut raw, &mut dock);
 
-        // 图标在 egui 上下文就绪之后装：纹理要 ctx 才能建。
-        load_icons(&mut dock, frame.ctx(), &raw);
+        // 后台线程。取图标是启动时最大的一块同步阻塞（每个条目一次 shell
+        // 调用），挪走之后窗口可以先出来，图标陆续补上。
+        // 每个工作线程都拿到唤醒句柄：有结果时 `PostMessage` 一下，
+        // 主循环的等待立刻返回，不用靠轮询。
+        let waker = Waker::new(hwnd);
+        let icons = IconLoader::spawn(waker)?;
+        let scanner = Scanner::spawn(hwnd.0 as isize, waker)?;
+        let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
+        let opener = Opener::spawn()?;
+        // 先把所有图标排进队列：工作线程攒批处理，UI 线程立刻返回。
+        request_missing_icons(&icons, &dock, &raw);
 
         // 全局快捷键 `Ctrl+Alt+D`：强制收起 / 恢复。原版用 `cfg.hotkey` 开关。
         // 注册失败（被别的程序占了）只警告，不影响启动。
@@ -337,10 +371,17 @@ impl App {
             size: (win_w, win_h),
             menu_slot: None,
             settings_slot: None,
-            cfg_dirty_at: None,
+            icons,
+            scanner,
+            disk,
+            opener,
+            dirty_at: None,
+            dirty_items: None,
+            dirty_cfg: None,
+            covered: false,
+            cover_target: None,
             last_fs_check: Instant::now(),
             fs_hidden: false,
-            last_scan: Instant::now(),
             fake_mouse: fake_mouse_from_env(),
             fake_covered: fake_covered_from_env(),
             start,
@@ -382,20 +423,22 @@ impl App {
             need_frame |= self.step_layout();
             // ③ 窗口尺寸/位置跟着条目数走。
             need_frame |= self.step_relayout()?;
-            // ④ 拖拽重排同步到配置副本并写盘。
+            // ④ 拖拽重排同步到配置副本（写盘走防抖，不在这里做）。
             self.step_reorder();
-            // ⑤ 点击启动（`ShellExecuteW` 可能阻塞，不能放在窗口过程里）。
+            // ⑤ 点击启动：交给工作线程，`ShellExecuteW` 不再阻塞 UI。
             self.step_click();
             // ⑥ 右键菜单（模态）。
             need_frame |= self.step_menu()?;
             // ⑦ 设置窗口（非模态）。
             need_frame |= self.step_settings()?;
-            // ⑧ 配置落盘（防抖）。
-            self.step_save_config();
-            // ⑨ 全屏时整体隐藏。
+            // ⑧ 后台结果：图标、运行状态、遮挡。全部 `try_recv`，不等。
+            need_frame |= self.step_icons();
+            need_frame |= self.step_scan();
+            self.sync_cover_target();
+            // ⑨ 写盘（防抖到期才发，写本身在别的线程，不需要出帧）。
+            self.step_disk();
+            // ⑩ 全屏时整体隐藏。
             need_frame |= self.step_fullscreen();
-            // ⑩ 运行状态扫描。
-            need_frame |= self.step_running_scan();
             // ⑪ 自动隐藏 / 智能隐藏。
             need_frame |= self.step_auto_hide();
 
@@ -443,21 +486,25 @@ impl App {
         Ok(true)
     }
 
-    /// 把拖拽产生的重排同步到配置副本，并写回 ini。
+    /// 把拖拽产生的重排同步到配置副本。
     ///
-    /// 不需要额外出帧：`move_item` 会把 `moved` 置真，下一轮 `update`
+    /// **不在这里写盘**：一次拖拽会连着产生好几次重排，每次都读一遍 ini
+    /// 再 UTF-16 全量回写，拖动时能明显看出顿。改成标记脏 + 防抖，
+    /// 真正的写由 `DiskWriter` 线程做。
+    ///
+    /// 也不需要额外出帧：`move_item` 会把 `moved` 置真，下一轮 `update`
     /// 据此补位移动画，而 `update` 自身就会要求出帧。
     fn step_reorder(&mut self) {
+        let mut moved = false;
         while let Some((from, to)) = self.dock.take_pending_move() {
             if from < self.raw.len() && to < self.raw.len() {
-                let moved = self.raw.remove(from);
-                self.raw.insert(to, moved);
+                let item = self.raw.remove(from);
+                self.raw.insert(to, item);
+                moved = true;
             }
         }
-        if self.dock.take_order_changed() {
-            if let Err(e) = save_order(&self.paths, &self.raw) {
-                eprintln!("保存条目顺序失败：{e}");
-            }
+        if moved || self.dock.take_order_changed() {
+            self.touch_items();
         }
     }
 
@@ -483,15 +530,13 @@ impl App {
         // 原版 `LaunchItem(i, force)` 的同一个开关：开了 force 就连
         // "激活已有窗口"都跳过 —— 否则想开第二个实例永远开不出来。
         let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
-        let switched = !force
-            && running::running_key(item).is_some_and(|exe| app_window::activate(&exe, toggle));
-        if switched {
-            if trace::geom() {
-                eprintln!("[click] 切换到已运行实例：{}", item.name);
-            }
-        } else if let Err(e) = launch::launch(item) {
-            eprintln!("启动「{}」失败：{e}", item.name);
-        }
+        // 交给工作线程：`ShellExecuteW` 冷启动时几十毫秒起步，而
+        // "激活已有窗口"要枚举一遍顶层窗口。两者都不该占着 UI 线程。
+        self.opener.submit(OpenJob {
+            item: Box::new(item.clone()),
+            force,
+            toggle,
+        });
         // 启动/切换之后弹一下，给一个"点到了"的反馈。
         // 弹跳只在真的发生了动作时播，失败不弹（否则会误导）。
         self.dock.start_bounce(i);
@@ -555,7 +600,7 @@ impl App {
                 sw.state.auto_start = theme::get_autostart();
                 sw.show();
             } else {
-                run_menu_cmd(cmd, hit, &mut self.raw, &mut self.dock, &self.paths);
+                self.run_menu_cmd(cmd, hit);
             }
         }
 
@@ -570,28 +615,28 @@ impl App {
     /// 设置窗口。**非模态**：改参数时要能一边拖动滑块一边看栏体的变化，
     /// 所以不像菜单那样把整条消息循环堵住。
     fn step_settings(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        let (changed, remount) = tick_settings(
-            &self.gpu,
-            &mut self.settings_slot,
-            &mut self.dock,
-            &mut self.raw,
-            &self.paths,
-            self.dpi,
-        )?;
+        // 停靠边 / 预留 / 隐藏模式变了要重新注册 AppBar 并重算窗口位置。
+        // 快照必须在执行命令**之前**取：`ResetDefaults` 会把停靠边也重置。
+        let before = self.mount_key();
+
+        let (changed, cmd) = tick_settings(&self.gpu, &mut self.settings_slot, &mut self.dock)?;
         let mut need_frame = false;
 
         if changed {
             // 配置是 Dock 与设置窗口共用的同一份：`update()` 在下一轮用它
             // 重算几何，这里只需要要求出帧 + 排一次写盘。
-            self.cfg_dirty_at = Some(Instant::now());
+            self.touch_cfg();
             need_frame = true;
             self.dock.mark_dirty();
             if trace::geom() {
                 eprintln!("[settings] 配置有改动，排定写盘");
             }
         }
+        if let Some(cmd) = cmd {
+            need_frame |= self.run_settings_cmd(cmd);
+        }
 
-        if remount {
+        if self.mount_key() != before {
             // 停靠边 / 预留 / 隐藏模式变了：AppBar 得重新注册，窗口位置
             // 得跟着新边算。尺寸若也变了（左右停靠要转置 lw/lh），下一轮
             // `step_relayout` 会 resize —— 这里先按旧尺寸摆到新位置，差的是一帧。
@@ -624,24 +669,223 @@ impl App {
         Ok(need_frame)
     }
 
-    /// 配置落盘。滑块一次拖动会连着产生几十次 `changed`，每条都写一次
-    /// 等于每帧一次 UTF-16 全量回写，所以走 400 ms 防抖。
-    fn step_save_config(&mut self) {
-        let Some(at) = self.cfg_dirty_at else {
+    /// 决定"要不要重挂窗口"的三元组：停靠边、预留开关、隐藏模式。
+    fn mount_key(&self) -> (Edge, bool, DockMode) {
+        (
+            self.dock.cfg.edge,
+            self.dock.cfg.reserve,
+            self.dock.cfg.mode,
+        )
+    }
+
+    /// 执行右键菜单选中的命令。
+    fn run_menu_cmd(&mut self, cmd: MenuCmd, hit: Option<usize>) {
+        match cmd {
+            // 与左键点击同一条路径：已运行则激活，否则启动。
+            MenuCmd::Open => {
+                let Some(item) = hit.and_then(|i| self.raw.get(i)) else {
+                    return;
+                };
+                let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+                self.opener.submit(OpenJob {
+                    item: Box::new(item.clone()),
+                    force: false,
+                    toggle,
+                });
+            }
+            MenuCmd::OpenInExplorer => {
+                if let Some(item) = hit.and_then(|i| self.raw.get(i)) {
+                    if let Err(e) = launch::open_folder(&item.path) {
+                        eprintln!("打开文件夹「{}」失败：{e}", item.name);
+                    }
+                }
+            }
+            MenuCmd::QuitApp => {
+                if let Some(exe) = hit
+                    .and_then(|i| self.raw.get(i))
+                    .and_then(running::running_key)
+                {
+                    if !app_window::close_app(&exe) {
+                        eprintln!("退出「{exe}」失败");
+                    }
+                }
+            }
+            MenuCmd::ExitDock => {
+                // 走正常退出路径：`Drop` 会注销 AppBar、释放单实例锁。
+                unsafe { PostQuitMessage(0) };
+            }
+            // 入口在 `step_menu` 之前就被截走了（`Settings` 要 GPU 才能开窗口）。
+            // 这里是穷尽匹配要求的占位：真走到这里说明拦截失效了，那是一个 bug。
+            MenuCmd::Settings => {
+                eprintln!("`Settings` 命令走错了路径：它应当在主循环里被处理");
+            }
+            MenuCmd::AddSepAfter => {
+                let Some(i) = hit else { return };
+                if i >= self.raw.len() {
+                    return;
+                }
+                self.raw
+                    .insert(i + 1, Item::new(ItemKind::Separator, "", ""));
+                self.apply_item_change();
+            }
+            MenuCmd::RemoveItem | MenuCmd::RemoveSep => {
+                let Some(i) = hit else { return };
+                if i >= self.raw.len() {
+                    return;
+                }
+                // 最后一项不允许删：Dock 会变成一个空壳，而用户没有任何
+                // 可点的东西能把它恢复回来（拖放进来的入口还没做）。
+                if self.raw.len() <= 1 {
+                    eprintln!("这是最后一项，不能移除。");
+                    return;
+                }
+                self.raw.remove(i);
+                self.apply_item_change();
+            }
+        }
+    }
+
+    /// 条目列表变了之后的统一收尾：替换显示列表 + 排写盘 + 补图标。
+    ///
+    /// 写盘走防抖，这里只标记脏 —— 失败不回滚内存里的改动：宁可
+    /// "这次生效但没保存"，也不要"点了没反应"。
+    fn apply_item_change(&mut self) {
+        let items: Vec<DockItem> = self.raw.iter().map(DockItem::from_item).collect();
+        self.dock.replace_items(items);
+        request_missing_icons(&self.icons, &self.dock, &self.raw);
+        self.touch_items();
+    }
+
+    /// 标记 `[Items]` 段需要写回。
+    ///
+    /// 存的是**副本**：真正的写发生在另一个线程上，等它轮到的时候
+    /// `self.raw` 可能已经被下一次拖拽改了。
+    fn touch_items(&mut self) {
+        self.dirty_items = Some(self.raw.clone());
+        self.dirty_at.get_or_insert_with(Instant::now);
+    }
+
+    /// 标记 `[Settings]` 段需要写回。
+    fn touch_cfg(&mut self) {
+        self.dirty_cfg = Some(Box::new(self.dock.cfg.clone()));
+        self.dirty_at.get_or_insert_with(Instant::now);
+    }
+
+    /// 防抖到期就把待写内容交给写盘线程。
+    ///
+    /// 滑块一次拖动会连着产生几十次 `changed`，拖拽一次会连着改好几次顺序；
+    /// 逐次写等于每帧一次 UTF-16 全量回写。400 ms 是"停手就存、动着不存"
+    /// 的折中。条目与配置共用同一个窗口，所以一次 flush 只写一遍文件。
+    fn step_disk(&mut self) {
+        for result in self.disk.drain() {
+            match result {
+                Ok(()) => {
+                    self.status("已保存");
+                    if trace::geom() {
+                        eprintln!("[disk] 已写回 {}", self.paths.ini.display());
+                    }
+                }
+                Err(e) => eprintln!("保存失败（改动仍在本进程内生效）：{e}"),
+            }
+        }
+
+        let Some(at) = self.dirty_at else {
             return;
         };
         if at.elapsed() < Duration::from_millis(CFG_SAVE_DEBOUNCE_MS) {
             return;
         }
-        self.cfg_dirty_at = None;
-        if let Err(e) = save_config(&self.paths, &self.dock.cfg) {
-            eprintln!("保存配置失败（改动仍在本进程内生效）：{e}");
+        self.dirty_at = None;
+        let items = self.dirty_items.take();
+        let config = self.dirty_cfg.take();
+        if items.is_some() || config.is_some() {
+            self.disk.submit(WriteJob { items, config });
+        }
+    }
+
+    /// 取走后台线程处理完的图标，上传成纹理。
+    ///
+    /// 像素处理在工作线程做完了，这里只剩 `load_texture` —— 那一步必须在
+    /// 有 `egui::Context` 的线程上执行。
+    fn step_icons(&mut self) -> bool {
+        let ready = self.icons.drain();
+        if ready.is_empty() {
+            return false;
+        }
+        let ctx = self.frame.ctx();
+        for icon in &ready {
+            // 排队时记的是"当时的第 i 项"。期间条目可能被增删，下标就不再
+            // 指向同一个条目 —— 用路径核对一遍，别把图标装到别人头上。
+            let same = self
+                .dock
+                .items
+                .get(icon.index)
+                .is_some_and(|it| it.path == icon.path);
+            if same {
+                self.dock.install_icon(icon.index, ctx, icon);
+            }
+        }
+        true
+    }
+
+    /// 取走扫描线程的结果：运行状态与遮挡。
+    fn step_scan(&mut self) -> bool {
+        let mut need_frame = false;
+        for out in self.scanner.drain() {
+            if let Some(running) = out.running {
+                if running::refresh_running(&mut self.raw, &running) {
+                    // `Dock` 与 `raw` 是两份列表，指示点画在前者上。
+                    for (slot, item) in self.dock.items.iter_mut().zip(self.raw.iter()) {
+                        slot.running = item.running;
+                    }
+                    need_frame = true;
+                }
+            }
+            if let Some(covered) = out.covered {
+                self.covered = covered;
+                // 遮挡只影响智能隐藏的判定，不需要单独出帧 ——
+                // `step_auto_hide` 每 100 ms 会读到它。
+            }
+        }
+        need_frame
+    }
+
+    /// 把"该检测哪块矩形被遮挡"同步给扫描线程。
+    ///
+    /// 只在矩形真的变了时才发：主循环一秒跑几十轮，每轮都发会把队列灌满，
+    /// 而扫描线程是按"最新值有效"消费的。
+    fn sync_cover_target(&mut self) {
+        // 动画中栏体每帧都在变（放大、隐藏位移），矩形会抖一两个像素，
+        // 但遮挡结论不会变。等它停下来再同步，否则主循环每帧发一条，
+        // 队列会被灌满，扫描线程也一直在"收到新参数"里空转。
+        if self.dock.anim {
             return;
         }
-        settings_status(&mut self.settings_slot, "已保存");
-        if trace::geom() {
-            eprintln!("[settings] 已写回 {}", self.paths.ini.display());
+        // 注入了假结果就不用再算。
+        let want = if self.dock.mode == DockMode::SmartHide && self.fake_covered.is_none() {
+            Some(self.bar_screen_rect())
+        } else {
+            None
+        };
+        if want != self.cover_target {
+            self.cover_target = want;
+            self.scanner.update(ScanInput { cover: want });
         }
+    }
+
+    /// 栏体在**屏幕**坐标下的矩形。
+    fn bar_screen_rect(&self) -> LRect {
+        let left = self.dock.geom.bar_l.round() as i32;
+        let top = self.dock.geom.bar_top.round() as i32;
+        let right = (self.dock.geom.bar_l + self.dock.geom.bar_w).round() as i32;
+        // 与原版一致：算到 `barH + margin`，把下方的留白也算进去。
+        let bottom = (self.dock.geom.bar_bottom + self.dock.metrics.margin).round() as i32;
+        LRect::new(
+            self.pos.0 + left,
+            self.pos.1 + top,
+            self.pos.0 + right,
+            self.pos.1 + bottom,
+        )
     }
 
     /// 前台是沉浸式全屏（视频/游戏）时整体隐藏 Dock。
@@ -674,21 +918,6 @@ impl App {
         !fs
     }
 
-    /// 扫描运行中的应用并刷新指示点。
-    ///
-    /// 原版只在"要画指示点 / 显示运行应用 / 最小化动画"时才扫；我们把它当作
-    /// "点击能否切到已运行实例"的前提，所以只要有条目就扫（一次约 1 ms，
-    /// 1.2 s 一轮可以忽略）。
-    fn step_running_scan(&mut self) -> bool {
-        if self.raw.is_empty()
-            || self.last_scan.elapsed() < Duration::from_millis(u64::from(Dock::SCAN_INTERVAL_MS))
-        {
-            return false;
-        }
-        self.last_scan = Instant::now();
-        refresh_running(&mut self.raw, &mut self.dock)
-    }
-
     /// 自动隐藏 / 智能隐藏。**必须轮询光标**，不能只靠窗口消息：收起后
     /// 窗口内容被推到可视区外，那片区域的 alpha 是 0，鼠标事件会直接穿透，
     /// 永远等不到 `WM_MOUSEMOVE`。
@@ -703,10 +932,10 @@ impl App {
         // 所有顶层窗口，100 ms 一次也吃不住白跑的代价。
         // `MINIDOCK_FAKE_COVERED=0/1` 覆盖遮挡判定结果：桌面环境不可控，
         // 要验证"遮挡消失就展开"这条分支不能真去最小化别人的窗口。
-        let covered = self.dock.mode == DockMode::SmartHide
-            && self
-                .fake_covered
-                .unwrap_or_else(|| dock_bar_covered(&self.dock, self.hwnd, self.pos.0, self.pos.1));
+        // 遮挡由扫描线程算（`EnumWindows` 一遍要遍历所有顶层窗口，
+        // 100 ms 一次不能压在 UI 线程上）。注入的假结果优先。
+        let covered =
+            self.dock.mode == DockMode::SmartHide && self.fake_covered.unwrap_or(self.covered);
         let before = self.dock.hide_target;
         self.dock.tick_auto_hide(near, busy, covered, now_ms);
         if before == self.dock.hide_target {
@@ -791,18 +1020,15 @@ impl App {
     /// 等下一个事件。有消息就醒；动画中按 16 ms 醒一次；自动隐藏 / 强制
     /// 收起开着时按 100 ms 轮询光标。
     ///
-    /// 扫描周期与全屏检测都要参与超时，否则常显模式下会一直睡着 ——
-    /// `INFINITE` 等不到"时间过去"这种事件，指示点与全屏状态都不会更新。
-    /// 取两者较小值：全屏检测 1 s 一次，扫描间隔通常更长。
+    /// 后台线程的结果**不用轮询**：它们各自 `PostMessage(WM_APP_WAKE)`
+    /// 打断这次等待，所以这里可以真的睡到 `FS_CHECK_MS`（全屏检测周期）。
     fn wait(&self) {
         let timeout = if self.dock.anim {
             16
         } else if self.dock.needs_hide_tick() {
             100
-        } else if self.raw.is_empty() {
-            FS_CHECK_MS
         } else {
-            Dock::SCAN_INTERVAL_MS.min(FS_CHECK_MS)
+            FS_CHECK_MS
         };
         unsafe {
             MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
@@ -1104,52 +1330,20 @@ const CFG_SAVE_DEBOUNCE_MS: u64 = 400;
 /// | 其余（文件 / 文件夹 / 快捷方式 / 回收站） | 交给 shell 图像列表 |
 ///
 /// 后两条目前退化为首字占位（原版也是这个兜底，只是颜色算法不同）。
-fn load_icons(dock: &mut Dock, ctx: &egui::Context, raw: &[Item]) {
-    let mut ok = 0usize;
-    let mut miss = 0usize;
+fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
     for (i, item) in raw.iter().enumerate() {
-        if item.kind == ItemKind::Separator {
+        // 分割线不画图标；已经有图标的跳过 —— `replace_items` 会按路径把
+        // 旧图标搬过来，全量重排会让整条 Dock 闪一次"首字占位"。
+        if item.kind == ItemKind::Separator || dock.has_icon(i) {
             continue;
         }
-        // 自定义图标：原版用 GDI+ 解码任意图片。我们没有图像解码器，
-        // 这种情况先退回系统图标 —— 至少不会画出一个空白块。
-        let bmp: Option<IconBitmap> = match item.kind {
-            ItemKind::Url => None,
-            ItemKind::Trash => icon::shell_icon("shell:RecycleBinFolder"),
-            _ => icon::shell_icon(&item.path).or_else(|| icon::resource_icon(&item.path, 0)),
-        };
-        match bmp {
-            Some(b) => {
-                dock.load_icon(i, ctx, &b, FitMode::from_code(item.fit));
-                ok += 1;
-            }
-            None => {
-                miss += 1;
-                // 点名而不是只报个数："为什么这个图标是占位"要能一眼看出。
-                eprintln!("  未取到图标: [{}] {} <{}>", i, item.name, item.path);
-            }
-        }
+        loader.submit(IconRequest {
+            index: i,
+            kind: item.kind,
+            path: item.path.clone(),
+            fit: item.fit,
+        });
     }
-    eprintln!("图标: 已装 {ok} 个，未取到 {miss} 个（未取到的画首字占位）");
-    if trace::geom() {
-        for (i, item) in raw.iter().enumerate() {
-            eprintln!(
-                "  [{i}] kind={:?} path=<{}> args=<{}>",
-                item.kind, item.path, item.args
-            );
-        }
-    }
-}
-
-/// 把条目顺序写回 ini。
-///
-/// 每次重新读文件再改：设置窗口可能在此期间往别的段写过值，
-/// 用启动时那份内存副本覆盖会把它们抹掉。
-fn save_order(paths: &Paths, items: &[Item]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ini = Ini::load(&paths.ini)?;
-    store::save_items(items, &mut ini);
-    ini.save(&paths.ini)?;
-    Ok(())
 }
 
 /// 光标是否算"靠近 Dock"。对应原版 `OnAutoHide()` 里的两套判断。
@@ -1199,23 +1393,6 @@ fn cursor_near(dock: &Dock, hwnd: HWND) -> bool {
         && v <= m.lh as f32 + 4.0
 }
 
-/// 栏体这块区域当前是否被普通窗口盖住（智能隐藏判定）。
-///
-/// `origin` 是窗口左上角的屏幕坐标。栏体在客户区内是 `bar_l/bar_top` 起算的，
-/// 加上窗口原点才是屏幕坐标 —— 这里最容易错的是**忘了加原点**，
-/// 结果判定的是屏幕左上角一小块，永远判不出遮挡。
-fn dock_bar_covered(dock: &Dock, hwnd: HWND, x: i32, y: i32) -> bool {
-    let left = dock.geom.bar_l.round() as i32;
-    let top = dock.geom.bar_top.round() as i32;
-    let right = (dock.geom.bar_l + dock.geom.bar_w).round() as i32;
-    // 与原版一致：算到 `barH + margin`，把下方的留白也算进去。
-    let bottom = (dock.geom.bar_bottom + dock.metrics.margin).round() as i32;
-    let target = LRect::new(x + left, y + top, x + right, y + bottom);
-    // 目前只有 Dock 自己的窗口需要排除。将来加设置窗 / 预览窗时，
-    // 一定要塞进这个列表，否则"设置窗压在 Dock 上"会被判成被遮挡。
-    occlusion::any_window_covers(target, &[hwnd])
-}
-
 /// 把 `.lnk` 条目解析成真实 exe 路径，缓存在 `Item.target`。
 ///
 /// 只在启动时跑一次：解析要初始化 COM 并创建 shell 对象，
@@ -1236,34 +1413,6 @@ fn resolve_targets(items: &mut [Item]) {
     if trace::geom() {
         eprintln!("[scan] 解析出 {resolved} 个可执行目标");
     }
-}
-
-/// 扫描运行中的应用并刷新条目状态。返回是否有变化。
-///
-/// `Dock` 只持有 `DockItem`，与 `raw` 是两份列表 —— 必须同步，
-/// 否则指示点与实际点击行为会对不上。
-fn refresh_running(raw: &mut [Item], dock: &mut Dock) -> bool {
-    let running: std::collections::HashSet<String> =
-        app_window::running_apps().into_keys().collect();
-    let changed = running::refresh_running(raw, &running);
-    if changed {
-        for (slot, item) in dock.items.iter_mut().zip(raw.iter()) {
-            slot.running = item.running;
-        }
-        if trace::geom() {
-            let names: Vec<&str> = raw
-                .iter()
-                .filter(|i| i.running)
-                .map(|i| i.name.as_str())
-                .collect();
-            eprintln!(
-                "[scan] 运行中: {names:?} | slot_l={:?} cur={:?}",
-                dock.geom.slot_l,
-                dock.items.iter().map(|i| i.cur).collect::<Vec<_>>()
-            );
-        }
-    }
-    changed
 }
 
 // ============================ 右键菜单 ============================
@@ -1511,95 +1660,6 @@ fn show_menu(
     Ok(state.cmd)
 }
 
-/// 执行菜单命令。`hit` 是当初右键命中的条目下标（`None` = 空白处）。
-///
-/// 会改条目列表的三条命令走同一条收尾路径：**先改 `raw`（真源）→ 写回 ini
-/// → 整份替换 `dock.items`**。替换之后几何由下一帧 `update()` 重算，
-/// 窗口尺寸的变化由主循环 ②.1 兜住 —— 这里不直接碰窗口。
-fn run_menu_cmd(
-    cmd: MenuCmd,
-    hit: Option<usize>,
-    raw: &mut Vec<Item>,
-    dock: &mut Dock,
-    paths: &Paths,
-) {
-    match cmd {
-        // 与左键点击同一条路径：已运行则激活，否则启动。
-        MenuCmd::Open => {
-            let Some(item) = hit.and_then(|i| raw.get(i)) else {
-                return;
-            };
-            // 先把开关读成 bool：后面要可变借用 `dock`，不能再挂着对
-            // `dock.cfg` 的借用。
-            let toggle = dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
-            let switched =
-                running::running_key(item).is_some_and(|exe| app_window::activate(&exe, toggle));
-            if !switched {
-                if let Err(e) = launch::launch(item) {
-                    eprintln!("打开「{}」失败：{e}", item.name);
-                }
-            }
-        }
-        MenuCmd::OpenInExplorer => {
-            if let Some(item) = hit.and_then(|i| raw.get(i)) {
-                if let Err(e) = launch::open_folder(&item.path) {
-                    eprintln!("打开文件夹「{}」失败：{e}", item.name);
-                }
-            }
-        }
-        MenuCmd::QuitApp => {
-            if let Some(exe) = hit.and_then(|i| raw.get(i)).and_then(running::running_key) {
-                if !app_window::close_app(&exe) {
-                    eprintln!("退出「{exe}」失败");
-                }
-            }
-        }
-        MenuCmd::ExitDock => {
-            // 走正常退出路径：`Drop` 会注销 AppBar、释放单实例锁。
-            unsafe { PostQuitMessage(0) };
-        }
-        // 入口在 `tick` 之前就被截走了（`MenuCmd::Settings` 要 GPU 才能开窗口）。
-        // 这里是穷尽匹配要求的占位：真走到这里说明拦截失效了，那是一个 bug。
-        MenuCmd::Settings => {
-            eprintln!("`Settings` 命令走错了路径：它应当在主循环里被处理");
-        }
-        MenuCmd::AddSepAfter => {
-            let Some(i) = hit else { return };
-            if i >= raw.len() {
-                return;
-            }
-            raw.insert(i + 1, Item::new(ItemKind::Separator, "", ""));
-            apply_item_change(raw, dock, paths);
-        }
-        MenuCmd::RemoveItem | MenuCmd::RemoveSep => {
-            let Some(i) = hit else { return };
-            if i >= raw.len() {
-                return;
-            }
-            // 最后一项不允许删：Dock 会变成一个空壳，而用户没有任何
-            // 可点的东西能把它恢复回来（拖放进来的入口还没做）。
-            if raw.len() <= 1 {
-                eprintln!("这是最后一项，不能移除。");
-                return;
-            }
-            raw.remove(i);
-            apply_item_change(raw, dock, paths);
-        }
-    }
-}
-
-/// 条目列表变了之后的统一收尾：写回 ini、替换显示列表。
-///
-/// 写盘失败不回滚内存里的改动：宁可"这次生效但没保存"，也不要
-/// "点了没反应"。失败会打印出来，下一次成功保存时一并写入。
-fn apply_item_change(raw: &[Item], dock: &mut Dock, paths: &Paths) {
-    if let Err(e) = save_order(paths, raw) {
-        eprintln!("保存配置失败（改动仍在本进程内生效）：{e}");
-    }
-    let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
-    dock.replace_items(items);
-}
-
 // ============================ 设置窗口 ============================
 
 /// 首次打开时建窗，之后一直复用同一个窗口与渲染器。
@@ -1645,111 +1705,116 @@ fn ensure_settings<'a>(
     Ok(&mut **sw)
 }
 
-/// 每轮给设置窗口一次机会。
+/// 每轮给设置窗口一次机会：渲染一帧，取走它产出的命令。
 ///
-/// 返回 `(配置有改动, 需要重挂)`。第二项由调用方做，因为 AppBar 与窗口位置
-/// 是主循环的东西 —— 传进来会把这个函数拖成十几个参数。
+/// 返回 `(界面直接改过配置, 待执行的命令)`。命令交给调用方执行 —— 它要改
+/// `cfg` 或条目，而这里只借到了 `dock`；把整条 `App` 传进来会让这个函数
+/// 和主循环耦合死。
 fn tick_settings(
     gpu: &Gpu,
     slot: &mut Option<Pin<Box<SettingsWindow>>>,
     dock: &mut Dock,
-    raw: &mut Vec<Item>,
-    paths: &Paths,
-    dpi: i32,
-) -> Result<(bool, bool), Box<dyn std::error::Error>> {
+) -> Result<(bool, Option<Command>), Box<dyn std::error::Error>> {
     let Some(sw) = slot.as_mut() else {
-        return Ok((false, false));
+        return Ok((false, None));
     };
-    // 停靠边 / 预留 / 隐藏模式变了要重新注册 AppBar 并重算窗口位置。
-    let before = (dock.cfg.edge, dock.cfg.reserve, dock.cfg.mode);
-
     let mut changed = false;
+    let mut cmd = None;
     if sw.visible() && sw.due() {
         // 关键点：`cfg` 就是 Dock 用的那一份。设置窗口改它等于改 Dock，
         // 没有 IPC、没有复制、也没有"保存后重启"。
         sw.render(gpu, &mut dock.cfg)?;
         let out = std::mem::take(&mut sw.outcome);
         changed = out.changed;
-        if let Some(cmd) = out.command {
-            changed |= run_settings_cmd(cmd, dock, raw, paths, sw, dpi);
-        }
+        cmd = out.command;
     }
-    // Esc 与"关闭"都走这个标志：关闭要在命令结算之后执行，
-    // 否则点关闭按钮那一帧的改动会被丢掉。
+    // Esc 与"关闭"都走这个标志。命令已经取出来了，由调用方在隐藏之后
+    // 结算 —— 隐藏不影响命令本身（它要改的是 `cfg` 与条目）。
     if sw.close_requested {
         sw.hide();
     }
-    let after = (dock.cfg.edge, dock.cfg.reserve, dock.cfg.mode);
-    Ok((changed, before != after))
+    Ok((changed, cmd))
 }
 
-/// 执行设置界面发出的命令。返回值表示"是否需要把配置写盘"。
+/// 执行设置界面发出的命令。返回值表示"配置是否需要重绘与写盘"。
+///
+/// 只改条目的命令（加分割线 / 回收站）在内部走 [`App::apply_item_change`]，
+/// 这里返回 `false` —— 它们不涉及 `[Settings]` 段。
 ///
 /// 还没接通的能力在最后一支里给出明确提示 —— 什么都不做会让用户以为按钮
 /// 坏了，而那几项本来就在 `PORTING.md` 的待办里。
-fn run_settings_cmd(
-    cmd: Command,
-    dock: &mut Dock,
-    raw: &mut Vec<Item>,
-    paths: &Paths,
-    sw: &mut SettingsWindow,
-    dpi: i32,
-) -> bool {
-    match cmd {
-        // 关闭由 `tick_settings` 处理（窗口要藏起来），这里不再做事。
-        Command::Close => false,
-        Command::OpenConfigDir => {
-            let dir = paths.dir.display().to_string();
-            if let Err(e) = launch::open_folder(&dir) {
-                sw.state.status = format!("打开配置目录失败：{e}");
+impl App {
+    fn run_settings_cmd(&mut self, cmd: Command) -> bool {
+        match cmd {
+            // 关闭由 `tick_settings` 处理（窗口要藏起来），这里不再做事。
+            Command::Close => false,
+            Command::OpenConfigDir => {
+                let dir = self.paths.dir.display().to_string();
+                if let Err(e) = launch::open_folder(&dir) {
+                    self.status(format!("打开配置目录失败：{e}"));
+                }
+                false
             }
-            false
-        }
-        Command::ToggleAutostart(on) => {
-            if theme::set_autostart(on) {
-                // 写完重新读真值：策略把写入拦下来时，写函数也可能返回成功。
-                sw.state.auto_start = theme::get_autostart();
-                sw.state.status = if sw.state.auto_start {
-                    "已设置开机自启动".to_owned()
+            Command::ToggleAutostart(on) => {
+                if theme::set_autostart(on) {
+                    // 写完重新读真值：策略把写入拦下来时，写函数也可能返回成功。
+                    let real = theme::get_autostart();
+                    let text = if real {
+                        "已设置开机自启动"
+                    } else {
+                        "已取消开机自启动"
+                    };
+                    if let Some(sw) = self.settings_slot.as_mut() {
+                        sw.state.auto_start = real;
+                        sw.state.status = text.to_owned();
+                    }
                 } else {
-                    "已取消开机自启动".to_owned()
-                };
-            } else {
-                sw.state.status =
-                    format!("写入注册表失败（错误码 {}）", theme::last_registry_error());
-                sw.state.auto_start = theme::get_autostart();
+                    let err = theme::last_registry_error();
+                    let real = theme::get_autostart();
+                    if let Some(sw) = self.settings_slot.as_mut() {
+                        sw.state.status = format!("写入注册表失败（错误码 {err}）");
+                        sw.state.auto_start = real;
+                    }
+                }
+                false
             }
-            false
+            Command::ResetDefaults => {
+                self.dock.cfg = Config::defaults(self.dpi);
+                self.status("已恢复默认设置");
+                true
+            }
+            Command::Recommended => {
+                apply_recommended(&mut self.dock.cfg);
+                self.status("已套用推荐设置（尺寸与停靠边没动）");
+                true
+            }
+            Command::LowPower => {
+                apply_low_power(&mut self.dock.cfg);
+                self.status("已关闭高开销视觉效果");
+                true
+            }
+            // 这两项与右键菜单里的同一条路径共用收尾：改 `raw` → 换列表 → 排写盘。
+            Command::AddSeparator => {
+                self.raw.push(Item::new(ItemKind::Separator, "", ""));
+                self.apply_item_change();
+                false
+            }
+            Command::AddTrash => {
+                self.raw.push(Item::new(ItemKind::Trash, "回收站", ""));
+                self.apply_item_change();
+                false
+            }
+            _ => {
+                self.status("这项能力还没接进 Dock（见 PORTING.md 待办）");
+                false
+            }
         }
-        Command::ResetDefaults => {
-            dock.cfg = Config::defaults(dpi);
-            sw.state.status = "已恢复默认设置".to_owned();
-            true
-        }
-        Command::Recommended => {
-            apply_recommended(&mut dock.cfg);
-            sw.state.status = "已套用推荐设置（尺寸与停靠边没动）".to_owned();
-            true
-        }
-        Command::LowPower => {
-            apply_low_power(&mut dock.cfg);
-            sw.state.status = "已关闭高开销视觉效果".to_owned();
-            true
-        }
-        // 这两项与右键菜单里的同一条路径共用收尾：改 `raw` → 写盘 → 换列表。
-        Command::AddSeparator => {
-            raw.push(Item::new(ItemKind::Separator, "", ""));
-            apply_item_change(raw, dock, paths);
-            true
-        }
-        Command::AddTrash => {
-            raw.push(Item::new(ItemKind::Trash, "回收站", ""));
-            apply_item_change(raw, dock, paths);
-            true
-        }
-        _ => {
-            sw.state.status = "这项能力还没接进 Dock（见 PORTING.md 待办）".to_owned();
-            false
+    }
+
+    /// 往设置窗口的底部状态条写一句话（窗口没建过就什么都不做）。
+    fn status(&mut self, text: impl Into<String>) {
+        if let Some(sw) = self.settings_slot.as_mut() {
+            sw.state.status = text.into();
         }
     }
 }
@@ -1785,23 +1850,6 @@ fn apply_low_power(cfg: &mut Config) {
         (Key::BgMode, 0),
     ] {
         cfg.apply_i32(key, v);
-    }
-}
-
-/// 把当前配置写回 ini。
-///
-/// 先读一次再写：`[Items]` 段不归 `write_ini` 管，直接新建一份会丢光条目。
-fn save_config(paths: &Paths, cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ini = Ini::load(&paths.ini)?;
-    cfg.write_ini(&mut ini);
-    ini.save(&paths.ini)?;
-    Ok(())
-}
-
-/// 给设置窗口的底部状态条写一句话（窗口没建过就什么都不做）。
-fn settings_status(slot: &mut Option<Pin<Box<SettingsWindow>>>, text: &str) {
-    if let Some(sw) = slot.as_mut() {
-        sw.state.status = text.to_owned();
     }
 }
 

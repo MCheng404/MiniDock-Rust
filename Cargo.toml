@@ -29,15 +29,13 @@ egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 egui_kittest = "0.37"
 
-# 并行与跨线程数据交换（ADR-007）。
+# 数据并行（ADR-007）。**只有一个用途**：图标像素处理（缩放判定 + 圆角
+# 遮罩）按批并行。其余"看起来该并行"的活（窗口枚举、shell 取图标、写盘）
+# 全是 IO 等待，并行只会增加线程数、不缩短墙钟时间 —— 那些走
+# `minidock-gpu::worker` 的专用线程。
 #
-# **当前尚未被任何 crate 引用**：M1 的 Dock 只有一条 UI 线程在跑，
-# 图标解码 / 窗口扫描还没迁移。声明留在这里是为了让"用 rayon 而不是 tokio"
-# 这个决定有一处可查的落点；M2 接入图标管线时直接 `xxx.workspace = true`。
-# 未被引用的 workspace 依赖不参与编译，不产生构建开销。
+# 不用 tokio：这里没有并发连接，只有几条长驻线程 + 一个线程池。
 rayon = "1.12"
-crossbeam-channel = "0.5"
-arc-swap = "1.9"
 
 pollster = "1.0"
 
@@ -57,7 +55,6 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_OpenGL",
-    "Win32_Graphics_GdiPlus",
     "Win32_Graphics_Dwm",
     "Win32_Storage_FileSystem",
     "Win32_Security",

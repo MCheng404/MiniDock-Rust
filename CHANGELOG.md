@@ -5,6 +5,59 @@
 
 ---
 
+## 0.3.2 — 把阻塞调用挪出 UI 线程（ADR-037，2026-10-31）
+
+没有新功能。门禁：clippy `-D warnings` / `fmt --check` 全绿，199 条测试通过。
+
+### 新增
+
+- **`minidock-gpu::worker`：四个后台线程**，各自一条 `std::sync::mpsc` 通道。
+
+  | 线程 | 接管的阻塞调用 | 原来压在 UI 线程上的频率 |
+  |---|---|---|
+  | `IconLoader` | `SHGetFileInfoW` + `IImageList::GetIcon` + `GetDIBits` | 启动 |
+  | `Scanner` | `EnumWindows` + 每窗口 `OpenProcess` / 8 次查询 | 1.2 s / 100 ms |
+  | `DiskWriter` | 读 ini + UTF-16 全量回写 | 拖拽每一步 / 改设置 |
+  | `Opener` | `ShellExecuteW` + 激活已有窗口 | 点击 |
+
+- **`Waker` + `WM_APP_WAKE`**：工作线程有结果时 `PostMessage` 打断主循环的
+  `MsgWaitForMultipleObjectsEx`。`pump` 对这条消息只打断等待、**不强制出帧**，
+  所以"空闲 0 帧"的承诺仍然成立 —— 没有退化成轮询。
+- **图标像素处理走 rayon**：缩放判定与圆角遮罩按批 `par_iter`。这是全项目
+  唯一的 CPU 密集型工作（每张 256×256 六万多个像素），也是唯一值得上多核的地方。
+  其余三条是 IO 等待，并行只会增加线程数。
+- **写盘合并**：条目与配置共用一个 400 ms 防抖窗口，一次 flush 只写一遍文件；
+  `WriteJob` 允许只写其中一段（另一段原样保留）。
+
+### 修复
+
+- **`platform::shortcut::ensure_com` 的 COM 初始化是进程级的**：原来用
+  `static Once`，只有第一个调用的线程被初始化，其余线程上的
+  `CoCreateInstance` 会以 `CO_E_NOTINITIALIZED` 失败。单线程时看不出来，
+  一引入工作线程就变成"图标偶尔取不到"——没有报错、没有崩溃、只是结果缺失。
+  改成 `thread_local!`，并挪到 `platform::win::ensure_com`。
+- **拖拽时反复写盘**：`step_reorder` 原来每挪一格就 `Ini::load` + 全量回写一次，
+  拖着走五个图标就是五次文件重写。改成标记脏 + 防抖，拖动期间零 IO。
+- **图标可能装错条目**：排队时记的是"当时的第 i 项"，期间增删条目后下标会指向
+  别人。`ReadyIcon` 带上路径，装之前核对一遍。
+
+### 删除
+
+- `crossbeam-channel` / `arc-swap` 两个"计划中"的 workspace 依赖。前者被
+  `std::sync::mpsc` 取代（队列深度只有个位数），后者本项目的跨线程数据是
+  值拷贝而不是共享快照，用不上。
+- `Win32_Graphics_GdiPlus` feature —— GDI+ 老实现已在 ADR-035 里删除。
+
+### 已知局限
+
+- 运行指示点最多晚 1.2 s 亮起（本来就是 1.2 s 一轮扫描，只是首轮不再同步）。
+- 图标从"启动时全部就位"变成"窗口先出来、图标陆续补上"。
+- 进程被强杀会丢掉最后一次未落盘的顺序调整（400 ms 窗口内）。
+- **没有真机跑过**：`worker` 的纯逻辑部分（写盘合并、图标处理）有单测，
+  但线程接线（唤醒、模态菜单期间的排队、退出时的 detach）只能靠人跑一遍。
+
+---
+
 ## 0.3.1 — 代码审查与主循环整理（2026-10-31）
 
 没有新功能。门禁：clippy `-D warnings` / `fmt --check` 全绿，
