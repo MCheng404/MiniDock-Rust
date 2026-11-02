@@ -169,7 +169,10 @@ impl WidgetKind {
     /// 其余三个（通知 / 控制中心 / 专注模式）尚未移植。
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Clock | Self::Resource | Self::Tool)
+        matches!(
+            self,
+            Self::Clock | Self::Resource | Self::Tool | Self::CtrlCenter
+        )
     }
 
     /// 该小组件是否被配置启用。
@@ -967,11 +970,12 @@ mod tests {
     fn widget_strip_matches_v140_when_only_clock() {
         let mut c = cfg96();
         c.clock = true;
-        // 必须显式关掉另外两个已实现的卡片：上游 v1.6.0 默认
-        // `ResMon=1` / `ToolW=1`，而 v1.4.0 压根没有它们 ——
-        // 带着就不可能与 v1.4.0 等价了。
+        // 必须显式关掉另外三个已实现的卡片：上游 v1.6.0 默认
+        // `ResMon=1` / `ToolW=1` / `CtrlCenter=1`，而 v1.4.0 压根没有它们
+        // —— 带着就不可能与 v1.4.0 等价了。
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
+        c.apply_i32(Key::CTRL_CENTER, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
 
         // 条带里只有时钟一个成员。
@@ -994,9 +998,10 @@ mod tests {
     #[test]
     fn widget_strip_is_empty_without_clock() {
         let mut c = cfg96();
-        // 三个已实现的默认可能都开着，要关就都关。
+        // 四个已实现的默认可能都开着，要关就都关。
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
+        c.apply_i32(Key::CTRL_CENTER, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.widgets.len, 0);
         assert_eq!(m.widget_extra, 0.0);
@@ -1006,7 +1011,7 @@ mod tests {
     /// 未实现的小组件不进条带 —— 否则栏体上会留出一段空白。
     ///
     /// 上游 v1.6.0 默认把控制中心 / 资源监视器 / 计时器 / 专注模式全打开，
-    /// 我们还没移植它们，所以这些键虽然是 1，也不该占位。
+    /// 我们还没移植的（通知 / 专注模式）即使键是 1 也不该占位。
     #[test]
     fn unimplemented_widgets_do_not_take_space() {
         let mut c = cfg96();
@@ -1017,12 +1022,13 @@ mod tests {
         assert_eq!(c.get_i32(Key::MODE_W), 1);
 
         let m = calc_metrics(&c, 96, 3, 0, work());
-        // 只有已实现的（时钟、资源监视器、计时器）进条带。
-        assert_eq!(m.widgets.len, 3, "时钟 + 资源监视器 + 计时器");
+        // 只有已实现的（时钟、控制中心、资源监视器、计时器）进条带。
+        assert_eq!(m.widgets.len, 4, "时钟 + 控制中心 + 资源监视器 + 计时器");
+        assert!(m.widgets.width_of(WidgetKind::CtrlCenter).is_some());
         assert!(m.widgets.width_of(WidgetKind::Resource).is_some());
         assert!(m.widgets.width_of(WidgetKind::Tool).is_some());
         // 这两个还没移植，不能占位。
-        assert!(m.widgets.width_of(WidgetKind::CtrlCenter).is_none());
+        assert!(m.widgets.width_of(WidgetKind::Notify).is_none());
         assert!(m.widgets.width_of(WidgetKind::Focus).is_none());
     }
 
@@ -1033,11 +1039,12 @@ mod tests {
         c.clock = true;
         c.apply_i32(Key::RES_MON, 1);
         c.apply_i32(Key::TOOL_W, 0);
+        c.apply_i32(Key::CTRL_CENTER, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
 
         assert_eq!(m.widgets.len, 2, "时钟 + 资源监视器");
         assert!(m.widgets.width_of(WidgetKind::Resource).is_some());
-        // 上游顺序：时钟在前，资源监视器在控制中心之后（都没实现）。
+        // 上游顺序：时钟在前，资源监视器在控制中心之后（已关掉）。
         let kinds: Vec<WidgetKind> = m.widgets.iter().map(|(k, _)| k).collect();
         assert_eq!(kinds[0], WidgetKind::Clock);
         assert_eq!(kinds[1], WidgetKind::Resource);
@@ -1082,6 +1089,7 @@ mod tests {
         c.clock = true;
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
+        c.apply_i32(Key::CTRL_CENTER, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.widgets.len, 1);
         assert!(m.widgets.width_of(WidgetKind::Resource).is_none());
@@ -1112,6 +1120,7 @@ mod tests {
         // 只留时钟，才能验证"紧贴栏体左缘"这个简单关系。
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
+        c.apply_i32(Key::CTRL_CENTER, 0);
         c.apply_i32(Key::W_SIDE, 1);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert!(m.widgets.on_left, "应当记为左侧条带");
@@ -1137,6 +1146,7 @@ mod tests {
         c.clock = true;
         c.apply_i32(Key::RES_MON, 1);
         c.apply_i32(Key::TOOL_W, 0);
+        c.apply_i32(Key::CTRL_CENTER, 0);
         c.apply_i32(Key::W_SIDE, 1);
         let m = calc_metrics(&c, 96, 3, 0, work());
         let bar_l = 100.0_f32;

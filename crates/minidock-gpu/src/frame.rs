@@ -204,17 +204,24 @@ impl FrameRenderer {
         gpu.queue
             .submit(buffers.into_iter().chain([encoder.finish()]));
 
-        let pixels = self
-            .offscreen
-            .read_pixels(&gpu.device)
-            .map_err(GpuError::Wgpu)?;
-        self.presenter.upload_rgba(&pixels);
-        self.presenter.present(hwnd, pos.0, pos.1)?;
+        // 读回 + 呈现。**错误不能在这里直接 `?` 掉**：下面的
+        // `textures_delta.clear()` 必须执行，否则这个 delta 在函数退出时
+        // 被 Drop 检查抓住，报成"纹理增量没人处理"，把真正的错误盖掉。
+        // （起动台在全屏尺寸下 present 失败时就是这么被误导过一次。）
+        let submitted = (|| -> Result<(), GpuError> {
+            let pixels = self
+                .offscreen
+                .read_pixels(&gpu.device)
+                .map_err(GpuError::Wgpu)?;
+            self.presenter.upload_rgba(&pixels);
+            self.presenter.present(hwnd, pos.0, pos.1)
+        })();
 
         for id in &textures_delta.free {
             self.renderer.free_texture(id);
         }
         textures_delta.clear();
+        submitted?;
 
         Ok(FrameOutcome {
             cursor,

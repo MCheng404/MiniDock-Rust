@@ -22,10 +22,12 @@
 #![deny(missing_debug_implementations)]
 
 pub mod calendar_win;
+pub mod cc_win;
 pub mod dock;
 pub mod frame;
 pub mod gpu;
 pub mod input;
+pub mod launchpad_win;
 pub mod mem;
 pub mod menu;
 pub mod offscreen;

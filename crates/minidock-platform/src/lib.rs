@@ -8,19 +8,23 @@
 
 pub mod app_window;
 pub mod appbar;
+pub mod audio;
 pub mod display;
 pub mod gpu;
 pub mod icon;
 pub mod launch;
+pub mod launchpad;
 pub mod occlusion;
 pub mod paths;
 pub mod shortcut;
 pub mod single_instance;
+pub mod sysact;
 pub mod sysinfo;
 pub mod theme;
 pub mod win;
 
 pub use appbar::AppBar;
+pub use audio::{Audio, Battery};
 pub use display::{monitors, system_dpi, work_area, Monitor};
 pub use gpu::{AdapterInfo, AdapterKind};
 pub use icon::IconBitmap;

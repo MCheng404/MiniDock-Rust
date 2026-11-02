@@ -24,9 +24,11 @@ use minidock_core::layout::Rect as LRect;
 use minidock_core::running;
 use minidock_core::store;
 use minidock_gpu::calendar_win::CalendarWindow;
+use minidock_gpu::cc_win::CcWindow;
 use minidock_gpu::dock::{Dock, DockItem};
 use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
+use minidock_gpu::launchpad_win::LaunchpadWindow;
 use minidock_gpu::menu::{Menu, MenuCmd};
 use minidock_gpu::resmon_win::ResMonWindow;
 use minidock_gpu::settings_win::SettingsWindow;
@@ -159,6 +161,12 @@ struct App {
     tool_slot: Option<Pin<Box<ToolWindow>>>,
     /// 日历弹层。懒建。
     calendar_slot: Option<Pin<Box<CalendarWindow>>>,
+    /// 控制中心面板。懒建（里面有 COM 接口，能不开就不开）。
+    cc_slot: Option<Pin<Box<CcWindow>>>,
+    /// 起动台。懒建，而且只建一次（里面有一条取图标的线程）。
+    launchpad_slot: Option<Pin<Box<LaunchpadWindow>>>,
+    /// `MINIDOCK_DEBUG_OPEN` 只处理一次。
+    debug_opened: bool,
     /// 计时器面板的改动何时该落盘（防抖，与配置共用一个窗口）。
     tool_save_at: Option<Instant>,
     /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
@@ -353,6 +361,9 @@ impl App {
         let resmon_slot: Option<Pin<Box<ResMonWindow>>> = None;
         let tool_slot: Option<Pin<Box<ToolWindow>>> = None;
         let calendar_slot: Option<Pin<Box<CalendarWindow>>> = None;
+        let cc_slot: Option<Pin<Box<CcWindow>>> = None;
+        let launchpad_slot: Option<Pin<Box<LaunchpadWindow>>> = None;
+        let debug_opened = false;
         let tool_save_at: Option<Instant> = None;
         let widgets_dump = String::new();
         let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
@@ -398,6 +409,9 @@ impl App {
             resmon_slot,
             tool_slot,
             calendar_slot,
+            cc_slot,
+            launchpad_slot,
+            debug_opened,
             tool_save_at,
             widgets_dump,
             disk,
@@ -622,7 +636,26 @@ impl App {
                     hit.and_then(|i| self.raw.get(i)).map(|it| it.name.clone())
                 );
             }
-            if cmd == MenuCmd::Settings {
+            if cmd == MenuCmd::Launchpad {
+                // 主题跟着配置走（`UiTheme` 可能强制浅色），不是跟系统走。
+                let dark = self
+                    .dock
+                    .cfg
+                    .dock_is_dark(minidock_platform::theme::is_dark());
+                let lw = ensure_launchpad(
+                    &self.gpu,
+                    &mut self.launchpad_slot,
+                    &self.paths,
+                    self.ppp,
+                    dark,
+                )?;
+                // 行列数每次打开都跟配置同步：设置窗口里可能刚改过。
+                lw.set_grid(
+                    self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
+                    self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
+                );
+                lw.open();
+            } else if cmd == MenuCmd::Settings {
                 // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
                 // 那儿没有 `gpu`，也不该有。
                 let sw =
@@ -749,6 +782,9 @@ impl App {
             // 这里是穷尽匹配要求的占位：真走到这里说明拦截失效了，那是一个 bug。
             MenuCmd::Settings => {
                 eprintln!("`Settings` 命令走错了路径：它应当在主循环里被处理");
+            }
+            MenuCmd::Launchpad => {
+                eprintln!("`Launchpad` 命令走错了路径：它应当在主循环里被处理");
             }
             MenuCmd::AddSepAfter => {
                 let Some(i) = hit else { return };
@@ -945,7 +981,60 @@ impl App {
     ///
     /// 面板是懒建的：第一次点卡片才建窗口（建窗口要编译渲染管线，
     /// 几十毫秒，不能记在启动时间上）。
+    /// 调试用：`MINIDOCK_DEBUG_OPEN=cc|launchpad|calendar|tool|resmon`
+    /// 时，启动后直接把那个面板打开。
+    ///
+    /// 为什么需要它：无人值守验收要点击卡片，而前台常常压着一个浏览器窗口
+    /// （全屏窗口比 TOPMOST 还高），点击会落到别人身上 —— 表现是"点了没反应"。
+    /// 直接开面板能绕开这一层，只看面板自己的渲染。
+    fn debug_open_once(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.debug_opened {
+            return Ok(false);
+        }
+        let Ok(what) = std::env::var("MINIDOCK_DEBUG_OPEN") else {
+            self.debug_opened = true;
+            return Ok(false);
+        };
+        self.debug_opened = true;
+        let kind = match what.as_str() {
+            "cc" => minidock_core::layout::WidgetKind::CtrlCenter,
+            "calendar" => minidock_core::layout::WidgetKind::Clock,
+            "tool" => minidock_core::layout::WidgetKind::Tool,
+            "resmon" => minidock_core::layout::WidgetKind::Resource,
+            "launchpad" => {
+                let dark = self
+                    .dock
+                    .cfg
+                    .dock_is_dark(minidock_platform::theme::is_dark());
+                let lw = ensure_launchpad(
+                    &self.gpu,
+                    &mut self.launchpad_slot,
+                    &self.paths,
+                    self.ppp,
+                    dark,
+                )?;
+                lw.set_grid(
+                    self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
+                    self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
+                );
+                lw.open();
+                return Ok(true);
+            }
+            other => {
+                eprintln!("MINIDOCK_DEBUG_OPEN={other} 不认识");
+                return Ok(false);
+            }
+        };
+        // 走与点击同一条路径：构造 + 摆位。
+        self.dock.click_widget(kind);
+        Ok(true)
+    }
+
     fn step_resmon(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.debug_open_once()? {
+            // 这一帧先把面板建出来，下一帧再画。
+            return Ok(true);
+        }
         // 卡片被点了 → 打开对应的面板。
         //
         // **点击只取一次**：`take_widget_click` 会清空标志，
@@ -958,9 +1047,14 @@ impl App {
             if trace::geom() {
                 eprintln!("[widget] 卡片被点：{kind:?}");
             }
-            // 面板之间互斥：打开别的面板就把日历收起来，免得两块叠在一起。
+            // 面板之间互斥：打开别的面板就把别的收起来，免得几块叠在一起。
             if kind != minidock_core::layout::WidgetKind::Clock {
                 if let Some(w) = self.calendar_slot.as_mut() {
+                    w.hide();
+                }
+            }
+            if kind != minidock_core::layout::WidgetKind::CtrlCenter {
+                if let Some(w) = self.cc_slot.as_mut() {
                     w.hide();
                 }
             }
@@ -999,6 +1093,34 @@ impl App {
                         win.show();
                     }
                 }
+                minidock_core::layout::WidgetKind::CtrlCenter => {
+                    let open = self.cc_slot.as_ref().is_some_and(|w| w.visible());
+                    if open {
+                        if let Some(w) = self.cc_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        let energy =
+                            self.dock.cfg.get_i32(minidock_core::config::Key::CC_ENERGY) != 0;
+                        let hotspot = self
+                            .dock
+                            .cfg
+                            .get_i32(minidock_core::config::Key::CC_HOTSPOT)
+                            != 0;
+                        if self.cc_slot.is_none() {
+                            let win = CcWindow::new(&self.gpu, self.ppp, dark, energy, hotspot)?;
+                            self.cc_slot = Some(win);
+                        }
+                        let anchor = self.dock.widget_screen_rect(
+                            minidock_core::layout::WidgetKind::CtrlCenter,
+                            self.pos.0,
+                            self.pos.1,
+                        );
+                        if let (Some(win), Some(anchor)) = (self.cc_slot.as_mut(), anchor) {
+                            win.show_at(anchor, self.dock.cfg.edge);
+                        }
+                    }
+                }
                 minidock_core::layout::WidgetKind::Tool => {
                     if self.tool_slot.is_none() {
                         // 第一次打开才读 `[Tool]` 段：面板关着时它不在内存里，
@@ -1023,6 +1145,26 @@ impl App {
         if let Some(win) = self.resmon_slot.as_mut() {
             if win.visible() && win.due() {
                 win.render(&self.gpu)?;
+                need = true;
+            }
+        }
+        // 起动台：全屏窗口，交互才重绘（图标线程到货时会 PostMessage 催）。
+        if let Some(win) = self.launchpad_slot.as_mut() {
+            if win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+        }
+        // 控制中心：只在交互后重绘；改过主题就通知主循环重读一次。
+        if let Some(win) = self.cc_slot.as_mut() {
+            if win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+            if win.dirty_theme {
+                // 主题没有缓存：`theme::is_dark()` 每次都读注册表，下一帧
+                // 自然就是新配色。这里只需要保证"下一帧会发生"。
+                win.dirty_theme = false;
                 need = true;
             }
         }
@@ -1912,6 +2054,21 @@ fn show_menu(
 ///
 /// 懒建是为了别把"装字体 + 编译 GPU 管线"那几十毫秒记在 Dock 的启动时间上：
 /// 大部分会话压根不会打开设置。
+/// 懒建起动台窗口。只在第一次打开时建（里面有一条取图标的线程）。
+fn ensure_launchpad<'a>(
+    gpu: &Gpu,
+    slot: &'a mut Option<Pin<Box<LaunchpadWindow>>>,
+    paths: &Paths,
+    ppp: f32,
+    dark: bool,
+) -> Result<&'a mut LaunchpadWindow, Box<dyn std::error::Error>> {
+    if slot.is_none() {
+        let dat = paths.dir.join("launchpad.dat");
+        *slot = Some(LaunchpadWindow::new(gpu, ppp, dark, &dat)?);
+    }
+    Ok(slot.as_mut().expect("上面刚保证过"))
+}
+
 fn ensure_settings<'a>(
     gpu: &Gpu,
     slot: &'a mut Option<Pin<Box<SettingsWindow>>>,

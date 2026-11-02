@@ -44,6 +44,8 @@ pub enum MenuCmd {
     RemoveSep,
     /// 打开设置窗口。
     Settings,
+    /// 打开起动台。
+    Launchpad,
     /// 退出 Dock 进程。
     ExitDock,
 }
@@ -156,6 +158,8 @@ impl Menu {
         if let Some(last) = entries.last_mut() {
             last.sep_after = true;
         }
+        // 起动台排在设置前面：它是"日常用"的，设置是"折腾"的。
+        entries.push(MenuEntry::new("起动台", MenuCmd::Launchpad, false, false));
         entries.push(MenuEntry::new("Dock 设置", MenuCmd::Settings, false, false));
         Some(Self {
             entries,
@@ -356,6 +360,7 @@ mod tests {
                 MenuCmd::Open,
                 MenuCmd::AddSepAfter,
                 MenuCmd::RemoveItem,
+                MenuCmd::Launchpad,
                 MenuCmd::Settings,
             ]
         );
@@ -400,12 +405,15 @@ mod tests {
             .any(|e| e.cmd == MenuCmd::OpenInExplorer));
     }
 
-    /// 空白处 = 对 Dock 本身说话：设置 + 退出。
+    /// 空白处 = 对 Dock 本身说话：退出 + 起动台 + 设置。
     #[test]
     fn blank_area_offers_settings_and_exit() {
         let m = Menu::build(None, false).expect("应当有菜单");
         let cmds: Vec<MenuCmd> = m.entries.iter().map(|e| e.cmd).collect();
-        assert_eq!(cmds, vec![MenuCmd::ExitDock, MenuCmd::Settings]);
+        assert_eq!(
+            cmds,
+            vec![MenuCmd::ExitDock, MenuCmd::Launchpad, MenuCmd::Settings]
+        );
         // 设置与退出之间要有分隔线：两者后果差别太大，挨在一起容易误点。
         assert!(m.entries[0].danger);
         assert!(m.entries[0].sep_after);
@@ -417,7 +425,10 @@ mod tests {
         let sep = item(ItemKind::Separator, "");
         let m = Menu::build(Some(&sep), false).expect("应当有菜单");
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
-        assert_eq!(cmds, vec![MenuCmd::RemoveSep, MenuCmd::Settings]);
+        assert_eq!(
+            cmds,
+            vec![MenuCmd::RemoveSep, MenuCmd::Launchpad, MenuCmd::Settings]
+        );
         assert!(m.entries[0].danger);
     }
 
