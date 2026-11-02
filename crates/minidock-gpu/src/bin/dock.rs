@@ -23,6 +23,7 @@ use minidock_core::layout;
 use minidock_core::layout::Rect as LRect;
 use minidock_core::running;
 use minidock_core::store;
+use minidock_gpu::calendar_win::CalendarWindow;
 use minidock_gpu::dock::{Dock, DockItem};
 use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
@@ -156,6 +157,8 @@ struct App {
     resmon_slot: Option<Pin<Box<ResMonWindow>>>,
     /// 计时器 / 待办面板。同样懒建。
     tool_slot: Option<Pin<Box<ToolWindow>>>,
+    /// 日历弹层。懒建。
+    calendar_slot: Option<Pin<Box<CalendarWindow>>>,
     /// 计时器面板的改动何时该落盘（防抖，与配置共用一个窗口）。
     tool_save_at: Option<Instant>,
     /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
@@ -349,6 +352,7 @@ impl App {
         let last_sysinfo = std::time::Instant::now();
         let resmon_slot: Option<Pin<Box<ResMonWindow>>> = None;
         let tool_slot: Option<Pin<Box<ToolWindow>>> = None;
+        let calendar_slot: Option<Pin<Box<CalendarWindow>>> = None;
         let tool_save_at: Option<Instant> = None;
         let widgets_dump = String::new();
         let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
@@ -393,6 +397,7 @@ impl App {
             last_sysinfo,
             resmon_slot,
             tool_slot,
+            calendar_slot,
             tool_save_at,
             widgets_dump,
             disk,
@@ -953,7 +958,37 @@ impl App {
             if trace::geom() {
                 eprintln!("[widget] 卡片被点：{kind:?}");
             }
+            // 面板之间互斥：打开别的面板就把日历收起来，免得两块叠在一起。
+            if kind != minidock_core::layout::WidgetKind::Clock {
+                if let Some(w) = self.calendar_slot.as_mut() {
+                    w.hide();
+                }
+            }
             match kind {
+                minidock_core::layout::WidgetKind::Clock => {
+                    // 日历弹层：同一个卡片点第二下就是关掉。
+                    let open = self.calendar_slot.as_ref().is_some_and(|w| w.visible());
+                    if open {
+                        if let Some(w) = self.calendar_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        let today = minidock_gpu::calendar_win::today();
+                        if self.calendar_slot.is_none() {
+                            let win = CalendarWindow::new(&self.gpu, self.ppp, dark, today)?;
+                            self.calendar_slot = Some(win);
+                        }
+                        let anchor = self.dock.widget_screen_rect(
+                            minidock_core::layout::WidgetKind::Clock,
+                            self.pos.0,
+                            self.pos.1,
+                        );
+                        if let (Some(win), Some(anchor)) = (self.calendar_slot.as_mut(), anchor) {
+                            win.set_today(today);
+                            win.show_at(anchor, self.dock.cfg.edge);
+                        }
+                    }
+                }
                 minidock_core::layout::WidgetKind::Resource => {
                     if self.resmon_slot.is_none() {
                         let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
@@ -987,6 +1022,13 @@ impl App {
         let mut need = false;
         if let Some(win) = self.resmon_slot.as_mut() {
             if win.visible() && win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+        }
+        // 日历弹层：只在交互后重绘一次，不跑定时器。
+        if let Some(win) = self.calendar_slot.as_mut() {
+            if win.due() {
                 win.render(&self.gpu)?;
                 need = true;
             }

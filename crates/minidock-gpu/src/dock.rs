@@ -353,6 +353,37 @@ impl Dock {
         )
     }
 
+    /// 某个小组件卡片的**屏幕**矩形（物理像素，`(left, top, right, bottom)`）。
+    ///
+    /// `win_x` / `win_y` 是窗口左上角的屏幕坐标。栏体坐标是窗口内的，
+    /// 弹层要摆到屏幕上去，所以得加这一次偏移 —— 少加一次就会把弹层
+    /// 摆在屏幕左上角附近（这个错犯过一次，见 ADR-039）。
+    #[must_use]
+    pub fn widget_screen_rect(
+        &self,
+        kind: layout::WidgetKind,
+        win_x: i32,
+        win_y: i32,
+    ) -> Option<(f32, f32, f32, f32)> {
+        let m = &self.metrics;
+        for (i, (k, _)) in m.widgets.iter().enumerate() {
+            if k != kind {
+                continue;
+            }
+            let left = m
+                .widgets
+                .left_of(i, self.geom.bar_l, self.geom.bar_w, m.gap)?;
+            let w = m.widgets.width_of(k)? as f32;
+            return Some((
+                left + win_x as f32,
+                self.geom.bar_top + win_y as f32,
+                left + w + win_x as f32,
+                self.geom.bar_top + m.bar_h + win_y as f32,
+            ));
+        }
+        None
+    }
+
     /// 鼠标落在哪个小组件卡片上。
     ///
     /// 对应上游 v1.6.0 的 `WidgetAt()`（minidock.c:9092）：

@@ -21,6 +21,7 @@
 
 #![deny(missing_debug_implementations)]
 
+pub mod calendar_win;
 pub mod dock;
 pub mod frame;
 pub mod gpu;

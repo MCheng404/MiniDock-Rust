@@ -10,6 +10,7 @@
 
 #![deny(missing_debug_implementations)]
 
+pub mod calendar;
 pub mod clock;
 pub mod color;
 pub mod config;
