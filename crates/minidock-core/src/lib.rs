@@ -19,6 +19,7 @@ pub mod item;
 pub mod layout;
 pub mod running;
 pub mod store;
+pub mod tool;
 pub mod units;
 
 /// 进程级常量。版本号单独维护：它与 `MiniDock.ini` 的兼容性有关，

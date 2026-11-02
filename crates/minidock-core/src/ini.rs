@@ -213,6 +213,20 @@ impl Ini {
         self.set(section, key, value.to_string());
     }
 
+    /// 删除单个键。段或键不存在时什么都不做。
+    ///
+    /// 原版没有对应 API（`WritePrivateProfileStringW(sec, key, NULL, ...)`
+    /// 就是删键），但它的调用方从不删键 —— 于是"待办从 3 条减到 1 条"
+    /// 时文件里会留着 `T1` / `T2`。这里补上。
+    pub fn remove_key(&mut self, section: &str, key: &str) {
+        let Some(idx) = self.section_index(section) else {
+            return;
+        };
+        self.sections[idx]
+            .entries
+            .retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+    }
+
     /// 删除整个段（原版 `WritePrivateProfileStringW(sec, NULL, NULL, ...)`）。
     pub fn remove_section(&mut self, section: &str) {
         self.sections

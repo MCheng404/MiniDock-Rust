@@ -367,6 +367,10 @@ fn scan_thread(rx: Receiver<ScanInput>, tx: Sender<ScanOutput>, exclude: isize, 
 pub struct WriteJob {
     pub items: Option<Vec<Item>>,
     pub config: Option<Box<minidock_core::config::Config>>,
+    /// 计时器 / 待办（`[Tool]` 段）。带一个时间基准 ——
+    /// `Remain` 要按"提交这一刻"的剩余量算，不能在写盘线程里重新取时间
+    /// （那时可能已经过去几十毫秒，秒表会有可见跳变）。
+    pub tool: Option<(Box<minidock_core::tool::ToolState>, i64)>,
 }
 
 /// 写 ini 的工作线程。串行执行，天然保序。
@@ -429,6 +433,9 @@ fn write(ini: &Path, job: &WriteJob) -> Result<(), String> {
     }
     if let Some(cfg) = &job.config {
         cfg.write_ini(&mut model);
+    }
+    if let Some((tool, now_ms)) = &job.tool {
+        tool.save(&mut model, *now_ms);
     }
     model
         .save(ini)
@@ -525,6 +532,7 @@ mod tests {
             &WriteJob {
                 items: None,
                 config: Some(Box::new(cfg)),
+                tool: None,
             },
         )
         .expect("写设置");
@@ -543,6 +551,7 @@ mod tests {
             &WriteJob {
                 items: Some(vec![Item::new(ItemKind::File, "新", r"C:\new.exe")]),
                 config: None,
+                tool: None,
             },
         )
         .expect("写条目");
@@ -627,6 +636,7 @@ mod tests {
         writer.submit(WriteJob {
             items: Some(vec![Item::new(ItemKind::File, "a", r"C:.exe")]),
             config: None,
+            tool: None,
         });
 
         // 最多等 2 秒：正常是毫秒级，留足余量给慢机器。

@@ -164,11 +164,12 @@ impl WidgetKind {
     /// 只有已实现的才进条带 —— 没实现的留出位置却画不出东西，
     /// 栏体上就是一段空白，比不做还糟。
     ///
-    /// 已实现：时钟（v1.4.0 就有）、资源监视器（ADR-038）。
-    /// 其余四个（通知 / 控制中心 / 计时器 / 专注模式）尚未移植。
+    /// 已实现：时钟（v1.4.0 就有）、资源监视器（ADR-039）、
+    /// 计时器 / 待办（ADR-040）。
+    /// 其余三个（通知 / 控制中心 / 专注模式）尚未移植。
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Clock | Self::Resource)
+        matches!(self, Self::Clock | Self::Resource | Self::Tool)
     }
 
     /// 该小组件是否被配置启用。
@@ -966,9 +967,11 @@ mod tests {
     fn widget_strip_matches_v140_when_only_clock() {
         let mut c = cfg96();
         c.clock = true;
-        // 必须显式关掉资源监视器：上游 v1.6.0 默认 `ResMon=1`，
-        // 而 v1.4.0 压根没有这张卡片 —— 带它就不可能与 v1.4.0 等价了。
+        // 必须显式关掉另外两个已实现的卡片：上游 v1.6.0 默认
+        // `ResMon=1` / `ToolW=1`，而 v1.4.0 压根没有它们 ——
+        // 带着就不可能与 v1.4.0 等价了。
         c.apply_i32(Key::RES_MON, 0);
+        c.apply_i32(Key::TOOL_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
 
         // 条带里只有时钟一个成员。
@@ -991,7 +994,9 @@ mod tests {
     #[test]
     fn widget_strip_is_empty_without_clock() {
         let mut c = cfg96();
+        // 三个已实现的默认可能都开着，要关就都关。
         c.apply_i32(Key::RES_MON, 0);
+        c.apply_i32(Key::TOOL_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.widgets.len, 0);
         assert_eq!(m.widget_extra, 0.0);
@@ -1012,12 +1017,12 @@ mod tests {
         assert_eq!(c.get_i32(Key::MODE_W), 1);
 
         let m = calc_metrics(&c, 96, 3, 0, work());
-        // 只有已实现的（时钟、资源监视器）进条带。
-        assert_eq!(m.widgets.len, 2, "时钟 + 资源监视器");
+        // 只有已实现的（时钟、资源监视器、计时器）进条带。
+        assert_eq!(m.widgets.len, 3, "时钟 + 资源监视器 + 计时器");
         assert!(m.widgets.width_of(WidgetKind::Resource).is_some());
-        // 这三个还没移植，不能占位。
+        assert!(m.widgets.width_of(WidgetKind::Tool).is_some());
+        // 这两个还没移植，不能占位。
         assert!(m.widgets.width_of(WidgetKind::CtrlCenter).is_none());
-        assert!(m.widgets.width_of(WidgetKind::Tool).is_none());
         assert!(m.widgets.width_of(WidgetKind::Focus).is_none());
     }
 
@@ -1027,6 +1032,7 @@ mod tests {
         let mut c = cfg96();
         c.clock = true;
         c.apply_i32(Key::RES_MON, 1);
+        c.apply_i32(Key::TOOL_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
 
         assert_eq!(m.widgets.len, 2, "时钟 + 资源监视器");
@@ -1035,6 +1041,26 @@ mod tests {
         let kinds: Vec<WidgetKind> = m.widgets.iter().map(|(k, _)| k).collect();
         assert_eq!(kinds[0], WidgetKind::Clock);
         assert_eq!(kinds[1], WidgetKind::Resource);
+    }
+
+    /// 计时器卡片进条带，宽度 = 栏高 × 0.72（双倍宽 1.6，上游 v1.6.0）。
+    #[test]
+    fn tool_widget_enters_the_strip() {
+        let mut c = cfg96();
+        c.apply_i32(Key::TOOL_W, 1);
+        c.apply_i32(Key::RES_MON, 0);
+
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        // 用真实的栏高，别写死 —— cfg96 的 bar_h 是 `s + 2*pad + 4`。
+        let bar_h = m.bar_h;
+        assert_eq!(
+            m.widgets.width_of(WidgetKind::Tool),
+            Some((bar_h * 0.72) as i32)
+        );
+
+        // WideMask 的第 4 位 = W_TOOL。
+        c.apply_i32(Key::WIDE_MASK, 1 << 4);
+        assert_eq!(WidgetKind::Tool.width(&c, bar_h), (bar_h * 1.6) as i32);
     }
 
     /// 资源卡片宽度 = 栏高 × 1.16（双倍宽时 × 2.2）。
@@ -1055,6 +1081,7 @@ mod tests {
         let mut c = cfg96();
         c.clock = true;
         c.apply_i32(Key::RES_MON, 0);
+        c.apply_i32(Key::TOOL_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.widgets.len, 1);
         assert!(m.widgets.width_of(WidgetKind::Resource).is_none());
@@ -1084,6 +1111,7 @@ mod tests {
         c.clock = true;
         // 只留时钟，才能验证"紧贴栏体左缘"这个简单关系。
         c.apply_i32(Key::RES_MON, 0);
+        c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::W_SIDE, 1);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert!(m.widgets.on_left, "应当记为左侧条带");
@@ -1108,12 +1136,13 @@ mod tests {
         let mut c = cfg96();
         c.clock = true;
         c.apply_i32(Key::RES_MON, 1);
+        c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::W_SIDE, 1);
         let m = calc_metrics(&c, 96, 3, 0, work());
         let bar_l = 100.0_f32;
         let bar_w = 300.0_f32;
 
-        // 条带顺序：时钟(0)、资源(1)。左侧时资源(1)靠栏体。
+        // 条带顺序：时钟(0)、资源(1)。左侧时**最后一个**贴栏体。
         let clock = m.widgets.left_of(0, bar_l, bar_w, m.gap).expect("时钟");
         let res = m.widgets.left_of(1, bar_l, bar_w, m.gap).expect("资源");
         assert!(

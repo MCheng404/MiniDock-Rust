@@ -31,6 +31,7 @@ pub mod offscreen;
 pub mod present;
 pub mod resmon_win;
 pub mod settings_win;
+pub mod tool_win;
 pub mod worker;
 
 pub use dock::{Dock, DockItem};

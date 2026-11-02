@@ -29,6 +29,7 @@ use minidock_gpu::gpu::Gpu;
 use minidock_gpu::menu::{Menu, MenuCmd};
 use minidock_gpu::resmon_win::ResMonWindow;
 use minidock_gpu::settings_win::SettingsWindow;
+use minidock_gpu::tool_win::ToolWindow;
 use minidock_gpu::worker::{
     DiskWriter, IconLoader, IconRequest, OpenJob, Opener, ScanInput, Scanner, Waker, WriteJob,
 };
@@ -153,6 +154,12 @@ struct App {
     last_sysinfo: std::time::Instant,
     /// 资源监视器详情面板。懒建：大部分会话不会点开它。
     resmon_slot: Option<Pin<Box<ResMonWindow>>>,
+    /// 计时器 / 待办面板。同样懒建。
+    tool_slot: Option<Pin<Box<ToolWindow>>>,
+    /// 计时器面板的改动何时该落盘（防抖，与配置共用一个窗口）。
+    tool_save_at: Option<Instant>,
+    /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
+    widgets_dump: String,
     /// 写 ini（串行，天然保序）。
     disk: DiskWriter,
     /// 启动 / 激活应用（`ShellExecuteW`）。
@@ -341,6 +348,9 @@ impl App {
         let scanner = Scanner::spawn(hwnd.0 as isize, waker)?;
         let last_sysinfo = std::time::Instant::now();
         let resmon_slot: Option<Pin<Box<ResMonWindow>>> = None;
+        let tool_slot: Option<Pin<Box<ToolWindow>>> = None;
+        let tool_save_at: Option<Instant> = None;
+        let widgets_dump = String::new();
         let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
         let opener = Opener::spawn()?;
         // 先把所有图标排进队列：工作线程攒批处理，UI 线程立刻返回。
@@ -382,6 +392,9 @@ impl App {
             scanner,
             last_sysinfo,
             resmon_slot,
+            tool_slot,
+            tool_save_at,
+            widgets_dump,
             disk,
             opener,
             dirty_at: None,
@@ -449,6 +462,7 @@ impl App {
             self.sync_cover_target();
             // ⑨ 写盘（防抖到期才发，写本身在别的线程，不需要出帧）。
             self.step_disk();
+            self.step_tool_save();
             // ⑩ 全屏时整体隐藏。
             need_frame |= self.step_fullscreen();
             // ⑪ 自动隐藏 / 智能隐藏。
@@ -811,8 +825,38 @@ impl App {
         let items = self.dirty_items.take();
         let config = self.dirty_cfg.take();
         if items.is_some() || config.is_some() {
-            self.disk.submit(WriteJob { items, config });
+            self.disk.submit(WriteJob {
+                items,
+                config,
+                // 配置与条目这次不动 `[Tool]` 段：两段由各自的脏标记驱动，
+                // 一起写会让"改个滑块"也把计时器的剩余秒数刷一遍。
+                tool: None,
+            });
         }
+    }
+
+    /// 计时器面板的改动落盘（同样防抖）。
+    ///
+    /// 单独一条路径而不是并进 `dirty_at`：面板打勾是"一次一下"的，
+    /// 与拖滑块那种高频改动节奏不同，共用一个窗口会让勾选延迟 400 ms
+    /// 才落盘 —— 观感上像丢了。
+    fn step_tool_save(&mut self) {
+        let Some(at) = self.tool_save_at else {
+            return;
+        };
+        if at.elapsed() < Duration::from_millis(TOOL_SAVE_DEBOUNCE_MS) {
+            return;
+        }
+        self.tool_save_at = None;
+        let Some(win) = self.tool_slot.as_ref() else {
+            return;
+        };
+        let now = minidock_gpu::tool_win::now_ms();
+        self.disk.submit(WriteJob {
+            items: None,
+            config: None,
+            tool: Some((Box::new(win.state.clone()), now)),
+        });
     }
 
     /// 取走后台线程处理完的图标，上传成纹理。
@@ -897,32 +941,69 @@ impl App {
     /// 面板是懒建的：第一次点卡片才建窗口（建窗口要编译渲染管线，
     /// 几十毫秒，不能记在启动时间上）。
     fn step_resmon(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        // 卡片被点了 → 打开面板。
+        // 卡片被点了 → 打开对应的面板。
+        //
+        // **点击只取一次**：`take_widget_click` 会清空标志，
+        // 两个面板各自 take 的话，先跑的那个会把点击吃掉。
         if let Some(kind) = self.dock.take_widget_click() {
-            if kind == minidock_core::layout::WidgetKind::Resource {
-                if self.resmon_slot.is_none() {
-                    let dark = self
-                        .dock
-                        .cfg
-                        .dock_is_dark(minidock_platform::theme::is_dark());
-                    let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
-                    win.attach_public();
-                    self.resmon_slot = Some(win);
+            let dark = self
+                .dock
+                .cfg
+                .dock_is_dark(minidock_platform::theme::is_dark());
+            if trace::geom() {
+                eprintln!("[widget] 卡片被点：{kind:?}");
+            }
+            match kind {
+                minidock_core::layout::WidgetKind::Resource => {
+                    if self.resmon_slot.is_none() {
+                        let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
+                        win.attach_public();
+                        self.resmon_slot = Some(win);
+                    }
+                    if let Some(win) = self.resmon_slot.as_mut() {
+                        win.show();
+                    }
                 }
-                if let Some(win) = self.resmon_slot.as_mut() {
-                    win.show();
+                minidock_core::layout::WidgetKind::Tool => {
+                    if self.tool_slot.is_none() {
+                        // 第一次打开才读 `[Tool]` 段：面板关着时它不在内存里，
+                        // 也不该在 —— 没人看的东西没必要常驻。
+                        let ini = Ini::load(&self.paths.ini)?;
+                        let state = minidock_core::tool::ToolState::load(&ini);
+                        let win = ToolWindow::new(&self.gpu, self.ppp, dark, state)?;
+                        self.tool_slot = Some(win);
+                    }
+                    if let Some(win) = self.tool_slot.as_mut() {
+                        win.show();
+                        if trace::geom() {
+                            eprintln!("[widget] 计时器面板已显示");
+                        }
+                    }
                 }
+                _ => {}
             }
         }
         // 面板到期就重绘（数据每秒变一次）。
-        let Some(win) = self.resmon_slot.as_mut() else {
-            return Ok(false);
-        };
-        if win.visible() && win.due() {
-            win.render(&self.gpu)?;
-            return Ok(true);
+        let mut need = false;
+        if let Some(win) = self.resmon_slot.as_mut() {
+            if win.visible() && win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
         }
-        Ok(false)
+        // 计时器面板：跑着的时候 50 ms 一帧。
+        let now = minidock_gpu::tool_win::now_ms();
+        if let Some(win) = self.tool_slot.as_mut() {
+            if win.visible() && win.due() {
+                win.render(&self.gpu, now)?;
+                need = true;
+            }
+            if win.dirty {
+                win.dirty = false;
+                self.tool_save_at = Some(std::time::Instant::now());
+            }
+        }
+        Ok(need)
     }
 
     /// 把"该检测哪块矩形被遮挡"同步给扫描线程。
@@ -1052,25 +1133,32 @@ impl App {
     /// 栏体坐标是窗口内的，自动化脚本要点击就得知道屏幕坐标 ——
     /// 让程序自己报，比脚本自己推算靠谱（推算过一次，忘了加窗口偏移，
     /// 点在了空气里）。
-    fn dump_widgets(&self) {
+    fn dump_widgets(&mut self) {
         if !trace::geom() {
             return;
         }
         let dock = &*self.dock;
+        // 只在**几何变了**的时候打印。每次重绘都打一遍会把日志淹掉
+        // （秒表跑着的时候 50 ms 一帧）。
+        let mut line = String::new();
         for (i, (kind, w)) in dock.metrics.widgets.iter().enumerate() {
             if let Some(left) =
                 dock.metrics
                     .widgets
                     .left_of(i, dock.geom.bar_l, dock.geom.bar_w, dock.metrics.gap)
             {
-                eprintln!(
-                    "GEOM widget={kind:?} screen=({x},{y}) size=({w},{h})",
+                line.push_str(&format!(
+                    "GEOM widget={kind:?} screen=({x},{y}) size=({w},{h})\n",
                     x = left as i32 + self.pos.0,
                     y = dock.geom.bar_top as i32 + self.pos.1,
                     w = w,
                     h = dock.metrics.bar_h as i32
-                );
+                ));
             }
+        }
+        if line != self.widgets_dump {
+            self.widgets_dump = line.clone();
+            eprint!("{line}");
         }
     }
 
@@ -1427,6 +1515,12 @@ const FS_CHECK_MS: u32 = 1000;
 /// 拖一下滑块会产生几十次 `changed`；ini 是 UTF-16 全量回写，逐次写盘
 /// 会让一次拖动变成几十次文件重写。400 ms 是"停手就存、拖着不存"的折中。
 const CFG_SAVE_DEBOUNCE_MS: u64 = 400;
+
+/// 计时器面板的落盘防抖（毫秒）。
+///
+/// 比配置短：勾一条待办是一次一下的动作，400 ms 会让人觉得没生效。
+/// 但仍要防抖 —— 秒表跑着的时候每一帧的剩余量都不同。
+const TOOL_SAVE_DEBOUNCE_MS: u64 = 120;
 
 /// 给每个条目装图标。
 ///

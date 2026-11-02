@@ -893,6 +893,7 @@ impl Dock {
             }
         }
         self.paint_resource_card(painter, p, dark, ui.ctx());
+        self.paint_tool_card(painter, p, dark);
         self.paint_separators(painter, p, dark);
         self.paint_icons(painter, p, dark);
         // 残影必须画在所有槽位内容之后，否则会被后面画的图标盖住。
@@ -945,6 +946,55 @@ impl Dock {
     ///
     /// 对应上游 v1.6.0 的 `DrawRes()`（minidock.c:6521）。
     /// 上游的文案是 `CPU %d%%`，双倍宽时是 `CPU %d%%   RAM %d%%`。
+    /// 计时器 / 待办卡片：栏体 + 钟表图标。
+    ///
+    /// 对应上游 v1.6.0 的 `DrawTool()`（minidock.c:6499）：一个圆 + 两根指针。
+    /// 上游不显示数字 —— 时间在面板里看，卡片只做入口。
+    fn paint_tool_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
+        let m = &self.metrics;
+        let Some(idx) = m
+            .widgets
+            .iter()
+            .position(|(k, _)| k == layout::WidgetKind::Tool)
+        else {
+            return;
+        };
+        let Some(left) = m
+            .widgets
+            .left_of(idx, self.geom.bar_l, self.geom.bar_w, m.gap)
+        else {
+            return;
+        };
+        let width = m.widgets.width_of(layout::WidgetKind::Tool).unwrap_or(0);
+        if width <= 0 {
+            return;
+        }
+        let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
+        self.paint_bar(painter, c, self.bar_radius(p), dark);
+
+        // 钟表：表盘 + 时针 + 分针，全部按卡片短边比例算。
+        let size = (c.width().min(c.height()) * 0.46).max(4.0);
+        let center = c.center();
+        let color = if dark {
+            Color32::from_rgba_unmultiplied(235, 240, 240, 246)
+        } else {
+            Color32::from_rgba_unmultiplied(232, 30, 32, 40)
+        };
+        let stroke = Stroke::new((size * 0.09).max(1.0), color);
+        painter.circle_stroke(center, size / 2.0, stroke);
+        painter.line_segment(
+            [center, Pos2::new(center.x, center.y - size * 0.32)],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                center,
+                Pos2::new(center.x + size * 0.28, center.y + size * 0.18),
+            ],
+            stroke,
+        );
+    }
+
     fn paint_resource_card(
         &self,
         painter: &egui::Painter,

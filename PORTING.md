@@ -187,6 +187,7 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 | 设置内容 | `BuildRows` `PaintSettings` `SetProc` `RowHit` `DoAct` | `settings::pages` | ⚠️ 9 页 / 约 90 项；上游 **10 页**，且项目不全 |
 | 后台任务 | —— | `gpu::worker` | ✅ 本轮新增（ADR-037） |
 | 资源监视器 | `ResCpuPercent` `ResSample` `DrawRes` `ShowResMon` | `platform::sysinfo` + `gpu::resmon_win` | ✅ 卡片 + 详情面板（ADR-039） |
+| 计时器 / 待办 | `ToolLoad` `ToolSave` `ToolDraw` `ToolUp` `ShowTool` | `core::tool` + `gpu::tool_win` | ✅ 卡片 + 面板（ADR-040） |
 
 ## 四、风险清单
 
@@ -363,6 +364,7 @@ bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
 2. **资源监视器** —— 三个只读系统调用 + 一个小组件面板，是最小的端到端验证。
    > **已做（ADR-039）**：条带卡片 + 点击弹详情面板。
 3. **计时器 / 待办** —— `[Tool]` 段 + 一个面板，顺便验证"新配置段"的读写。
+   > **已做（ADR-040）**：卡片 + 面板，含计时/秒表/待办；中文输入法仍待接。
 4. **日历 / 农历** —— 纯算法，可以全进 `core` 并写单测（节气表、干支换算），
    不依赖任何 Win32。
 5. **专注模式** —— 文件快照 + 一个菜单，无新窗口。
