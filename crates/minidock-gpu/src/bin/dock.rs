@@ -167,6 +167,11 @@ struct App {
     launchpad_slot: Option<Pin<Box<LaunchpadWindow>>>,
     /// `MINIDOCK_DEBUG_OPEN` 只处理一次。
     debug_opened: bool,
+    /// 上一次启动应用的时间点（距进程启动的毫秒数）。
+    ///
+    /// 用途见 [`LAUNCH_GRACE_MS`]：刚启动的应用常常先以最大化/全屏姿态出现，
+    /// 全屏监视若立刻判定，Dock 会「闪一下隐藏再弹回来」。
+    last_launch_ms: Option<u64>,
     /// 计时器面板的改动何时该落盘（防抖，与配置共用一个窗口）。
     tool_save_at: Option<Instant>,
     /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
@@ -368,6 +373,7 @@ impl App {
         let cc_slot: Option<Pin<Box<CcWindow>>> = None;
         let launchpad_slot: Option<Pin<Box<LaunchpadWindow>>> = None;
         let debug_opened = false;
+        let last_launch_ms: Option<u64> = None;
         let tool_save_at: Option<Instant> = None;
         let widgets_dump = String::new();
         let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
@@ -416,6 +422,7 @@ impl App {
             cc_slot,
             launchpad_slot,
             debug_opened,
+            last_launch_ms,
             tool_save_at,
             widgets_dump,
             disk,
@@ -586,6 +593,7 @@ impl App {
             force,
             toggle,
         });
+        self.last_launch_ms = Some(self.now_ms());
         // 启动/切换之后弹一下，给一个"点到了"的反馈。
         // 弹跳只在真的发生了动作时播，失败不弹（否则会误导）。
         self.dock.start_bounce(i);
@@ -760,6 +768,7 @@ impl App {
                     force: false,
                     toggle,
                 });
+                self.last_launch_ms = Some(self.now_ms());
             }
             MenuCmd::OpenInExplorer => {
                 if let Some(item) = hit.and_then(|i| self.raw.get(i)) {
@@ -1251,7 +1260,16 @@ impl App {
     ///
     /// 一秒查一次足够 —— 从全屏切回来到 Dock 重新出现，1 秒内感知不到延迟，
     /// 而检查本身只是两个只读查询，不触发任何渲染。
+    /// 距进程启动的毫秒数。多处计时用它，保证同一个基准。
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(0)
+    }
+
     fn step_fullscreen(&mut self) -> bool {
+        // 刚启动过应用就先不判定：见 `occlusion::LAUNCH_GRACE_MS`。
+        if occlusion::in_launch_grace(self.last_launch_ms, self.now_ms()) {
+            return false;
+        }
         if self.last_fs_check.elapsed() < Duration::from_millis(u64::from(FS_CHECK_MS)) {
             return false;
         }
@@ -1284,7 +1302,7 @@ impl App {
         if !self.dock.needs_hide_tick() {
             return false;
         }
-        let now_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(0);
+        let now_ms = self.now_ms();
         let near = cursor_near(&self.dock, self.hwnd);
         let busy = self.dock.dragging().is_some();
         // 智能隐藏才需要枚举窗口。按需调用：`EnumWindows` 要遍历桌面上

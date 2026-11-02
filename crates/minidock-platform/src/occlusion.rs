@@ -262,6 +262,32 @@ pub fn check_fullscreen() -> FullscreenCheck {
 /// 覆盖整个显示器用的是 `rcMonitor` 而不是 `rcWork`：全屏视频会盖住任务栏，
 /// 用 `rcWork` 判断会漏掉这种最常见的场景。
 ///
+/// 启动应用后多久内不做全屏判定（毫秒）。
+///
+/// 上游 1.6.5 的 `g_launchTick`（`FsWatch()` 里
+/// `GetTickCount() - g_launchTick < 1500` 直接返回）。
+///
+/// 为什么需要：新启动的应用常常**先以最大化/全屏姿态出现**（浏览器、
+/// 游戏启动器、安装完自动拉起的客户端）。全屏监视若在那一瞬间判定，
+/// 会先把 Dock 藏起来、等窗口缩回正常尺寸再显示 —— 用户看到的是
+/// "点了一下，Dock 闪没了又回来"。
+pub const LAUNCH_GRACE_MS: u64 = 1500;
+
+/// 是否处在"刚启动过应用"的宽限期内。
+///
+/// `now_ms` 与 `last_launch_ms` 都是"距进程启动的毫秒数"。时钟异常
+/// （`now < last`）时按"在宽限期内"处理：宁可晚 1.5 秒再藏，也不要闪。
+pub fn in_launch_grace(last_launch_ms: Option<u64>, now_ms: u64) -> bool {
+    last_launch_ms.is_some_and(|t| now_ms.saturating_sub(t) < LAUNCH_GRACE_MS)
+}
+
+/// 前台窗口是否是一个**全屏且无标题栏**的窗口（看视频、玩游戏、全屏演示）。
+///
+/// 命中时 Dock 应当完全隐藏 —— 全屏内容下面露出半条 Dock 是很显眼的破相。
+///
+/// 覆盖整个显示器用的是 `rcMonitor` 而不是 `rcWork`：全屏视频会盖住任务栏，
+/// 用 `rcWork` 判断会漏掉这种最常见的场景。
+///
 /// **没有 `WS_CAPTION`** 是关键条件：单纯覆盖全屏的普通最大化窗口
 /// （比如浏览器普通最大化）应当**不**让 Dock 消失，否则用户会以为 Dock 崩了。
 /// 无边框全屏才是"沉浸态"的信号。
@@ -291,6 +317,20 @@ pub fn fullscreen_trace() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 宽限期：没启动过 / 刚好 1500 ms / 时钟倒退，三种边界。
+    #[test]
+    fn launch_grace_covers_the_edges() {
+        // 从没启动过 → 不在宽限期（正常判定全屏）。
+        assert!(!in_launch_grace(None, 10_000));
+        // 刚启动 → 在宽限期内。
+        assert!(in_launch_grace(Some(1_000), 1_000));
+        assert!(in_launch_grace(Some(1_000), 2_499));
+        // 满 1500 ms → 立刻恢复判定（不是 <=，否则会多藏一秒）。
+        assert!(!in_launch_grace(Some(1_000), 2_500));
+        // 时钟倒退（now < last）：按"在宽限期内"处理，宁可晚藏不闪。
+        assert!(in_launch_grace(Some(5_000), 4_000));
+    }
 
     #[test]
     fn overlap_requires_positive_area() {

@@ -5,6 +5,32 @@
 
 ---
 
+## 0.8.3 — 吸收 v1.6.5 的 19 个键 + 启动宽限期（ADR-046，2026-11-02）
+
+上游 1.6.5 比发布说明写的大得多（见 `PORTING.md` §八）。这一轮只做两件
+**不改变现有渲染**的事，先把数据与闪动问题兜住。
+
+### 新增
+
+- **配置表 99 → 118**：`HPad` / `UiFrost` / `LpFrost` / `TrayW` / `WMerge` /
+  `StatusBar` / `SbFrost` / `SbOpacity` / `SbColor` / `SbRadius` / `SbHeight` /
+  `SbFollowSys` / `SbTopGap` / `SbMaxAvoid` / `SbFloat` / `SbSideGap` /
+  `SbAutoHide` / `SepScale` / `MenuFrost`，默认值与值域照上游 `DefaultCfg()`
+  与设置行。新增段 `widgets.statusbar`。
+- **启动宽限期**（`occlusion::LAUNCH_GRACE_MS` = 1.5 s）：启动应用后的
+  1.5 秒内不做全屏判定，避免新应用以最大化姿态出现时 Dock 闪一下。
+
+### 缺陷修复
+
+- 从上游 1.6.5 升级会**静默丢掉**这 19 个键（`upgrade_legacy` 删段重写，
+  表里没有就一起没了）。ADR-038 修过一次同类问题，这是第二次复发。
+  新增 `upgrade_legacy_keeps_upstream_v165_keys` 守着。
+
+### 说明
+
+- 这 19 个键目前**只存不用**：状态栏、托盘小组件、毛玻璃、分割线缩放
+  都还没实现，写进 ini 只是保证升级不丢配置。动手实现时直接从表里取。
+
 ## 0.8.2 — 光标不再是"忙"（ADR-045，2026-11-02）
 
 鼠标一进 Dock 或任何一个自绘面板，光标就变成沙漏/转圈，而且会一直转。

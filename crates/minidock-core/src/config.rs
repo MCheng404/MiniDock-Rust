@@ -95,6 +95,21 @@ fn section_of_numeric(name: &str) -> &'static str {
         "FanBgL" | "FanBgD" | "FanFgL" | "FanFgD" | "FanDrag" => {
             return "behavior.group";
         }
+        // 顶部状态栏：主开关与它的外观参数自成一档（v1.6.5）。
+        "StatusBar" | "SbFrost" | "SbOpacity" | "SbColor" | "SbRadius" | "SbHeight"
+        | "SbFollowSys" | "SbTopGap" | "SbMaxAvoid" | "SbFloat" | "SbSideGap" | "SbAutoHide" => {
+            return "widgets.statusbar"
+        }
+        // 托盘小组件与"所有小组件合并成一个胶囊"。
+        "TrayW" | "WMerge" => return "widgets",
+        // 起动台毛玻璃。
+        "LpFrost" => return "widgets.launchpad",
+        // 设置窗口毛玻璃 / 栏体左右内边距。
+        "UiFrost" | "HPad" => return "appearance",
+        // 右键菜单毛玻璃。
+        "MenuFrost" => return "menu",
+        // 分割线拖动等比缩放。
+        "SepScale" => return "behavior",
         _ => {}
     }
     if name.starts_with("Plate") {
@@ -217,6 +232,29 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("WideMask", 0, 63, 0, false, false),
     // ModeW：专注模式小组件。
     ("ModeW", 0, 1, 1, true, false),
+    // ---- 上游 v1.6.5 新增的 19 个键 ----
+    // 顺序照抄上游 `g_tab[]` 的追加次序；`HPad` 在 `g_tab` 里插在
+    // `Margin` 之后，但那张表是 ini 的行序（`Key::ALL`），这里的表是
+    // 常量下标，追加在末尾才不会让已有常量整体错位。
+    ("HPad", 0, 40, 12, false, true),
+    ("UiFrost", 0, 1, 1, true, false),
+    ("LpFrost", 0, 1, 1, true, false),
+    ("TrayW", 0, 1, 1, true, false),
+    ("WMerge", 0, 1, 1, true, false),
+    ("StatusBar", 0, 1, 0, true, false),
+    ("SbFrost", 0, 1, 1, true, false),
+    ("SbOpacity", 0, 100, 88, false, false),
+    ("SbColor", -1, 16777215, -1, false, false),
+    ("SbRadius", 0, 24, 10, false, false),
+    ("SbHeight", 22, 48, 32, false, false),
+    ("SbFollowSys", 0, 1, 1, true, false),
+    ("SbTopGap", 0, 80, 0, false, false),
+    ("SbMaxAvoid", 0, 1, 0, true, false),
+    ("SbFloat", 0, 1, 0, true, false),
+    ("SbSideGap", 0, 80, 12, false, false),
+    ("SbAutoHide", 0, 1, 0, true, false),
+    ("SepScale", 0, 1, 0, true, false),
+    ("MenuFrost", 0, 1, 0, true, false),
 ];
 
 impl Key {
@@ -352,6 +390,44 @@ impl Key {
     pub const WIDE_MASK: Key = Key::Numeric(62);
     /// `ModeW`
     pub const MODE_W: Key = Key::Numeric(63);
+    /// `HPad`
+    pub const HPAD: Key = Key::Numeric(64);
+    /// `UiFrost`
+    pub const UI_FROST: Key = Key::Numeric(65);
+    /// `LpFrost`
+    pub const LP_FROST: Key = Key::Numeric(66);
+    /// `TrayW`
+    pub const TRAY_W: Key = Key::Numeric(67);
+    /// `WMerge`
+    pub const W_MERGE: Key = Key::Numeric(68);
+    /// `StatusBar`
+    pub const STATUS_BAR: Key = Key::Numeric(69);
+    /// `SbFrost`
+    pub const SB_FROST: Key = Key::Numeric(70);
+    /// `SbOpacity`
+    pub const SB_OPACITY: Key = Key::Numeric(71);
+    /// `SbColor`
+    pub const SB_COLOR: Key = Key::Numeric(72);
+    /// `SbRadius`
+    pub const SB_RADIUS: Key = Key::Numeric(73);
+    /// `SbHeight`
+    pub const SB_HEIGHT: Key = Key::Numeric(74);
+    /// `SbFollowSys`
+    pub const SB_FOLLOW_SYS: Key = Key::Numeric(75);
+    /// `SbTopGap`
+    pub const SB_TOP_GAP: Key = Key::Numeric(76);
+    /// `SbMaxAvoid`
+    pub const SB_MAX_AVOID: Key = Key::Numeric(77);
+    /// `SbFloat`
+    pub const SB_FLOAT: Key = Key::Numeric(78);
+    /// `SbSideGap`
+    pub const SB_SIDE_GAP: Key = Key::Numeric(79);
+    /// `SbAutoHide`
+    pub const SB_AUTO_HIDE: Key = Key::Numeric(80);
+    /// `SepScale`
+    pub const SEP_SCALE: Key = Key::Numeric(81);
+    /// `MenuFrost`
+    pub const MENU_FROST: Key = Key::Numeric(82);
 }
 
 impl Key {
@@ -364,6 +440,7 @@ impl Key {
         Key::ZoomSize,
         Key::Spacing,
         Key::Margin,
+        Key::HPAD,
         Key::Padding,
         Key::Radius,
         Key::Opacity,
@@ -460,6 +537,24 @@ impl Key {
         Key::TOOL_W,
         Key::WIDE_MASK,
         Key::MODE_W,
+        Key::UI_FROST,
+        Key::LP_FROST,
+        Key::TRAY_W,
+        Key::W_MERGE,
+        Key::STATUS_BAR,
+        Key::SB_FROST,
+        Key::SB_OPACITY,
+        Key::SB_COLOR,
+        Key::SB_RADIUS,
+        Key::SB_HEIGHT,
+        Key::SB_FOLLOW_SYS,
+        Key::SB_TOP_GAP,
+        Key::SB_MAX_AVOID,
+        Key::SB_FLOAT,
+        Key::SB_SIDE_GAP,
+        Key::SB_AUTO_HIDE,
+        Key::SEP_SCALE,
+        Key::MENU_FROST,
     ];
 
     /// 新配置格式里该键所属的段。
@@ -1312,7 +1407,7 @@ mod tests {
     /// 任何一次调整 [`NUMERIC_KEYS`] 的顺序，都必须先更新常量再改这里。
     #[test]
     fn numeric_constants_match_table_rows() {
-        let pairs: [(Key, &str); 64] = [
+        let pairs: [(Key, &str); 83] = [
             (Key::PLATE_MODE, "PlateMode"),
             (Key::PLATE_THEME, "PlateTheme"),
             (Key::PLATE_OPACITY, "PlateOpacity"),
@@ -1377,6 +1472,27 @@ mod tests {
             (Key::TOOL_W, "ToolW"),
             (Key::WIDE_MASK, "WideMask"),
             (Key::MODE_W, "ModeW"),
+            // 上游 v1.6.5 追加的 19 个键（`HPad` 在 `g_tab` 里插在第 4 位，
+            // 但本表是常量下标，顺序无所谓，一行不能少）。
+            (Key::HPAD, "HPad"),
+            (Key::UI_FROST, "UiFrost"),
+            (Key::LP_FROST, "LpFrost"),
+            (Key::TRAY_W, "TrayW"),
+            (Key::W_MERGE, "WMerge"),
+            (Key::STATUS_BAR, "StatusBar"),
+            (Key::SB_FROST, "SbFrost"),
+            (Key::SB_OPACITY, "SbOpacity"),
+            (Key::SB_COLOR, "SbColor"),
+            (Key::SB_RADIUS, "SbRadius"),
+            (Key::SB_HEIGHT, "SbHeight"),
+            (Key::SB_FOLLOW_SYS, "SbFollowSys"),
+            (Key::SB_TOP_GAP, "SbTopGap"),
+            (Key::SB_MAX_AVOID, "SbMaxAvoid"),
+            (Key::SB_FLOAT, "SbFloat"),
+            (Key::SB_SIDE_GAP, "SbSideGap"),
+            (Key::SB_AUTO_HIDE, "SbAutoHide"),
+            (Key::SEP_SCALE, "SepScale"),
+            (Key::MENU_FROST, "MenuFrost"),
         ];
         for (key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");
@@ -1393,18 +1509,23 @@ mod tests {
         // 用**上游名**比对：顺序仍要与 C 版一致，这样两边来回读写时
         // 行序稳定、diff 干净。新名是否唯一由下一个测试保证。
         let names: Vec<&str> = Key::ALL.iter().map(|k| k.legacy_name()).collect();
-        assert_eq!(names.len(), 99, "上游 v1.6.0 是 99 个键");
+        assert_eq!(names.len(), 118, "上游 v1.6.5 是 118 个键");
         // 抽查几个位置：顺序错了这里就会红。
         assert_eq!(names[0], "IconSize");
-        assert_eq!(names[25], "PlateMode");
-        assert_eq!(names[28], "PlateRadius");
-        assert_eq!(names[31], "BgColor3");
-        assert_eq!(names[38], "UiTheme");
-        assert_eq!(names[39], "MenuTheme");
-        assert_eq!(names[75], "MnAdd");
-        // v1.6.0 的 23 个新键全部追加在末尾。
-        assert_eq!(names[76], "Launchpad");
-        assert_eq!(names[98], "ModeW");
+        // v1.6.5 把 `HPad` 插在 `Margin` 之后，后面的键整体后移一位。
+        assert_eq!(names[4], "HPad");
+        assert_eq!(names[26], "PlateMode");
+        assert_eq!(names[29], "PlateRadius");
+        assert_eq!(names[32], "BgColor3");
+        assert_eq!(names[39], "UiTheme");
+        assert_eq!(names[40], "MenuTheme");
+        assert_eq!(names[76], "MnAdd");
+        // v1.6.0 的 23 个键在 `MnAdd` 之后。
+        assert_eq!(names[77], "Launchpad");
+        assert_eq!(names[99], "ModeW");
+        // v1.6.5 的 18 个键追加在末尾。
+        assert_eq!(names[100], "UiFrost");
+        assert_eq!(names[117], "MenuFrost");
         // 不许有重复键名。
         let mut seen = std::collections::HashSet::new();
         for n in &names {
@@ -1455,6 +1576,30 @@ mod tests {
         assert_eq!(c.get_i32(Key::TOOL_W), 1);
         assert_eq!(c.get_i32(Key::WIDE_MASK), 0);
         assert_eq!(c.get_i32(Key::MODE_W), 1);
+        // 上游 v1.6.5 新键的默认值（DefaultCfg，1.6.5:332-360）。
+        // 注意两个例外：`SepScale` 与 `MenuFrost` 上游**没写**进 DefaultCfg，
+        // 静态零初始化 = 默认关闭，所以这里是 0 而不是 1。
+        assert_eq!(c.get_i32(Key::HPAD), 12);
+        assert_eq!(c.get_i32(Key::UI_FROST), 1);
+        assert_eq!(c.get_i32(Key::LP_FROST), 1);
+        assert_eq!(c.get_i32(Key::TRAY_W), 1);
+        assert_eq!(c.get_i32(Key::W_MERGE), 1);
+        assert_eq!(c.get_i32(Key::STATUS_BAR), 0);
+        assert_eq!(c.get_i32(Key::SB_FROST), 1);
+        assert_eq!(c.get_i32(Key::SB_OPACITY), 88);
+        assert_eq!(c.get_i32(Key::SB_COLOR), -1);
+        assert_eq!(c.get_i32(Key::SB_RADIUS), 10);
+        assert_eq!(c.get_i32(Key::SB_HEIGHT), 32);
+        assert_eq!(c.get_i32(Key::SB_FOLLOW_SYS), 1);
+        assert_eq!(c.get_i32(Key::SB_TOP_GAP), 0);
+        assert_eq!(c.get_i32(Key::SB_MAX_AVOID), 0);
+        assert_eq!(c.get_i32(Key::SB_FLOAT), 0);
+        assert_eq!(c.get_i32(Key::SB_SIDE_GAP), 12);
+        assert_eq!(c.get_i32(Key::SB_AUTO_HIDE), 0);
+        assert_eq!(c.get_i32(Key::SEP_SCALE), 0);
+        assert_eq!(c.get_i32(Key::MENU_FROST), 0);
+        // HPad 与 SepGap 一样随 DPI 缩放（上游是 Sc(12)）。
+        assert_eq!(Config::defaults(144).get_i32(Key::HPAD), 18);
         // SepGap 的默认值随 DPI 缩放（上游是 Sc(4)）。
         assert_eq!(c.get_i32(Key::SEP_GAP), 4);
         assert_eq!(Config::defaults(144).get_i32(Key::SEP_GAP), 6);
@@ -1483,11 +1628,12 @@ mod tests {
     fn key_table_matches_c_g_tab() {
         // 76 个键（上游 v1.4.0），顺序即保存顺序；顺序错了会造成 ini diff 噪音。
         // 这里直接把上游的键名列出来，顺序错一个字符都会红。
-        const UPSTREAM: [&str; 99] = [
+        const UPSTREAM: [&str; 118] = [
             "IconSize",
             "ZoomSize",
             "Spacing",
             "Margin",
+            "HPad",
             "Padding",
             "Radius",
             "Opacity",
@@ -1584,6 +1730,25 @@ mod tests {
             "ToolW",
             "WideMask",
             "ModeW",
+            // 上游 v1.6.5 追加的 18 个键（`HPad` 已在上面）。
+            "UiFrost",
+            "LpFrost",
+            "TrayW",
+            "WMerge",
+            "StatusBar",
+            "SbFrost",
+            "SbOpacity",
+            "SbColor",
+            "SbRadius",
+            "SbHeight",
+            "SbFollowSys",
+            "SbTopGap",
+            "SbMaxAvoid",
+            "SbFloat",
+            "SbSideGap",
+            "SbAutoHide",
+            "SepScale",
+            "MenuFrost",
         ];
         assert_eq!(Key::ALL.len(), UPSTREAM.len());
         for (i, name) in UPSTREAM.iter().enumerate() {
@@ -1702,6 +1867,7 @@ mod tests {
             "widgets",
             "widgets.clock",
             "widgets.launchpad",
+            "widgets.statusbar",
             "menu",
             "advanced",
         ];
@@ -1846,6 +2012,61 @@ mod tests {
         assert_eq!(after.get_i32(Key::TOOL_W), 0);
         assert_eq!(after.get_i32(Key::WIDE_MASK), 0b101010);
         assert_eq!(after.get_i32(Key::MODE_W), 0);
+    }
+
+    /// 上游 v1.6.5 的 19 个新键同样不能丢（同一个缺口的第二次复发）。
+    ///
+    /// 上一轮（ADR-038）修过一次 1.6.0 的 23 个键；上游 1.6.5 又加了 19 个，
+    /// 而 `upgrade_legacy` 的"删段重写"逻辑依旧：表里没有 = 一起删掉。
+    /// 这条测试守着"用户从 1.6.5 升级，状态栏/毛玻璃设置不能凭空消失"。
+    #[test]
+    fn upgrade_legacy_keeps_upstream_v165_keys() {
+        let mut ini = Ini::new();
+        ini.set_i32(LEGACY_SECTION, "IconSize", 64);
+        ini.set_i32(LEGACY_SECTION, "HPad", 20);
+        ini.set_i32(LEGACY_SECTION, "UiFrost", 0);
+        ini.set_i32(LEGACY_SECTION, "LpFrost", 0);
+        ini.set_i32(LEGACY_SECTION, "TrayW", 0);
+        ini.set_i32(LEGACY_SECTION, "WMerge", 0);
+        ini.set_i32(LEGACY_SECTION, "StatusBar", 1);
+        ini.set_i32(LEGACY_SECTION, "SbFrost", 0);
+        ini.set_i32(LEGACY_SECTION, "SbOpacity", 72);
+        ini.set_i32(LEGACY_SECTION, "SbColor", 0x0012_3456);
+        ini.set_i32(LEGACY_SECTION, "SbRadius", 18);
+        ini.set_i32(LEGACY_SECTION, "SbHeight", 40);
+        ini.set_i32(LEGACY_SECTION, "SbFollowSys", 0);
+        ini.set_i32(LEGACY_SECTION, "SbTopGap", 8);
+        ini.set_i32(LEGACY_SECTION, "SbMaxAvoid", 1);
+        ini.set_i32(LEGACY_SECTION, "SbFloat", 1);
+        ini.set_i32(LEGACY_SECTION, "SbSideGap", 24);
+        ini.set_i32(LEGACY_SECTION, "SbAutoHide", 1);
+        ini.set_i32(LEGACY_SECTION, "SepScale", 1);
+        ini.set_i32(LEGACY_SECTION, "MenuFrost", 1);
+
+        assert!(Config::upgrade_legacy(&mut ini, 96), "应当报告发生了升级");
+
+        let after = Config::from_ini(&ini, 96);
+        assert_eq!(after.get_i32(Key::HPAD), 20);
+        assert_eq!(after.get_i32(Key::UI_FROST), 0);
+        assert_eq!(after.get_i32(Key::LP_FROST), 0);
+        assert_eq!(after.get_i32(Key::TRAY_W), 0);
+        assert_eq!(after.get_i32(Key::W_MERGE), 0);
+        assert_eq!(after.get_i32(Key::STATUS_BAR), 1);
+        assert_eq!(after.get_i32(Key::SB_FROST), 0);
+        assert_eq!(after.get_i32(Key::SB_OPACITY), 72);
+        assert_eq!(after.get_i32(Key::SB_COLOR), 0x0012_3456);
+        assert_eq!(after.get_i32(Key::SB_RADIUS), 18);
+        assert_eq!(after.get_i32(Key::SB_HEIGHT), 40);
+        assert_eq!(after.get_i32(Key::SB_FOLLOW_SYS), 0);
+        assert_eq!(after.get_i32(Key::SB_TOP_GAP), 8);
+        assert_eq!(after.get_i32(Key::SB_MAX_AVOID), 1);
+        assert_eq!(after.get_i32(Key::SB_FLOAT), 1);
+        assert_eq!(after.get_i32(Key::SB_SIDE_GAP), 24);
+        assert_eq!(after.get_i32(Key::SB_AUTO_HIDE), 1);
+        assert_eq!(after.get_i32(Key::SEP_SCALE), 1);
+        assert_eq!(after.get_i32(Key::MENU_FROST), 1);
+        // 老键也要还在。
+        assert_eq!(after.get_i32(Key::IconSize), 64);
     }
 
     /// 新格式文件不该被当成旧格式升级。
