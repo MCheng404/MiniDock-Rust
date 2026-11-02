@@ -68,7 +68,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
     SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY,
     WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
     WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
@@ -272,6 +272,10 @@ impl App {
             hInstance: HINSTANCE(hinstance.0),
             lpfnWndProc: Some(wndproc),
             lpszClassName: w!("MiniDockWindow"),
+            // **不能留空**：类光标为空、又没人回 `WM_SETCURSOR` 时，
+            // Windows 会退回忙光标（沙漏），表现为"鼠标一进 Dock 就转"。
+            // 见 `gpu::cursor` / ADR-045。
+            hCursor: minidock_gpu::cursor::class_cursor(),
             ..Default::default()
         };
         unsafe {
@@ -1549,6 +1553,14 @@ fn arm_mouse_leave(hwnd: HWND) {
     }
 }
 
+/// 光标下面是"能点的东西"吗（条目图标 / 小组件卡片）。
+///
+/// `WM_SETCURSOR` 与 `WM_MOUSEMOVE` 都要用同一套判断 —— 前者在没捕获时
+/// 生效，后者在按住拖拽（捕获）时生效，两者必须给出一样的答案。
+fn dock_on_item(dock: &Dock, u: f32, v: f32) -> bool {
+    dock.hit_at(u, v).is_some() || dock.widget_at(u, v).is_some()
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -1569,6 +1581,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     (*ptr).drag_to(u, v);
                     (*ptr).mark_dirty();
                 }
+                // 光标也要在这里设一次：**按住时（SetCapture）系统不发
+                // `WM_SETCURSOR`**，只靠那条的话整段拖拽期间都是忙光标。
+                minidock_gpu::cursor::set_hand_if(dock_on_item(&*ptr, u, v));
                 // 让系统在鼠标离开时发 `WM_MOUSELEAVE`：不装这个钩子，
                 // `hover` 会永远是 true，Dock 停在放大状态不回去。
                 arm_mouse_leave(hwnd);
@@ -1586,6 +1601,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             }
             LRESULT(0)
+        }
+        // 光标：类光标只管"刚进入窗口"这一瞬间，之后每次移动、点击、
+        // Alt+Tab 回来，系统都会再发这一条。不回它就退回系统默认 ——
+        // 实测那个默认是**忙光标**（沙漏），也就是这个 bug 的成因。
+        WM_SETCURSOR => {
+            let ptr = dock_ptr(hwnd);
+            let mut on_item = false;
+            if !ptr.is_null() {
+                if let Some((u, v)) = minidock_gpu::cursor::client_pos(hwnd) {
+                    on_item = dock_on_item(&*ptr, u, v);
+                }
+            }
+            minidock_gpu::cursor::set_hand_if(on_item);
+            LRESULT(1)
         }
         WM_LBUTTONDOWN => {
             let (u, v) = physical_xy(lparam);
@@ -1862,8 +1891,25 @@ unsafe extern "system" fn menu_proc(
                     let (u, v) = menu_logical(lparam, (*ptr).ppp);
                     let hit = (*ptr).menu.hit(u, v);
                     (*ptr).menu.set_hover(hit);
+                    // 菜单一开就 `SetCapture`，捕获期间没有 `WM_SETCURSOR`，
+                    // 光标只能在这里设（ADR-045）。
+                    minidock_gpu::cursor::set_hand_if(hit.is_some());
                 }
                 LRESULT(0)
+            }
+            // 菜单也要自己回光标（ADR-045：类光标留空的窗口会显示忙光标）。
+            // 悬停在可选项上给手型，分隔带/空白给箭头。
+            WM_SETCURSOR => {
+                let mut on_item = false;
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    if let Some((u, v)) = minidock_gpu::cursor::client_pos(hwnd) {
+                        let ppp = (*ptr).ppp;
+                        on_item = (*ptr).menu.hit(u / ppp, v / ppp).is_some();
+                    }
+                }
+                minidock_gpu::cursor::set_hand_if(on_item);
+                LRESULT(1)
             }
             // 点在菜单矩形之外 = 取消。这条依赖 `SetCapture`：
             // 菜单没有焦点，别的窗口上的点击不会转发过来。
@@ -1921,6 +1967,8 @@ fn register_menu_class() -> Result<(), Box<dyn std::error::Error>> {
             lpfnWndProc: Some(menu_proc),
             hInstance: HINSTANCE(hinst.0),
             lpszClassName: w!("MiniDockMenuWindow"),
+            // 同上：类光标留空 = 忙光标（ADR-045）。
+            hCursor: minidock_gpu::cursor::class_cursor(),
             ..Default::default()
         };
         RegisterClassW(&raw const wc);

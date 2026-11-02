@@ -31,11 +31,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetForegroundWindow, GetWindowLongPtrW, LoadCursorW,
-    RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, GWLP_USERDATA,
-    IDC_ARROW, IDC_HAND, IDC_IBEAM, SW_HIDE, SW_SHOW, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetForegroundWindow, GetWindowLongPtrW, RegisterClassW,
+    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, GWLP_USERDATA, SW_HIDE, SW_SHOW,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_APPWINDOW,
+    WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -61,6 +61,12 @@ pub struct SettingsWindow {
     pub state: SettingsState,
     /// 上一帧的输出。主循环取走并处理命令。
     pub outcome: Outcome,
+    /// egui 最后想要的光标形状。
+    ///
+    /// 存下来是因为 `WM_SETCURSOR` 会在每次鼠标移动时问一遍——那条消息
+    /// 里没有"egui 想要什么"的信息，只能记住上一帧的结论。原先这里
+    /// 一律塞 `Default`，于是文本框上永远见不到 I 型光标。
+    cursor: egui::CursorIcon,
     /// egui 说"尽快"时的最小帧间隔。
     next_repaint: Option<Instant>,
     /// Esc / 关闭按钮请求关闭。由主循环消费。
@@ -111,6 +117,8 @@ impl SettingsWindow {
             lpfnWndProc: Some(wndproc),
             hInstance: windows::Win32::Foundation::HINSTANCE(hinst.0),
             lpszClassName: class_pcwstr(),
+            // 类光标留空 = 进入窗口时显示忙光标（ADR-045）。
+            hCursor: crate::cursor::class_cursor(),
             ..Default::default()
         };
         unsafe {
@@ -150,6 +158,7 @@ impl SettingsWindow {
             ppp,
             state,
             outcome: Outcome::default(),
+            cursor: egui::CursorIcon::Default,
             next_repaint: None,
             close_requested: false,
             visible: false,
@@ -248,6 +257,7 @@ impl SettingsWindow {
         if self.outcome.command == Some(Command::Close) {
             self.close_requested = true;
         }
+        self.cursor = out.cursor;
         self.cursor_to_system(out.cursor);
         self.update_stats(started.elapsed().as_secs_f32() * 1000.0);
 
@@ -304,15 +314,12 @@ impl SettingsWindow {
         }
     }
 
+    /// 把 egui 的光标形状设到系统上。
+    ///
+    /// 映射表在 [`crate::cursor`]：这个 bug（ADR-045）就是"各处各自
+    /// 维护一份映射、漏掉一个分支"的后果，不要再抄第二份。
     fn cursor_to_system(&self, icon: egui::CursorIcon) {
-        let id = match icon {
-            egui::CursorIcon::PointingHand => IDC_HAND,
-            egui::CursorIcon::Text => IDC_IBEAM,
-            _ => IDC_ARROW,
-        };
-        if let Ok(handle) = unsafe { LoadCursorW(None, id) } {
-            unsafe { SetCursor(Some(handle)) };
-        }
+        crate::cursor::apply(icon);
     }
 
     fn on_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
@@ -388,7 +395,8 @@ impl SettingsWindow {
             }
             WM_SETCURSOR => {
                 // 返回 TRUE：告诉系统"光标我自己管"，否则会被类光标覆盖。
-                self.cursor_to_system(egui::CursorIcon::Default);
+                // 用上一帧 egui 的结论，不要一律箭头 —— 文本框要 I 型。
+                self.cursor_to_system(self.cursor);
                 Some(LRESULT(1))
             }
             WM_PAINT => {

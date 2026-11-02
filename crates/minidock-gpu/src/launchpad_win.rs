@@ -31,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SW_SHOW,
     WM_APP, WM_CHAR, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
@@ -170,6 +170,8 @@ impl LaunchpadWindow {
             lpfnWndProc: Some(wndproc),
             hInstance: windows::Win32::Foundation::HINSTANCE(hinst.0),
             lpszClassName: class_pcwstr(),
+            // 类光标留空 = 进入窗口时显示忙光标（ADR-045）。
+            hCursor: crate::cursor::class_cursor(),
             ..Default::default()
         };
         unsafe {
@@ -594,6 +596,16 @@ impl LaunchpadWindow {
             return Some(LRESULT(Ime::default_proc(self.hwnd, msg, wparam, lparam)));
         }
         match msg {
+            // 光标：不回这一条，系统会退回默认 —— 实测是忙光标（ADR-045）。
+            // 落在图标/按钮/菜单项上手型，空白处箭头。
+            WM_SETCURSOR => {
+                let mut on_hit = false;
+                if let Some((px, py)) = crate::cursor::client_pos(self.hwnd) {
+                    on_hit = self.hit_at(px / self.ppp, py / self.ppp).is_some();
+                }
+                crate::cursor::set_hand_if(on_hit);
+                Some(LRESULT(1))
+            }
             WM_APP_WAKE => {
                 // 图标线程有结果了：催一次重绘。
                 self.next_repaint = Instant::now();

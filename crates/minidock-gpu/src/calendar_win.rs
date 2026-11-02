@@ -26,11 +26,11 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, LoadCursorW, RegisterClassW,
-    SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, IDC_ARROW, IDC_HAND,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WM_CAPTURECHANGED, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, RegisterClassW,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOWNA, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -142,6 +142,8 @@ impl CalendarWindow {
             lpfnWndProc: Some(wndproc),
             hInstance: windows::Win32::Foundation::HINSTANCE(hinst.0),
             lpszClassName: class_pcwstr(),
+            // 类光标留空 = 进入窗口时显示忙光标（ADR-045）。
+            hCursor: crate::cursor::class_cursor(),
             ..Default::default()
         };
         unsafe {
@@ -292,6 +294,9 @@ impl CalendarWindow {
                     self.hover = self.hits.at(p);
                     self.next_repaint = Instant::now();
                 }
+                // 弹层一露头就 `SetCapture`（点外面关闭），捕获期间收不到
+                // `WM_SETCURSOR`，光标只能在这里设（ADR-045）。
+                crate::cursor::set_hand_if(self.hover.is_some());
                 None
             }
             WM_LBUTTONDOWN => {
@@ -319,14 +324,7 @@ impl CalendarWindow {
                 None
             }
             WM_SETCURSOR => {
-                let cursor = if self.hover.is_some() {
-                    IDC_HAND
-                } else {
-                    IDC_ARROW
-                };
-                if let Ok(h) = unsafe { LoadCursorW(None, cursor) } {
-                    unsafe { SetCursor(Some(h)) };
-                }
+                crate::cursor::set_hand_if(self.hover.is_some());
                 Some(LRESULT(1))
             }
             WM_PAINT => {

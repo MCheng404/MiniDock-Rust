@@ -20,10 +20,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetCursor,
-    SetWindowLongPtrW, ShowWindow, GWLP_USERDATA, IDC_ARROW, IDC_HAND, SW_HIDE, SW_SHOW,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW,
-    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW,
+    ShowWindow, GWLP_USERDATA, SW_HIDE, SW_SHOW, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -203,6 +203,8 @@ impl ToolWindow {
             lpfnWndProc: Some(wndproc),
             hInstance: windows::Win32::Foundation::HINSTANCE(hinst.0),
             lpszClassName: class_pcwstr(),
+            // 类光标留空 = 进入窗口时显示忙光标（ADR-045）。
+            hCursor: crate::cursor::class_cursor(),
             ..Default::default()
         };
         unsafe {
@@ -423,15 +425,8 @@ impl ToolWindow {
             WM_LBUTTONDOWN => Some(LRESULT(0)),
             WM_SETCURSOR => {
                 // 可点区域给手型光标。分层窗口不吃 `WM_NCHITTEST`，
-                // 光标要自己设。
-                let cursor = if self.hover.and_then(|p| self.hits.at(p)).is_some() {
-                    IDC_HAND
-                } else {
-                    IDC_ARROW
-                };
-                if let Ok(h) = unsafe { LoadCursorW(None, cursor) } {
-                    unsafe { SetCursor(Some(h)) };
-                }
+                // 光标要自己设。映射统一在 `crate::cursor`（ADR-045）。
+                crate::cursor::set_hand_if(self.hover.and_then(|p| self.hits.at(p)).is_some());
                 Some(LRESULT(1))
             }
             WM_PAINT => {

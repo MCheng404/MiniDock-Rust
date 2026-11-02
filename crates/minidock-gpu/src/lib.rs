@@ -23,6 +23,7 @@
 
 pub mod calendar_win;
 pub mod cc_win;
+pub mod cursor;
 pub mod dock;
 pub mod frame;
 pub mod gpu;

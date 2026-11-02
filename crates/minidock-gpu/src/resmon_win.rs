@@ -18,8 +18,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW,
     ShowWindow, GWLP_USERDATA, SW_HIDE, SW_SHOW, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_EX_APPWINDOW,
-    WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
+    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -73,6 +73,8 @@ impl ResMonWindow {
             lpfnWndProc: Some(wndproc),
             hInstance: windows::Win32::Foundation::HINSTANCE(hinst.0),
             lpszClassName: class_pcwstr(),
+            // 类光标留空 = 进入窗口时显示忙光标（ADR-045）。
+            hCursor: crate::cursor::class_cursor(),
             ..Default::default()
         };
         unsafe {
@@ -185,6 +187,12 @@ impl ResMonWindow {
 
     fn on_message(&mut self, msg: u32, _wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
         match msg {
+            // 面板只读，光标恒为箭头。但**必须自己回**：类光标留空时
+            // 系统会退回忙光标（ADR-045）。
+            WM_SETCURSOR => {
+                crate::cursor::set(crate::cursor::arrow());
+                Some(LRESULT(1))
+            }
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP | WM_MOUSEMOVE => None,
             WM_KEYDOWN => None,
             WM_PAINT => {

@@ -637,6 +637,8 @@ mod gl_device {
             lpfnWndProc: Some(wndproc),
             hInstance: HINSTANCE(instance.0),
             lpszClassName: class,
+            // 类光标留空会显示忙光标（ADR-045）。
+            hCursor: minidock_gpu::cursor::class_cursor(),
             ..Default::default()
         };
         // 重复注册同类名不算致命错误（多后端连续跑时会出现）。
