@@ -143,6 +143,8 @@ pub enum WidgetKind {
     Tool,
     /// 专注模式。
     Focus,
+    /// 系统托盘（v1.6.5）：点一下打开 Windows 通知区域。
+    Tray,
 }
 
 impl WidgetKind {
@@ -156,6 +158,8 @@ impl WidgetKind {
             Self::Resource => 3,
             Self::Tool => 4,
             Self::Focus => 5,
+            // 与上游 `enum { ..., W_TRAY, W_N }` 同序：`WideMask` 按序号取位。
+            Self::Tray => 6,
         }
     }
 
@@ -171,7 +175,7 @@ impl WidgetKind {
     pub const fn is_implemented(self) -> bool {
         matches!(
             self,
-            Self::Clock | Self::Resource | Self::Tool | Self::CtrlCenter
+            Self::Clock | Self::Resource | Self::Tool | Self::CtrlCenter | Self::Tray
         )
     }
 
@@ -185,6 +189,7 @@ impl WidgetKind {
             Self::Resource => cfg.get_i32(Key::RES_MON) != 0,
             Self::Tool => cfg.get_i32(Key::TOOL_W) != 0,
             Self::Focus => cfg.get_i32(Key::MODE_W) != 0,
+            Self::Tray => cfg.get_i32(Key::TRAY_W) != 0,
         }
     }
 
@@ -207,6 +212,8 @@ impl WidgetKind {
             Self::Resource => (bar_h * if self.is_wide(cfg) { 2.2 } else { 1.16 }) as i32,
             Self::Tool => (bar_h * if self.is_wide(cfg) { 1.6 } else { 0.72 }) as i32,
             Self::Focus => (bar_h * 0.72) as i32,
+            // 托盘卡片固定宽度，上游不支持双倍宽（`g_wWid[W_TRAY]` 写死 0.72）。
+            Self::Tray => (bar_h * 0.72) as i32,
         }
     }
 }
@@ -222,7 +229,7 @@ impl WidgetKind {
 pub struct WidgetStrip {
     /// 条带里的 widget（按上游的 `ord[]` 顺序：时钟与通知的先后由
     /// `WOrder` 决定，其余固定在后面）。
-    pub items: [Option<(WidgetKind, i32)>; 6],
+    pub items: [Option<(WidgetKind, i32)>; 7],
     /// 条带成员数。
     pub len: usize,
     /// 条带整体占位（上游 `g_ce`）：各成员宽度 + 间距。
@@ -243,6 +250,8 @@ impl WidgetStrip {
     /// `clock_w` 是时钟卡片自己的宽度（由内容决定，不走 `width()` 公式）。
     #[must_use]
     pub fn build(cfg: &Config, bar_h: f32, gap: f32, clock_w: i32) -> Self {
+        // 上游 `ord[7]`：`WOrder` 只交换前两位，其余固定，
+        // 托盘永远排在最后一个。
         let order = if cfg.get_i32(Key::W_ORDER) != 0 {
             [
                 WidgetKind::Notify,
@@ -251,6 +260,7 @@ impl WidgetStrip {
                 WidgetKind::Resource,
                 WidgetKind::Tool,
                 WidgetKind::Focus,
+                WidgetKind::Tray,
             ]
         } else {
             [
@@ -260,10 +270,11 @@ impl WidgetStrip {
                 WidgetKind::Resource,
                 WidgetKind::Tool,
                 WidgetKind::Focus,
+                WidgetKind::Tray,
             ]
         };
 
-        let mut items = [None; 6];
+        let mut items = [None; 7];
         let mut len = 0usize;
         let mut extra = 0.0f32;
         for kind in order {
@@ -404,7 +415,10 @@ pub struct Metrics {
     pub z: f32,
     /// 图标间距（`M.g`）。
     pub gap: f32,
-    /// 段首尾内边距 = `pad + 2`（`M.padX`）。
+    /// 段首尾的**横向**内边距（`M.padX` = 配置 `HPad`）。
+    ///
+    /// v1.6.5 之前它恒等于 `pad + 2`，之后由独立键控制 —— 上下与左右
+    /// 可以分别调（默认 8 / 12，而不是同一个 8）。
     pub pad_x: f32,
     /// 分割线宽度（`M.sepW`）。
     pub sep_w: f32,
@@ -478,7 +492,10 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     // 分割线宽度：上游 v1.4.0 起由 `SepGap` 决定
     // （旧版是写死的 `16 + spacing/2`）。
     let sep0 = cfg.get_i32(Key::SEP_GAP) as f32;
-    let pad_x0 = pad0 + 2.0;
+    // 横向内边距自 v1.6.5 起独立成 `HPad`（上游 `M.padX = cfg.hPad`），
+    // 不再是 `pad + 2`。默认值因此从 10 变成 12 —— 栏体两侧各宽 2 px，
+    // 这是上游 1.6.5 的对外可见变化，不是我们擅自改的。
+    let pad_x0 = cfg.get_i32(Key::HPAD).max(0) as f32;
 
     let n_icon = n_items.saturating_sub(n_sep);
     let wb = span(pad_x0, s0, g0, sep0, n_icon, n_sep);
@@ -896,8 +913,9 @@ mod tests {
     #[test]
     fn empty_dock_keeps_four_slots_wide() {
         let m = calc_metrics(&cfg96(), 96, 0, 0, work());
-        // 2*10 + 48*4 = 212，再加固定 260 的交互余量。
-        assert_eq!(m.lw, 212 + 260);
+        // 2*12 + 48*4 = 216，再加固定 260 的交互余量。
+        // 12 是 `HPad` 的默认值（v1.6.5 起横向内边距独立，原来是 `pad + 2` = 10）。
+        assert_eq!(m.lw, 216 + 260);
         assert!(m.bar_h > m.s, "栏高必须大于图标");
     }
 
@@ -906,7 +924,9 @@ mod tests {
         let c = cfg96();
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.bar_h, m.s + 2.0 * c.pad as f32 + 4.0);
-        assert_eq!(m.pad_x, c.pad as f32 + 2.0);
+        // 横向内边距自 v1.6.5 起由 `HPad` 单独控制，不再是 `pad + 2`。
+        assert_eq!(m.pad_x, c.get_i32(Key::HPAD) as f32);
+        assert_ne!(m.pad_x, c.pad as f32 + 2.0, "两者默认值已经不同");
         assert_eq!(m.s, c.icon_size as f32);
     }
 
@@ -976,6 +996,7 @@ mod tests {
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::CTRL_CENTER, 0);
+        c.apply_i32(Key::TRAY_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
 
         // 条带里只有时钟一个成员。
@@ -998,10 +1019,11 @@ mod tests {
     #[test]
     fn widget_strip_is_empty_without_clock() {
         let mut c = cfg96();
-        // 四个已实现的默认可能都开着，要关就都关。
+        // 五个已实现的默认都开着，要关就都关。
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::CTRL_CENTER, 0);
+        c.apply_i32(Key::TRAY_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.widgets.len, 0);
         assert_eq!(m.widget_extra, 0.0);
@@ -1022,11 +1044,15 @@ mod tests {
         assert_eq!(c.get_i32(Key::MODE_W), 1);
 
         let m = calc_metrics(&c, 96, 3, 0, work());
-        // 只有已实现的（时钟、控制中心、资源监视器、计时器）进条带。
-        assert_eq!(m.widgets.len, 4, "时钟 + 控制中心 + 资源监视器 + 计时器");
+        // 已实现的五个都进条带：时钟 / 控制中心 / 资源监视器 / 计时器 / 托盘。
+        assert_eq!(
+            m.widgets.len, 5,
+            "时钟 + 控制中心 + 资源监视器 + 计时器 + 托盘"
+        );
         assert!(m.widgets.width_of(WidgetKind::CtrlCenter).is_some());
         assert!(m.widgets.width_of(WidgetKind::Resource).is_some());
         assert!(m.widgets.width_of(WidgetKind::Tool).is_some());
+        assert!(m.widgets.width_of(WidgetKind::Tray).is_some());
         // 这两个还没移植，不能占位。
         assert!(m.widgets.width_of(WidgetKind::Notify).is_none());
         assert!(m.widgets.width_of(WidgetKind::Focus).is_none());
@@ -1040,6 +1066,7 @@ mod tests {
         c.apply_i32(Key::RES_MON, 1);
         c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::CTRL_CENTER, 0);
+        c.apply_i32(Key::TRAY_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
 
         assert_eq!(m.widgets.len, 2, "时钟 + 资源监视器");
@@ -1048,6 +1075,33 @@ mod tests {
         let kinds: Vec<WidgetKind> = m.widgets.iter().map(|(k, _)| k).collect();
         assert_eq!(kinds[0], WidgetKind::Clock);
         assert_eq!(kinds[1], WidgetKind::Resource);
+    }
+
+    /// 托盘卡片：默认开启（`TrayW=1`），宽度 = 栏高 × 0.72，永远排最后。
+    #[test]
+    fn tray_widget_is_last_and_fixed_width() {
+        let c = cfg96();
+        assert_eq!(c.get_i32(Key::TRAY_W), 1, "上游 1.6.5 默认开");
+
+        let m = calc_metrics(&c, 96, 3, 0, work());
+        let kinds: Vec<WidgetKind> = m.widgets.iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            kinds.last().copied(),
+            Some(WidgetKind::Tray),
+            "托盘应当在条带最外侧"
+        );
+
+        let bar_h = m.bar_h;
+        assert_eq!(
+            m.widgets.width_of(WidgetKind::Tray),
+            Some((bar_h * 0.72) as i32)
+        );
+        // `WOrder` 只交换时钟与通知，不影响托盘的位置。
+        let mut swapped = c;
+        swapped.apply_i32(Key::W_ORDER, 1);
+        let m2 = calc_metrics(&swapped, 96, 3, 0, work());
+        let kinds2: Vec<WidgetKind> = m2.widgets.iter().map(|(k, _)| k).collect();
+        assert_eq!(kinds2.last().copied(), Some(WidgetKind::Tray));
     }
 
     /// 计时器卡片进条带，宽度 = 栏高 × 0.72（双倍宽 1.6，上游 v1.6.0）。
@@ -1090,6 +1144,7 @@ mod tests {
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::CTRL_CENTER, 0);
+        c.apply_i32(Key::TRAY_W, 0);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert_eq!(m.widgets.len, 1);
         assert!(m.widgets.width_of(WidgetKind::Resource).is_none());
@@ -1121,6 +1176,7 @@ mod tests {
         c.apply_i32(Key::RES_MON, 0);
         c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::CTRL_CENTER, 0);
+        c.apply_i32(Key::TRAY_W, 0);
         c.apply_i32(Key::W_SIDE, 1);
         let m = calc_metrics(&c, 96, 3, 0, work());
         assert!(m.widgets.on_left, "应当记为左侧条带");
@@ -1147,6 +1203,7 @@ mod tests {
         c.apply_i32(Key::RES_MON, 1);
         c.apply_i32(Key::TOOL_W, 0);
         c.apply_i32(Key::CTRL_CENTER, 0);
+        c.apply_i32(Key::TRAY_W, 0);
         c.apply_i32(Key::W_SIDE, 1);
         let m = calc_metrics(&c, 96, 3, 0, work());
         let bar_l = 100.0_f32;

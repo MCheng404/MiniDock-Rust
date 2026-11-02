@@ -916,8 +916,12 @@ impl Dock {
                 Color32::from_rgba_unmultiplied(255, 255, 255, 190),
             );
         }
-        // 小组件条带（上游 v1.6.0）：时钟卡片与资源监视器。
+        // 小组件条带（上游 v1.6.0 / 1.6.5）：时钟、资源、计时器、托盘。
         // 位置由 `WidgetStrip::left_of` 给，不是硬编码的"栏体右缘"。
+        //
+        // 开了 `WMerge`（1.6.5 默认）时，整条带共用一块胶囊，卡片自己
+        // 不再画底盘 —— 所以胶囊必须先于所有卡片画。
+        self.paint_widget_capsule(painter, p, dark);
         if let Some(lines) = clock {
             if !lines.is_empty() {
                 self.paint_clock_card(painter, p, dark, lines);
@@ -925,6 +929,7 @@ impl Dock {
         }
         self.paint_resource_card(painter, p, dark, ui.ctx());
         self.paint_tool_card(painter, p, dark);
+        self.paint_tray_card(painter, p, dark);
         self.paint_separators(painter, p, dark);
         self.paint_icons(painter, p, dark);
         // 残影必须画在所有槽位内容之后，否则会被后面画的图标盖住。
@@ -973,6 +978,101 @@ impl Dock {
         r * p.k
     }
 
+    /// 条带是否合并成一块胶囊（上游 1.6.5 `WMerge`，默认开）。
+    fn widgets_merged(&self) -> bool {
+        self.cfg.get_i32(Key::W_MERGE) != 0 && self.metrics.widgets.len > 0
+    }
+
+    /// 合并胶囊：整条带共用一块底盘。
+    ///
+    /// 上游 `RenderFrame` 画的是"首尾成员的**外接框**"
+    /// （`g_wU[first]` 到 `g_wU[last] + g_wWid[last]`），成员之间的间隔
+    /// 留在胶囊内部——所以位置不用改，只是少画 N-1 块底盘。
+    fn paint_widget_capsule(&self, painter: &egui::Painter, p: Proj, dark: bool) {
+        if !self.widgets_merged() {
+            return;
+        }
+        let m = &self.metrics;
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for i in 0..m.widgets.len {
+            let Some(left) = m
+                .widgets
+                .left_of(i, self.geom.bar_l, self.geom.bar_w, m.gap)
+            else {
+                continue;
+            };
+            let Some((_, w)) = m.widgets.items.get(i).copied().flatten() else {
+                continue;
+            };
+            lo = lo.min(left);
+            hi = hi.max(left + w as f32);
+        }
+        if hi <= lo {
+            return;
+        }
+        let c = self.map(lo, self.geom.bar_top, hi - lo, m.bar_h, p);
+        self.paint_bar(painter, c, self.bar_radius(p), dark);
+    }
+
+    /// 卡片自己的底盘。合并模式下整条带共用一块胶囊，这里什么都不画。
+    fn paint_card_bg(&self, painter: &egui::Painter, c: EguiRect, dark: bool, p: Proj) {
+        if self.widgets_merged() {
+            return;
+        }
+        self.paint_bar(painter, c, self.bar_radius(p), dark);
+    }
+
+    /// 系统托盘卡片：一个向下的箭头，点了打开 Windows 通知区域。
+    ///
+    /// 图形照上游 `DrawTray()`：两条线段组成的 chevron，线宽随手，
+    /// 位置按卡片短边算。
+    fn paint_tray_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
+        let m = &self.metrics;
+        let Some(idx) = m
+            .widgets
+            .iter()
+            .position(|(k, _)| k == layout::WidgetKind::Tray)
+        else {
+            return;
+        };
+        let Some(left) = m
+            .widgets
+            .left_of(idx, self.geom.bar_l, self.geom.bar_w, m.gap)
+        else {
+            return;
+        };
+        let width = m.widgets.width_of(layout::WidgetKind::Tray).unwrap_or(0);
+        if width <= 0 {
+            return;
+        }
+        let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
+        self.paint_card_bg(painter, c, dark, p);
+
+        let s = (c.width().min(c.height()) * 0.30).max(3.0);
+        let center = c.center();
+        let color = if dark {
+            Color32::from_rgba_unmultiplied(235, 240, 240, 246)
+        } else {
+            Color32::from_rgba_unmultiplied(232, 30, 32, 40)
+        };
+        let stroke = Stroke::new((s * 0.15).max(1.2), color);
+        painter.line_segment(
+            [
+                Pos2::new(center.x - s * 0.62, center.y - s * 0.30),
+                Pos2::new(center.x, center.y + s * 0.34),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(center.x, center.y + s * 0.34),
+                Pos2::new(center.x + s * 0.62, center.y - s * 0.30),
+            ],
+            stroke,
+        );
+    }
+
     /// 资源监视器卡片：栏体 + "CPU xx%"（双倍宽时加内存）。
     ///
     /// 对应上游 v1.6.0 的 `DrawRes()`（minidock.c:6521）。
@@ -1001,7 +1101,7 @@ impl Dock {
             return;
         }
         let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
-        self.paint_bar(painter, c, self.bar_radius(p), dark);
+        self.paint_card_bg(painter, c, dark, p);
 
         // 钟表：表盘 + 时针 + 分针，全部按卡片短边比例算。
         let size = (c.width().min(c.height()) * 0.46).max(4.0);
@@ -1055,7 +1155,7 @@ impl Dock {
             return;
         }
         let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
-        self.paint_bar(painter, c, self.bar_radius(p), dark);
+        self.paint_card_bg(painter, c, dark, p);
 
         // 上游双倍宽时把内存也塞进同一张卡片。
         let text = if m.widgets.on_left || layout::WidgetKind::Resource.is_wide(&self.cfg) {
@@ -1141,7 +1241,7 @@ impl Dock {
             .left_of(idx, self.geom.bar_l, self.geom.bar_w, m.gap)
             .unwrap_or(self.geom.bar_l + self.geom.bar_w + m.gap + 6.0);
         let c = self.map(left, self.geom.bar_top, m.clock_w as f32, m.bar_h, p);
-        self.paint_bar(painter, c, self.bar_radius(p), dark);
+        self.paint_card_bg(painter, c, dark, p);
 
         let (tc, dc) = if dark {
             (

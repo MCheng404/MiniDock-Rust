@@ -444,10 +444,10 @@ bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
 | # | 功能 | 代码位置 | 我们的状态 |
 |---|---|---|---|
 | 1 | **顶部状态栏**（`Sb*` 9 个函数，约 165 行） | `SbGeom/SbDraw/SbShow/SbHide/SbTick/SbAppBar/SbAnchor/SbBattery/SbNetState`（L6896-7115） | ❌ 完全没有 |
-| 2 | **系统托盘小组件**（`W_TRAY`，第 7 个 widget） | `DrawTray` / `TrayOpen`（L6845），`ord[7]` | ❌ 只有 `TrayHide` 键 |
-| 3 | **小组件合并胶囊**（`WMerge`） | `RenderFrame` L3023 | ❌ 无 |
+| 2 | **系统托盘小组件**（`W_TRAY`，第 7 个 widget） | `DrawTray` / `TrayOpen`（L6845），`ord[7]` | ✅ 卡片 + 点击打开通知区域（只做热键那半段，ADR-047） |
+| 3 | **小组件合并胶囊**（`WMerge`） | `RenderFrame` L3023 | ✅ 只改绘制，布局未动（ADR-047） |
 | 4 | **分割线拖动缩放**（`SepScale`） | `DockProc` L9884 / L9959：16 ms 节流、步长 0.6、夹 24..128、`IDC_SIZENS` | ❌ 无（我们只有拖动排序） |
-| 5 | **HPad** 左右内边距独立 | `CalcMetrics` L1883 | ❌ 无（`pad` 上下左右共用） |
+| 5 | **HPad** 左右内边距独立 | `CalcMetrics` L1883 | ✅ 已接；默认 12 使栏体宽 +4 px（ADR-047） |
 | 6 | **三处毛玻璃**（设置 / 菜单 / 起动台） | `FrostSnap*` + `SetFrostGrab`（WM_MOVE 重抓）、起动台开窗前抓一次 | ❌ 全无模糊实现（`Blur` 键未使用） |
 | 7 | **起动台分类 / 标签 / A-Z 排序** | `LpCat` 启发式分类、`[LpCat]` 每项覆盖、`[LpTags]` 最多 8 组、`LpSortAZ`、右键"移动到标签组…" | ❌ 无（只有搜索 + 分页） |
 | 8 | **控制中心磁贴拖动排序** + `[CcOrder]` 持久化 | `CcOrderLoad/Save`、`CcMove` L6321 | ❌ 顺序写死 |
@@ -476,6 +476,8 @@ GitHub Release 页的「bug修复 / 新增功能」两栏是空的。
    胶囊是"一次 DrawBar 替代 N 次"；托盘卡片只多一个 `WidgetKind` + 点击
    调 `TrayOpen` 的等价物（我们这个走 `Win+B` + Enter 就行，别抄它跨进程
    点 Explorer 工具栏那段：要同位数进程 + UI Access，很容易失效）。
+   > **已做（ADR-047）**。注意 `HPad` 默认 12 让栏体两侧各宽 2 px：
+   > **对拍基线从这一版起要换成 1.6.5**，1.4.0 的几何断言不再成立。
 3. **分割线拖动缩放** —— 我们已有分隔线与拖动排序，加 16 ms 节流 + 0.6 步长
    即可；注意"只有尺寸真变才重建"这条是防闪烁的关键。
 4. **毛玻璃** —— 三处共用一套"抓背景 → 模糊 → 画进圆角"，我们要在 wgpu 侧

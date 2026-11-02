@@ -50,6 +50,38 @@ pub fn open_quick_settings() {
     }
 }
 
+/// 打开 Windows 的通知区域（托盘溢出面板）。
+///
+/// 上游 1.6.5 的 `TrayOpen()` 是两段式：先跨进程点 Explorer 的溢出按钮
+/// （`TB_BUTTONCOUNT` / `TB_GETITEMRECT` 取坐标再 `mouse_event`），失败才
+/// 退回热键。我们**只做热键那一段**：
+///
+/// - 跨进程 `SendMessage` 到 `ToolbarWindow32` 要求两者同位数、Explorer
+///   的工具栏结构在目标系统上一致，而坐标一旦算错就是"点到了别处"；
+/// - 收益只是省一次 Enter，风险却是随系统版本静默失效。
+///
+/// `Win+B` 把焦点移到通知区域，再 `Enter` 打开溢出面板。
+pub fn open_tray() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYEVENTF_KEYUP, VK_LWIN, VK_RETURN,
+    };
+    // 'B' 的虚拟键码是 0x42。
+    const VK_B: u8 = 0x42;
+    unsafe {
+        keybd_event(VK_LWIN.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_B, 0, Default::default(), 0);
+        keybd_event(VK_B, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+    // 必须等焦点真的落到通知区域再回车，否则 Enter 会打到原来的前台窗口上
+    // （上游也是 `Sleep(120)`）。
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    unsafe {
+        keybd_event(VK_RETURN.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_RETURN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
 /// 切换系统深色模式。返回切换后的状态；写注册表失败时返回切换前的状态。
 ///
 /// 改的是 `HKCU\...\Themes\Personalize` 的两个 DWORD，再广播

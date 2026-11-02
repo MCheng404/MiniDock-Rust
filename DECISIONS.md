@@ -2164,3 +2164,58 @@ pub fn in_launch_grace(last_launch_ms: Option<u64>, now_ms: u64) -> bool
   逐个断言值没变；`key_list_matches_upstream_order` 钉死 118 个键的行序。
 - 宽限期：`launch_grace_covers_the_edges` 覆盖 0 / 1499 / 1500 / 时钟倒退。
 - 门禁：fmt、clippy、289 条测试。
+
+## ADR-047 · 合并胶囊 / HPad / 托盘小组件
+
+三件都是 v1.6.5 的增量，一起做是因为它们都落在条带模型里。
+
+### 一、HPad：一次**有意的**几何变化
+
+上游把横向内边距从 `pad + 2` 改成独立键 `HPad`（默认 `Sc(12)`）。
+1.6.0 的 `M.padX` 恒为 10（pad 8 + 2），1.6.5 默认 12 —— **栏体两侧各宽
+2 px，里面的图标整体右移 2 px**。
+
+这不是我们擅自改的，而是跟上游走。代价要写清楚：
+
+> 我们的"与 v1.4.0 逐像素一致"基线**到此为止**。对拍基准要从 1.4.0/1.6.0
+> 换成 1.6.5，否则每一条几何断言都会差 2~4 px。
+
+`Metrics.pad_x` 的注释与 `bar_height_matches_c_formula` 里那条
+`assert_ne!(pad_x, pad + 2)` 就是留给后来人的路标。
+
+### 二、合并胶囊（`WMerge`，默认开）
+
+只改**绘制**，不改布局：上游 `RenderFrame` 画的是"首尾成员的外接框"，
+成员之间的 `gap + 6` 仍然留在胶囊内部。所以：
+
+- `WidgetStrip::left_of` 一个字节没动；
+- 每张卡片画底盘的动作改走 `paint_card_bg`，合并时直接 return；
+- 胶囊本身在 `paint` 里**先于所有卡片**画一次，覆盖 `[first.left, last.right]`。
+
+如果在布局层做合并（把间隔压成 0），位置会和上游对不上，而且
+`widget_at` 的命中区也要跟着改 —— 没有必要。
+
+### 三、托盘小组件（`W_TRAY`）
+
+- 条带第 7 个成员，宽度 `barH × 0.72`，位置永远在最外侧（`WOrder` 只换
+  前两位）；
+- 图形照 `DrawTray()`：两段线组成的 chevron；
+- 点击 → `sysact::open_tray()`。
+
+**没有抄上游的跨进程点击**。`TrayOpen()` 前半段是 `SendMessage` 到 Explorer
+的 `ToolbarWindow32`，取最后一个按钮的矩形再 `mouse_event`。它要求两个进程
+同位数、工具栏结构与系统版本一致，坐标算错就是"点到了别处"，而收益只是
+省一次 Enter。我们只保留后半段：`Win+B` 把焦点移到通知区域，120 ms 后
+`Enter` 打开溢出面板。
+
+### 四、测试要跟着改的地方
+
+`TrayW` 默认 1，条带默认多一个成员。所有"数成员个数"的测试要么显式
+`TRAY_W = 0`（保持聚焦），要么把期望值 +1。新加的
+`tray_widget_is_last_and_fixed_width` 钉住宽度与位置。
+
+### 五、验证
+
+- 截图两种模式各一张：合并时是一整块胶囊（时钟 / CPU / 计时器 / 托盘
+  连在一起），关掉 `WMerge` 是四块独立卡片；
+- 点击托盘卡片，`MINIDOCK_GEOM=1` 打出 `[widget] 打开系统托盘`，进程存活。

@@ -1134,6 +1134,13 @@ impl App {
                         }
                     }
                 }
+                minidock_core::layout::WidgetKind::Tray => {
+                    // `Win+B` + Enter。不开面板、不改配置，纯键盘模拟。
+                    if trace::geom() {
+                        eprintln!("[widget] 打开系统托盘");
+                    }
+                    minidock_platform::sysact::open_tray();
+                }
                 minidock_core::layout::WidgetKind::Tool => {
                     if self.tool_slot.is_none() {
                         // 第一次打开才读 `[Tool]` 段：面板关着时它不在内存里，
