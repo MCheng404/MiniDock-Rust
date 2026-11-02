@@ -28,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::frame::FrameRenderer;
 use crate::gpu::{Gpu, GpuError};
+use crate::ime::Ime;
 
 /// 窗口类名。
 pub const CLASS_NAME: &str = "MiniDockTool";
@@ -174,6 +175,8 @@ pub struct ToolWindow {
     pub typed: String,
     /// 是否在输入待办文本。
     typing: bool,
+    /// 输入法状态（待办文本可以是中文）。
+    ime: Ime,
 }
 
 impl std::fmt::Debug for ToolWindow {
@@ -244,8 +247,11 @@ impl ToolWindow {
             close_requested: false,
             typed: String::new(),
             typing: false,
+            ime: Ime::new(),
         });
         win.attach();
+        // 待办输入框要能打中文，先确保窗口有输入法上下文。
+        Ime::enable(hwnd);
         Ok(win)
     }
 
@@ -302,10 +308,22 @@ impl ToolWindow {
         let hover = self.hover;
         let typing = self.typing;
         let typed = self.typed.clone();
+        let composing = self.ime.composing().to_owned();
         let mut hits = Hits::default();
 
         self.renderer.render(gpu, raw, hwnd, pos, |ui| {
-            hits = draw_panel(ui, dark, state, now_ms, hover, typing, &typed);
+            hits = draw_panel(
+                ui,
+                dark,
+                state,
+                now_ms,
+                hover,
+                Input {
+                    typing,
+                    typed: &typed,
+                    composing: &composing,
+                },
+            );
         })?;
         self.hits = hits;
 
@@ -347,7 +365,40 @@ impl ToolWindow {
         Ok(())
     }
 
-    fn on_message(&mut self, msg: u32, _wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+    fn on_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        // 输入法优先：拼音的组合过程不产生 `WM_CHAR`，只走 `WM_IME_*`。
+        if matches!(
+            msg,
+            windows::Win32::UI::WindowsAndMessaging::WM_IME_STARTCOMPOSITION
+                | windows::Win32::UI::WindowsAndMessaging::WM_IME_COMPOSITION
+                | windows::Win32::UI::WindowsAndMessaging::WM_IME_ENDCOMPOSITION
+                | windows::Win32::UI::WindowsAndMessaging::WM_IME_SETCONTEXT
+        ) {
+            let mut committed = String::new();
+            // 只有在输入态才收字；否则上屏的文字没地方放。
+            let handled = self
+                .ime
+                .handle(self.hwnd, msg, wparam, lparam, &mut committed);
+            if self.typing && !committed.is_empty() {
+                for c in committed.chars() {
+                    if self.typed.chars().count() < 90 {
+                        self.typed.push(c);
+                    }
+                }
+            }
+            if msg == windows::Win32::UI::WindowsAndMessaging::WM_IME_STARTCOMPOSITION
+                && self.typing
+            {
+                // 候选窗摆到输入行附近（面板底部）。
+                let y = self.size.1 as f32 / self.ppp - 34.0;
+                self.ime.set_caret(self.hwnd, 16.0, y, self.ppp);
+            }
+            self.next_repaint = Instant::now();
+            if handled {
+                return Some(LRESULT(0));
+            }
+            return Some(LRESULT(Ime::default_proc(self.hwnd, msg, wparam, lparam)));
+        }
         match msg {
             WM_MOUSEMOVE => {
                 // 有一个像素宽的问题值得记：`WM_MOUSEMOVE` 的 lparam 是
@@ -482,14 +533,24 @@ impl ToolWindow {
 }
 
 /// 画面板，返回本帧的命中区。
+/// 待办输入框的状态（三个字段一起传，否则这个函数参数就超过 7 个了）。
+#[derive(Copy, Clone, Debug)]
+struct Input<'a> {
+    /// 是否在输入态。
+    typing: bool,
+    /// 已上屏的文字。
+    typed: &'a str,
+    /// 正在组合的拼音。
+    composing: &'a str,
+}
+
 fn draw_panel(
     ui: &mut egui::Ui,
     dark: bool,
     state: &ToolState,
     now_ms: i64,
     hover: Option<egui::Pos2>,
-    typing: bool,
-    typed: &str,
+    input: Input<'_>,
 ) -> Hits {
     let rect = ui.max_rect();
     let painter = ui.painter();
@@ -657,20 +718,51 @@ fn draw_panel(
     // ---- 添加行 / 输入框 ----
     let add = EguiRect::from_min_size(egui::pos2(x0, ty), egui::vec2(w, 24.0));
     hits.add = add;
-    if typing {
+    if input.typing {
         painter.rect_filled(add, CornerRadius::same(8), pill);
-        let shown = if typed.is_empty() {
-            "输入后回车…".to_owned()
+        // 已上屏的文字 + 正在组合的拼音。拼音下面画条线：让用户知道
+        // "字还在输入法里，没丢"。
+        let shown = format!("{}{}", input.typed, input.composing);
+        if shown.is_empty() {
+            painter.text(
+                egui::pos2(x0 + 6.0, ty + 4.0),
+                Align2::LEFT_TOP,
+                "输入后回车…",
+                FontId::proportional(12.0),
+                sub,
+            );
         } else {
-            typed.to_owned()
-        };
-        painter.text(
-            egui::pos2(x0 + 6.0, ty + 4.0),
-            Align2::LEFT_TOP,
-            shown,
-            FontId::proportional(12.0),
-            if typed.is_empty() { sub } else { tc },
-        );
+            painter.text(
+                egui::pos2(x0 + 6.0, ty + 4.0),
+                Align2::LEFT_TOP,
+                &shown,
+                FontId::proportional(12.0),
+                tc,
+            );
+            if !input.composing.is_empty() {
+                let w_all = ui.ctx().fonts_mut(|f| {
+                    f.layout_no_wrap(shown.clone(), FontId::proportional(12.0), Color32::WHITE)
+                        .size()
+                        .x
+                });
+                let w_done = ui.ctx().fonts_mut(|f| {
+                    f.layout_no_wrap(
+                        input.typed.to_owned(),
+                        FontId::proportional(12.0),
+                        Color32::WHITE,
+                    )
+                    .size()
+                    .x
+                });
+                painter.line_segment(
+                    [
+                        egui::pos2(x0 + 6.0 + w_done, ty + 18.0),
+                        egui::pos2(x0 + 6.0 + w_all, ty + 18.0),
+                    ],
+                    egui::Stroke::new(1.0, tc),
+                );
+            }
+        }
     } else {
         if hover.is_some_and(|p| add.contains(p)) {
             painter.rect_filled(add, CornerRadius::same(8), hover_bg);

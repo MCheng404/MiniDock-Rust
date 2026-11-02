@@ -29,14 +29,15 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, RegisterClassW,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, GWLP_USERDATA, SW_SHOW, WM_APP, WM_CHAR,
-    WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SW_SHOW,
+    WM_APP, WM_CHAR, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::frame::FrameRenderer;
 use crate::gpu::{Gpu, GpuError};
+use crate::ime::Ime;
 use crate::worker::{IconLoader, IconRequest, Waker};
 
 /// 窗口类名。
@@ -53,6 +54,31 @@ const SIDE: f32 = 70.0;
 const TOP_H: f32 = 124.0;
 const BOT_H: f32 = 146.0;
 
+/// 起动台要交给主循环做的事（它自己改不了 Dock 的配置）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchpadCmd {
+    /// 把某个应用加到 Dock 栏。
+    AddToDock {
+        /// 显示名。
+        name: String,
+        /// 路径。
+        path: String,
+    },
+}
+
+/// 画在网格之上的东西：右键菜单与重命名框。
+#[derive(Copy, Clone, Debug, Default)]
+struct Overlay<'a> {
+    /// 菜单作用于哪一格（顶层下标）。
+    menu: Option<usize>,
+    /// 菜单左上角（逻辑点）。
+    menu_at: (f32, f32),
+    /// 正在重命名哪一格。
+    renaming: Option<usize>,
+    /// 重命名缓冲。
+    rename_buf: &'a str,
+}
+
 /// 命中区列表：`(目标, 逻辑矩形)`。绘制时算出来，鼠标事件里用。
 type HitList = Vec<(Hit, EguiRect)>;
 
@@ -61,6 +87,8 @@ type HitList = Vec<(Hit, EguiRect)>;
 enum Hit {
     /// 网格里的第 k 格（当前页内的序号）。
     Cell(usize),
+    /// 右键菜单里的第 k 项。
+    MenuItem(usize),
     /// 右上角的「＋」。
     Plus,
     /// 文件夹弹层里的第 k 个。
@@ -105,6 +133,18 @@ pub struct LaunchpadWindow {
     asked: HashMap<String, usize>,
     loader: Option<IconLoader>,
 
+    /// 输入法状态（搜索框 / 重命名框）。
+    ime: Ime,
+    /// 右键菜单：作用于哪一格（顶层下标）。`None` 表示没开。
+    menu: Option<usize>,
+    /// 菜单左上角（逻辑点）。
+    menu_at: (f32, f32),
+    /// 正在重命名哪一格。
+    renaming: Option<usize>,
+    /// 重命名缓冲。
+    rename_buf: String,
+    /// 待主循环处理的命令。
+    cmds: Vec<LaunchpadCmd>,
     visible: bool,
     dark: bool,
     dirty_save: bool,
@@ -147,7 +187,7 @@ impl LaunchpadWindow {
             // 而失败会被 `textures_delta` 的 Drop 检查掩盖成一条误导性的
             // "Dropped TexturesDelta"（已顺手修掉，见 frame.rs）。
             CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 class_pcwstr(),
                 windows::core::w!("起动台"),
                 WS_POPUP | WS_VISIBLE,
@@ -205,12 +245,20 @@ impl LaunchpadWindow {
             icons: HashMap::new(),
             asked: HashMap::new(),
             loader: IconLoader::spawn(Waker::new(hwnd)).ok(),
+            ime: Ime::new(),
+            menu: None,
+            menu_at: (0.0, 0.0),
+            renaming: None,
+            rename_buf: String::new(),
+            cmds: Vec::new(),
             visible: false,
             dark,
             dirty_save: false,
             next_repaint: Instant::now(),
         });
         win.attach();
+        // 确保这个窗口有输入法上下文（否则拼音根本进不来）。
+        Ime::enable(hwnd);
         Ok(win)
     }
 
@@ -232,6 +280,19 @@ impl LaunchpadWindow {
     /// 打开（抢焦点，收键盘）。
     pub fn open(&mut self) {
         unsafe {
+            // 全屏覆盖层必须压住别的窗口（包括别的 TOPMOST 窗口）：
+            // 不这么做，从 Dock 打开它时常被前台窗口盖住，看起来像没反应。
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
+                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                    | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
+            );
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
         }
@@ -240,6 +301,9 @@ impl LaunchpadWindow {
         self.page = 0;
         self.open_folder = None;
         self.hover = None;
+        self.menu = None;
+        self.renaming = None;
+        self.rename_buf.clear();
         self.next_repaint = Instant::now();
     }
 
@@ -254,6 +318,15 @@ impl LaunchpadWindow {
         }
         if self.dirty_save {
             self.save();
+        }
+    }
+
+    /// 取一条待主循环处理的命令。
+    pub fn take_cmd(&mut self) -> Option<LaunchpadCmd> {
+        if self.cmds.is_empty() {
+            None
+        } else {
+            Some(self.cmds.remove(0))
         }
     }
 
@@ -412,6 +485,9 @@ impl LaunchpadWindow {
         let (w, h) = self.size;
         let page = self.page;
         let query = self.query.clone();
+        // 组合中的拼音单独传：它要显示出来，但不参与过滤
+        // （拿 "nihao" 去过滤中文名只会得到空列表）。
+        let composing = self.ime.composing().to_owned();
         let open_folder = self.open_folder;
         let hover = self.hover;
         let dragging = self.dragging;
@@ -422,6 +498,13 @@ impl LaunchpadWindow {
         let mut hits: HitList = Vec::new();
         let mut icons_rects: HitList = Vec::new();
         let apps = lp.apps().to_vec();
+        let rename_buf = self.rename_buf.clone();
+        let ov = Overlay {
+            menu: self.menu,
+            menu_at: self.menu_at,
+            renaming: self.renaming,
+            rename_buf: &rename_buf,
+        };
 
         let raw = self.input.take(self.renderer.size(), self.ppp);
         self.renderer.render(gpu, raw, hwnd, pos, |ui| {
@@ -450,11 +533,13 @@ impl LaunchpadWindow {
                 grid,
                 page,
                 &query,
+                &composing,
                 open_folder,
                 hover,
                 if dragging { drag_src } else { None },
                 cur,
                 &icons,
+                ov,
             );
             hits = out.0;
             icons_rects = out.1;
@@ -466,6 +551,48 @@ impl LaunchpadWindow {
     }
 
     fn on_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        // 输入法消息先处理：它们和键盘消息是两条独立的通道，
+        // 不先拦下来就会漏进下面的 `match`。
+        if matches!(
+            msg,
+            windows::Win32::UI::WindowsAndMessaging::WM_IME_STARTCOMPOSITION
+                | windows::Win32::UI::WindowsAndMessaging::WM_IME_COMPOSITION
+                | windows::Win32::UI::WindowsAndMessaging::WM_IME_ENDCOMPOSITION
+                | windows::Win32::UI::WindowsAndMessaging::WM_IME_SETCONTEXT
+        ) {
+            let mut committed = String::new();
+            let handled = self
+                .ime
+                .handle(self.hwnd, msg, wparam, lparam, &mut committed);
+            if !committed.is_empty() {
+                // 重命名框也要能打中文。
+                if self.renaming.is_some() {
+                    for c in committed.chars() {
+                        if self.rename_buf.chars().count() < 40 {
+                            self.rename_buf.push(c);
+                        }
+                    }
+                } else {
+                    for c in committed.chars() {
+                        if self.query.chars().count() < 32 {
+                            self.query.push(c);
+                        }
+                    }
+                    self.page = 0;
+                    self.open_folder = None;
+                }
+            }
+            if msg == windows::Win32::UI::WindowsAndMessaging::WM_IME_STARTCOMPOSITION {
+                // 候选窗摆到搜索框下方，别让它在屏幕角落飘着。
+                self.ime
+                    .set_caret(self.hwnd, self.size.0 * 0.5, 40.0 + SEARCH_H, self.ppp);
+            }
+            self.next_repaint = Instant::now();
+            if handled {
+                return Some(LRESULT(0));
+            }
+            return Some(LRESULT(Ime::default_proc(self.hwnd, msg, wparam, lparam)));
+        }
         match msg {
             WM_APP_WAKE => {
                 // 图标线程有结果了：催一次重绘。
@@ -506,6 +633,23 @@ impl LaunchpadWindow {
             WM_LBUTTONUP => {
                 let (x, y) = client_pos(lparam, self.ppp);
                 let released = self.hit_at(x, y);
+                // 菜单开着时，这一下点击只用于"选菜单项"或"点外面关掉"。
+                if self.menu.is_some() {
+                    if let Some(Hit::MenuItem(i)) = released {
+                        self.run_menu_item(i);
+                    }
+                    self.menu = None;
+                    self.press = None;
+                    self.next_repaint = Instant::now();
+                    return Some(LRESULT(0));
+                }
+                // 重命名期间点别处 = 提交。
+                if self.renaming.is_some() {
+                    self.commit_rename();
+                    self.press = None;
+                    self.next_repaint = Instant::now();
+                    return Some(LRESULT(0));
+                }
                 if self.dragging {
                     self.dragging = false;
                     self.drop(x, y);
@@ -558,8 +702,26 @@ impl LaunchpadWindow {
             }
             WM_RBUTTONUP => {
                 let (x, y) = client_pos(lparam, self.ppp);
-                // 文件夹弹层里右键 = 把这一项移出文件夹（不做菜单，
-                // 菜单要另开一个窗口，代价与收益不成比例）。
+                // 网格里右键 = 打开这一格的菜单。
+                if std::env::var("MINIDOCK_LP_TRACE").is_ok() {
+                    eprintln!(
+                        "[lp] RBUTTONUP ({x},{y}) hit={:?} hits={}",
+                        self.hit_at(x, y),
+                        self.hits.len()
+                    );
+                }
+                if self.open_folder.is_none() && self.query.is_empty() {
+                    if let Some(Hit::Cell(k)) = self.hit_at(x, y) {
+                        let idx = self.page * self.per() + k;
+                        if idx < self.lp.len() {
+                            self.menu = Some(idx);
+                            self.menu_at = (x.min(self.size.0 - 170.0), y);
+                            self.next_repaint = Instant::now();
+                            return Some(LRESULT(0));
+                        }
+                    }
+                }
+                // 文件夹弹层里右键 = 把这一项移出文件夹。
                 if let (Some(fi), Some(Hit::FolderCell(k))) = (self.open_folder, self.hit_at(x, y))
                 {
                     if self.lp.take_from_folder(fi, k, TakeOut::ToTop) {
@@ -584,6 +746,18 @@ impl LaunchpadWindow {
             WM_KEYDOWN => {
                 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
                 if wparam.0 == VK_ESCAPE.0 as usize {
+                    // 一层一层往后退：菜单 → 重命名 → 文件夹 → 窗口。
+                    if self.menu.is_some() {
+                        self.menu = None;
+                        self.next_repaint = Instant::now();
+                        return Some(LRESULT(0));
+                    }
+                    if self.renaming.is_some() {
+                        self.renaming = None;
+                        self.rename_buf.clear();
+                        self.next_repaint = Instant::now();
+                        return Some(LRESULT(0));
+                    }
                     if self.open_folder.is_some() {
                         self.open_folder = None;
                         self.next_repaint = Instant::now();
@@ -595,6 +769,25 @@ impl LaunchpadWindow {
             }
             WM_CHAR => {
                 let ch = wparam.0 as u32;
+                // 重命名时键盘只改名字，不动搜索框。
+                if self.renaming.is_some() {
+                    match char::from_u32(ch) {
+                        Some('\r') | Some('\n') => self.commit_rename(),
+                        Some('\u{1b}') => {
+                            self.renaming = None;
+                            self.rename_buf.clear();
+                        }
+                        Some('\u{8}') => {
+                            self.rename_buf.pop();
+                        }
+                        Some(c) if !c.is_control() && self.rename_buf.chars().count() < 40 => {
+                            self.rename_buf.push(c);
+                        }
+                        _ => {}
+                    }
+                    self.next_repaint = Instant::now();
+                    return Some(LRESULT(0));
+                }
                 match char::from_u32(ch) {
                     Some('\u{8}') => {
                         self.query.pop();
@@ -674,6 +867,94 @@ impl LaunchpadWindow {
         self.press = None;
     }
 
+    /// 这一格的菜单项文案。应用 4 项，文件夹 3 项（没有"添加到 Dock"）。
+    fn menu_labels(&self, idx: usize) -> Vec<&'static str> {
+        match self.lp.top().get(idx) {
+            Some(Top::Folder(_)) => vec!["打开", "重命名…", "解散文件夹"],
+            Some(Top::App(_)) => vec!["打开", "重命名…", "添加到 Dock 栏", "从起动台移除"],
+            None => Vec::new(),
+        }
+    }
+
+    /// 执行菜单第 `i` 项。
+    fn run_menu_item(&mut self, i: usize) {
+        if std::env::var("MINIDOCK_LP_TRACE").is_ok() {
+            eprintln!("[lp] 菜单项 {i}，作用于 {:?}", self.menu);
+        }
+        let Some(idx) = self.menu else { return };
+        let labels = self.menu_labels(idx);
+        let Some(label) = labels.get(i).copied() else {
+            return;
+        };
+        match label {
+            "打开" => self.activate_top(idx),
+            "重命名…" => {
+                self.rename_buf = self.lp.name_of(self.lp.top()[idx]).to_owned();
+                self.renaming = Some(idx);
+            }
+            "添加到 Dock 栏" => {
+                if let Some(Top::App(ai)) = self.lp.top().get(idx).copied() {
+                    let app = &self.lp.apps()[ai];
+                    self.cmds.push(LaunchpadCmd::AddToDock {
+                        name: app.name.clone(),
+                        path: app.path.clone(),
+                    });
+                }
+            }
+            "从起动台移除" => {
+                if self.lp.remove_top(idx) {
+                    self.dirty_save = true;
+                    self.clamp_page();
+                }
+            }
+            "解散文件夹" => {
+                let changed = self.lp.dissolve(idx);
+                if changed {
+                    self.dirty_save = true;
+                    self.clamp_page();
+                }
+            }
+            _ => {}
+        }
+        self.next_repaint = Instant::now();
+    }
+
+    /// 提交重命名。
+    fn commit_rename(&mut self) {
+        if let Some(idx) = self.renaming.take() {
+            let name = self.rename_buf.trim().to_owned();
+            if !name.is_empty() && idx < self.lp.len() && self.lp.rename(idx, &name) {
+                self.dirty_save = true;
+            }
+        }
+        self.rename_buf.clear();
+        self.next_repaint = Instant::now();
+    }
+
+    /// 删格之后页码可能越界。
+    fn clamp_page(&mut self) {
+        let pages = self.pages();
+        if self.page >= pages {
+            self.page = pages.saturating_sub(1);
+        }
+    }
+
+    /// 打开第 `idx` 格（顶层下标，不受分页影响）。
+    fn activate_top(&mut self, idx: usize) {
+        match self.lp.top().get(idx).copied() {
+            Some(Top::App(i)) => {
+                let path = self.lp.apps()[i].path.clone();
+                minidock_platform::sysact::open_uri(&path);
+                self.close();
+            }
+            Some(Top::Folder(f)) => {
+                self.open_folder = Some(f);
+                self.next_repaint = Instant::now();
+            }
+            None => {}
+        }
+    }
+
     fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
         let p = Pos2::new(x, y);
         self.hits
@@ -703,11 +984,13 @@ fn draw(
     (cols, rows): (usize, usize),
     page: usize,
     query: &str,
+    composing: &str,
     open_folder: Option<usize>,
     hover: Option<Hit>,
     drag_src: Option<usize>,
     cur: (f32, f32),
     icons: &HashMap<usize, egui::TextureHandle>,
+    ov: Overlay<'_>,
 ) -> (HitList, HitList) {
     let painter = ui.painter().clone();
     let rect = EguiRect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
@@ -758,17 +1041,36 @@ fn draw(
             Color32::from_rgba_unmultiplied(255, 255, 255, 150)
         },
     );
-    painter.text(
-        search.center(),
-        Align2::CENTER_CENTER,
-        if query.is_empty() {
-            "搜索应用…（直接输入文字）".to_owned()
-        } else {
-            format!("{query}|")
-        },
-        FontId::proportional(13.0),
-        if query.is_empty() { sub } else { tc },
-    );
+    // 搜索框：已上屏的文字 + 正在组合的拼音（拼音加下划线，让用户看得出来
+    // "还在输入法里"，而不是以为程序没反应）。
+    let text = format!("{query}{composing}");
+    if text.is_empty() {
+        painter.text(
+            search.center(),
+            Align2::CENTER_CENTER,
+            "搜索应用…（可直接打中文）",
+            FontId::proportional(13.0),
+            sub,
+        );
+    } else {
+        let w_full = measure(ui, &text, 13.0);
+        let left = search.center().x - w_full * 0.5;
+        painter.text(
+            egui::pos2(left, search.center().y),
+            Align2::LEFT_CENTER,
+            &text,
+            FontId::proportional(13.0),
+            tc,
+        );
+        if !composing.is_empty() {
+            let w_done = measure(ui, query, 13.0);
+            let y = search.center().y + 8.0;
+            painter.line_segment(
+                [egui::pos2(left + w_done, y), egui::pos2(left + w_full, y)],
+                Stroke::new(1.0, accent),
+            );
+        }
+    }
 
     // ---- 加号按钮 ----
     let plus = EguiRect::from_min_size(Pos2::new(w - 84.0, 40.0), egui::vec2(SEARCH_H, SEARCH_H));
@@ -841,6 +1143,10 @@ fn draw(
             egui::vec2(icon_s, icon_s),
         );
         icon_rects.push((Hit::Cell(k), icon_rect));
+        // 格子本体也要进 `hits`（图标区是 `icon_rects`，只用来判"落在图标上"）。
+        // 漏了这一步的表现是：点图标毫无反应、右键也不出菜单 —— 因为
+        // `hit_at` 只查 `hits`，而它当时只有右上角的「＋」。
+        hits.push((Hit::Cell(k), cell));
 
         let (name, app_idx, is_folder, folder) = if query.is_empty() {
             match lp.top()[idx] {
@@ -978,7 +1284,92 @@ fn draw(
         );
     }
 
-    (hits, icon_rects)
+    // ---- 右键菜单 / 重命名框 ----
+    //
+    // 两者都画在同一个窗口里，不另开 HWND：这样命中判定、输入法、重绘
+    // 全都走同一套，省掉一个窗口类与一份消息循环。
+    let mut overlay_hits: HitList = Vec::new();
+    if let Some(idx) = ov.menu {
+        let labels: Vec<&str> = match lp.top().get(idx) {
+            Some(Top::Folder(_)) => vec!["打开", "重命名…", "解散文件夹"],
+            Some(Top::App(_)) => vec!["打开", "重命名…", "添加到 Dock 栏", "从起动台移除"],
+            None => Vec::new(),
+        };
+        let row_h = 28.0;
+        let pad = 6.0;
+        let mw = 170.0;
+        let mh = labels.len() as f32 * row_h + pad * 2.0;
+        let mx = ov.menu_at.0.min(w - mw - 8.0).max(8.0);
+        let my = ov.menu_at.1.min(h - mh - 8.0).max(8.0);
+        let panel = EguiRect::from_min_size(Pos2::new(mx, my), egui::vec2(mw, mh));
+        painter.rect_filled(
+            panel,
+            CornerRadius::same(10),
+            if dark {
+                Color32::from_rgba_unmultiplied(46, 47, 54, 252)
+            } else {
+                Color32::from_rgba_unmultiplied(252, 252, 255, 252)
+            },
+        );
+        painter.rect_stroke(
+            panel,
+            CornerRadius::same(10),
+            Stroke::new(1.0, sub),
+            egui::StrokeKind::Inside,
+        );
+        for (i, label) in labels.iter().enumerate() {
+            let r = EguiRect::from_min_size(
+                Pos2::new(mx + 4.0, my + pad + i as f32 * row_h),
+                egui::vec2(mw - 8.0, row_h),
+            );
+            if hover == Some(Hit::MenuItem(i)) {
+                painter.rect_filled(r, CornerRadius::same(6), hover_bg);
+            }
+            painter.text(
+                egui::pos2(r.left() + 10.0, r.center().y),
+                Align2::LEFT_CENTER,
+                *label,
+                FontId::proportional(12.5),
+                if *label == "从起动台移除" {
+                    Color32::from_rgba_unmultiplied(230, 74, 70, 255)
+                } else {
+                    tc
+                },
+            );
+            overlay_hits.push((Hit::MenuItem(i), r));
+        }
+    }
+    if ov.renaming.is_some() {
+        let rw = 260.0;
+        let rx = (w - rw) * 0.5;
+        let ry = 96.0;
+        let box_r = EguiRect::from_min_size(Pos2::new(rx, ry), egui::vec2(rw, 30.0));
+        painter.rect_filled(box_r, CornerRadius::same(8), hover_bg);
+        painter.rect_stroke(
+            box_r,
+            CornerRadius::same(8),
+            Stroke::new(1.0, accent),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            egui::pos2(rx + 8.0, box_r.center().y),
+            Align2::LEFT_CENTER,
+            format!("{}|", ov.rename_buf),
+            FontId::proportional(12.5),
+            tc,
+        );
+        painter.text(
+            egui::pos2(w * 0.5, ry + 38.0),
+            Align2::CENTER_TOP,
+            "回车确认 · Esc 取消",
+            FontId::proportional(10.5),
+            sub,
+        );
+    }
+
+    // 菜单/重命名框的命中区排在前面：它们浮在网格之上。
+    overlay_hits.extend(hits);
+    (overlay_hits, icon_rects)
 }
 
 /// 拖动时算指针落在哪一格（与 `hit_at` 不同：拖动中命中区还没刷新）。
@@ -1216,24 +1607,25 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     )
 }
 
+/// 量一段文字的宽度（逻辑点）。
+fn measure(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+    ui.ctx().fonts_mut(|f| {
+        f.layout_no_wrap(text.to_owned(), FontId::proportional(size), Color32::WHITE)
+            .size()
+            .x
+    })
+}
+
 /// 超宽就截断加省略号。egui 的 `Painter::text` 不会自己裁，长名字会压到隔壁格子。
 fn fit_text(ui: &egui::Ui, text: &str, max_w: f32, size: f32) -> String {
-    let font = FontId::proportional(size);
-    let measure = |s: &str| {
-        ui.ctx().fonts_mut(|f| {
-            f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE)
-                .size()
-                .x
-        })
-    };
-    if measure(text) <= max_w {
+    if measure(ui, text, size) <= max_w {
         return text.to_owned();
     }
     let mut out: Vec<char> = text.chars().collect();
     while !out.is_empty() {
         out.pop();
         let candidate: String = out.iter().collect::<String>() + "…";
-        if measure(&candidate) <= max_w {
+        if measure(ui, &candidate, size) <= max_w {
             return candidate;
         }
     }

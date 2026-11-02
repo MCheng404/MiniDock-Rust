@@ -26,6 +26,7 @@ pub mod cc_win;
 pub mod dock;
 pub mod frame;
 pub mod gpu;
+pub mod ime;
 pub mod input;
 pub mod launchpad_win;
 pub mod mem;

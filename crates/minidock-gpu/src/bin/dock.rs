@@ -1149,10 +1149,25 @@ impl App {
             }
         }
         // 起动台：全屏窗口，交互才重绘（图标线程到货时会 PostMessage 催）。
+        // 起动台自己改不了 Dock 的配置，把动作交回来执行。先收齐再处理：
+        // 处理时要 `&mut self`，不能和 `launchpad_slot` 的借用叠在一起。
+        let mut lp_cmds: Vec<minidock_gpu::launchpad_win::LaunchpadCmd> = Vec::new();
         if let Some(win) = self.launchpad_slot.as_mut() {
             if win.due() {
                 win.render(&self.gpu)?;
                 need = true;
+            }
+            while let Some(cmd) = win.take_cmd() {
+                lp_cmds.push(cmd);
+            }
+        }
+        for cmd in lp_cmds {
+            match cmd {
+                minidock_gpu::launchpad_win::LaunchpadCmd::AddToDock { name, path } => {
+                    self.raw.push(Item::new(ItemKind::File, name, path));
+                    self.apply_item_change();
+                    need = true;
+                }
             }
         }
         // 控制中心：只在交互后重绘；改过主题就通知主循环重读一次。
