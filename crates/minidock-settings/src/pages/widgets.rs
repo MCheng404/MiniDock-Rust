@@ -41,6 +41,9 @@ const CTL_RESERVE: f32 = 232.0;
 /// 行与行之间的留白。
 const ROW_GAP: f32 = 7.0;
 
+/// 卡片与卡片之间的留白（雏形 12–18px，取中值）。
+const CARD_GAP: f32 = 14.0;
+
 /// 开关占位。不写死的话复选框会贴着文字内边距缩进，右边缘比下拉框少 9 px，
 /// 一列开关与一列下拉摆在同一张卡片里能看出来。
 const CTL_TOGGLE_W: f32 = 22.0;
@@ -110,11 +113,15 @@ fn card_frame(ui: &Ui) -> egui::Frame {
         })
         .corner_radius(egui::CornerRadius::same(18))
         .inner_margin(egui::Margin::symmetric(16, 12))
+        // 投影参数是试出来的：`spread` 一旦 > 0，投影矩形外扩但圆角半径
+        // 不跟着扩，暗边就会从卡片圆角的半透明 AA 边缘里透出来
+        // （实测圆角弧段上出现 214/222 的暗像素，直边却干净）。
+        // 所以 spread 必须是 0，密度靠 alpha 与 blur 控制。
         .shadow(egui::Shadow {
-            offset: [0, 10],
-            blur: 28,
-            spread: 2,
-            color: Color32::from_black_alpha(if dark { 110 } else { 26 }),
+            offset: [0, 8],
+            blur: 22,
+            spread: 0,
+            color: Color32::from_black_alpha(if dark { 90 } else { 16 }),
         })
 }
 
@@ -180,6 +187,8 @@ pub(crate) fn card<R>(
         base_min,
         egui::vec2(avail_w, card_ui.min_rect().height()),
     ));
+    // 卡片间距：不能靠 item_spacing（那会同时影响卡片内部的行距）
+    ui.add_space(CARD_GAP);
     inner
 }
 
