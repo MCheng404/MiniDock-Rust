@@ -188,6 +188,39 @@ pub(crate) fn row<R>(
     r
 }
 
+/// 磁吸：光标靠近时，元素朝它偏移（最多 `max` 像素）。
+///
+/// `base` 是元素**不偏移**时的布局矩形。偏移量按"光标到矩形边缘的距离"
+/// 衰减：光标在元素内 → 满偏；离开 `radius` 后归零。
+///
+/// 只偏移**绘制**，命中测试留在原位 —— 3 px 的差值对手感没有影响，
+/// 却省掉一套"视觉与点击目标分离"的补偿逻辑（HTML 的 transform 同样
+/// 只挪视觉，行为一致）。
+fn magnet_offset(ui: &Ui, base: egui::Rect, max: f32, radius: f32) -> egui::Vec2 {
+    let pointer = ui.ctx().input(|i| i.pointer.hover_pos());
+    magnet_pull(base, pointer, max, radius)
+}
+
+/// 纯几何：给定指针位置，返回元素的磁吸位移。单独拆出来才有单测。
+fn magnet_pull(base: egui::Rect, pointer: Option<egui::Pos2>, max: f32, radius: f32) -> egui::Vec2 {
+    let Some(p) = pointer else {
+        return egui::Vec2::ZERO;
+    };
+    // 光标到矩形边缘的最近距离（在矩形内则为 0）
+    let nx = p.x.clamp(base.left(), base.right());
+    let ny = p.y.clamp(base.top(), base.bottom());
+    let dist = ((p.x - nx).powi(2) + (p.y - ny).powi(2)).sqrt();
+    if dist > radius {
+        return egui::Vec2::ZERO;
+    }
+    let pull = 1.0 - dist / radius;
+    let c = base.center();
+    let dx = p.x - c.x;
+    let dy = p.y - c.y;
+    let len = (dx * dx + dy * dy).sqrt().max(0.001);
+    egui::vec2(dx / len * max * pull, dy / len * max * pull)
+}
+
 /// 圆形提示点：15px 的圆，灰底感叹号，悬停变强调色。
 ///
 /// - **点击**：展开 / 收起气泡（钉住，移开光标不消失）；
@@ -197,6 +230,7 @@ pub(crate) fn row<R>(
 /// 气泡本体在 [`super::settings_ui`] 的末尾统一渲染 —— 这里只改状态。
 fn hint_button(ui: &mut Ui, state: &mut SettingsState, note: &str) {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
+    let draw = rect.translate(magnet_offset(ui, rect, 1.2, 30.0));
     let vis = ui.visuals();
     let open = state.tip.as_ref().is_some_and(|t| t.id == resp.id);
 
@@ -209,9 +243,9 @@ fn hint_button(ui: &mut Ui, state: &mut SettingsState, note: &str) {
         (hover(ui), vis.weak_text_color())
     };
     // 半径取 15：15px 的方块正好是圆。
-    ui.painter().rect_filled(rect, CornerRadius::same(15), bg);
+    ui.painter().rect_filled(draw, CornerRadius::same(15), bg);
     ui.painter().text(
-        rect.center(),
+        draw.center(),
         Align2::CENTER_CENTER,
         "!",
         FontId::proportional(10.0),
@@ -283,6 +317,7 @@ fn hint_button(ui: &mut Ui, state: &mut SettingsState, note: &str) {
 /// 说明气泡本体。在 [`super::settings_ui`] 的**末尾**渲染 —— 那时所有行的
 /// 状态都已结算完，不会出现"这一帧气泡开着、下一帧状态才更新"的抖动。
 pub(crate) fn render_tip(ui: &mut Ui, tip: &super::Tip) {
+    let mag = magnet_offset(ui, tip.anchor, 1.2, 30.0);
     // 气泡默认放在圆点下方；下方放不下（距窗口底不足一屏）就翻到上面。
     // 用 `pivot` 翻转，不需要提前知道气泡的高度。
     let below = tip.anchor.bottom() + 100.0 <= ui.max_rect().bottom();
@@ -300,6 +335,8 @@ pub(crate) fn render_tip(ui: &mut Ui, tip: &super::Tip) {
             egui::pos2((tip.anchor.left() - 6.0).max(8.0), tip.anchor.top() - 8.0),
         )
     };
+    // 气泡也磁吸：朝光标轻微偏移
+    let pos = pos + mag;
 
     #[expect(deprecated, reason = "整个应用只有一个气泡，固定 id 即可")]
     let area_id = egui::Id::new("settings-tip");
@@ -508,6 +545,9 @@ fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> egui::Response {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, NAV_ITEM_H), egui::Sense::click());
 
+    // 磁吸：画布朝光标偏移，命中区留在布局位置
+    let draw = rect.translate(magnet_offset(ui, rect, 2.5, 56.0));
+
     if ui.is_rect_visible(rect) {
         let vis = ui.visuals();
         let (bg, fg) = if selected {
@@ -522,10 +562,10 @@ fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> egui::Response {
         };
         if bg != Color32::TRANSPARENT {
             ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(13), bg);
+                .rect_filled(draw, egui::CornerRadius::same(13), bg);
         }
         ui.painter().text(
-            egui::pos2(rect.left() + 14.0, rect.center().y),
+            egui::pos2(draw.left() + 14.0, draw.center().y),
             egui::Align2::LEFT_CENTER,
             text,
             FontId::proportional(13.0),
@@ -543,4 +583,41 @@ pub(crate) fn page_header(ui: &mut Ui, page: Page) {
     ui.add_space(2.0);
     ui.heading(page.title());
     ui.label(RichText::new(page.subtitle()).small().weak());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 光标在元素内 = 满偏，方向朝光标；离得远 = 不动；幅度永不超上限。
+    #[test]
+    fn 磁吸位移的分档与方向() {
+        let base = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(160.0, 40.0));
+        let c = base.center();
+
+        // 元素内：满偏，方向 = 元素中心 → 光标
+        let inside = magnet_pull(base, Some(egui::pos2(c.x - 30.0, c.y + 5.0)), 2.5, 56.0);
+        assert!(
+            inside.x < -2.0 && inside.y > 0.0,
+            "应朝左下的光标偏移: {inside:?}"
+        );
+        assert!(
+            inside.length() <= 2.5 + 1e-6,
+            "幅度不得超过上限: {inside:?}"
+        );
+
+        // 刚好在半径边缘：为零
+        let edge = magnet_pull(base, Some(egui::pos2(base.left() - 56.0, c.y)), 2.5, 56.0);
+        assert_eq!(edge, egui::Vec2::ZERO, "半径之外不应偏移");
+
+        // 半径之内但不在元素上：按距离衰减
+        let near = magnet_pull(base, Some(egui::pos2(base.left() - 28.0, c.y)), 2.5, 56.0);
+        assert!(
+            near.x < -1.0 && near.x > -2.5,
+            "一半距离应约为一半幅度: {near:?}"
+        );
+
+        // 没有指针（窗口外）：不动
+        assert_eq!(magnet_pull(base, None, 2.5, 56.0), egui::Vec2::ZERO);
+    }
 }
