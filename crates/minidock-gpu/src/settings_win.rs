@@ -4,7 +4,7 @@
 //!
 //! - **改设置要即时生效**。同一进程里 `settings_ui` 直接改的是 Dock 用的那份
 //!   `Config`，下一帧就在栏体上体现出来；独立进程要么走 IPC，要么让用户重启。
-//! - 上游 C 版本来也是进程内对话框（`DialogBox`），行为口径一致。
+//! - 本来也是进程内对话框（`DialogBox`），行为口径一致。
 //! - GPU device 可以共享：第二个窗口只需要自己的 `FrameRenderer`（离屏目标
 //!   + DIB），管线与字体仍在第一次付费（ADR-032 已验证过这套做法）。
 //!
@@ -46,8 +46,12 @@ use crate::input::{map_vk, Input};
 /// "已经有设置窗口就激活它"用的。
 pub const CLASS_NAME: &str = "MiniDockSettings";
 
-/// 窗口逻辑尺寸（本地坐标）。宽 880 是为了让最宽的性能页统计文本不用换行。
-const LOGICAL_SIZE: (f32, f32) = (880.0, 720.0);
+/// 窗口逻辑尺寸（本地坐标）。宽 893 = 导航栏 193 + 内容区 700（雏形同款）。
+///
+/// 公开是给离屏截图用的：`examples/settings_shot.rs` 要按同一个尺寸出图，
+/// 否则截出来的排版不代表真实窗口。雏形 `docs/settings-prototype.html`
+/// 里写的也是这两个数。
+pub const LOGICAL_SIZE: (f32, f32) = (893.0, 720.0);
 
 /// 设置窗口及其专属渲染器。
 pub struct SettingsWindow {
@@ -420,7 +424,11 @@ impl SettingsWindow {
 /// 放在这一层而不是改 `pages.rs`：那边的 kittest 会遍历控件，多一个按钮就要
 /// 改好几条断言；而对"设置窗口要不要有关闭按钮"这个问题，答案是肯定的、
 /// 且与页面无关。
-fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out: &mut Outcome) {
+/// 把「标题栏 + 两列设置界面」画到任意 `Ui` 上。
+///
+/// 公开是因为离屏截图（`examples/settings_shot.rs`）要画**同一份**外壳 ——
+/// 自己再拼一个近似版，截出来的图就不能代表真实窗口了。
+pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out: &mut Outcome) {
     let rect = ui.max_rect();
     let dark = ui.visuals().dark_mode;
     // 250/255：圆角外侧留一点透明让边缘融进桌面，又不至于让壁纸干扰阅读。
@@ -438,15 +446,68 @@ fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out: &m
             .layout(Layout::top_down(Align::Min)),
     );
 
-    child.horizontal(|ui| {
-        ui.heading(RichText::new("MiniDock 设置").size(20.0));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("关闭").clicked() {
-                out.command = Some(Command::Close);
-            }
-        });
-    });
-    child.separator();
+    // ---- 顶栏：品牌 / 搜索（居中）/ 状态 + 关闭 ----
+    //
+    // 搜索框要**几何意义上**居中，不能靠 flex 加 margin —— 那会跟着左边
+    // 品牌文字的宽度偏。所以顶栏切成三个绝对定位的子 Ui。
+    let bar_h = 56.0;
+    let bar = egui::Rect::from_min_size(
+        child.max_rect().min,
+        egui::vec2(child.max_rect().width(), bar_h),
+    );
+
+    // Ctrl + K：聚焦搜索框（雏形的交互定义）。
+    let ctrl_k = child
+        .ctx()
+        .input(|i| i.key_pressed(egui::Key::K) && i.modifiers.ctrl);
+    // 固定 id 是刻意的：Ctrl+K 要跨帧请求同一个输入框的焦点。
+    #[expect(deprecated, reason = "单一搜索框，固定 id 即可")]
+    let search_id = egui::Id::new("nav-search");
+    if ctrl_k {
+        child.memory_mut(|m| m.request_focus(search_id));
+    }
+
+    // 品牌
+    let mut brand = child.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(bar.min, egui::vec2(160.0, bar_h)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    brand.label(RichText::new("MiniDock").size(20.0).strong());
+
+    // 搜索：以顶栏中心为轴
+    let search_rect = egui::Rect::from_center_size(bar.center(), egui::vec2(240.0, 32.0));
+    let mut search = child.new_child(
+        egui::UiBuilder::new()
+            .max_rect(search_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    search.add(
+        egui::TextEdit::singleline(&mut state.nav_filter)
+            .hint_text("搜索设置…  (Ctrl+K)")
+            .id(search_id)
+            .desired_width(search_rect.width() - 8.0),
+    );
+
+    // 右栏：状态文本 + 关闭（right_to_left，先加的在最右）
+    let right = egui::Rect::from_min_max(
+        egui::pos2(bar.left() + 160.0, bar.top()),
+        egui::pos2(bar.right(), bar.bottom()),
+    );
+    let mut side = child.new_child(
+        egui::UiBuilder::new()
+            .max_rect(right)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    if side.button("关闭").clicked() {
+        out.command = Some(Command::Close);
+    }
+    if !state.status.is_empty() {
+        side.label(RichText::new(&state.status).small().weak());
+    }
+
+    // 子 Ui 不推进父 Ui 的光标：手动把正文起点压到顶栏之下
+    child.add_space(bar_h);
 
     let mut page_out = settings_ui(&mut child, cfg, state);
     out.changed |= page_out.changed;
@@ -471,7 +532,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 /// 窗口类名必须是 UTF-16 宽串，且缓冲要在进程整个存活期内有效。
 ///
-/// 直接在 `new()` 里 encode 成一个临时 `Vec<u16>` 再传给 `CreateWindowExW`
+/// 直接在 `new` 里 encode 成一个临时 `Vec<u16>` 再传给 `CreateWindowExW`
 /// 是错误的：函数返回后那块内存就释放了，之后谁再用这个类名都是用野指针
 /// 访问已释放的堆（本次实测就是窗口压根没创建出来）。
 /// 要不要打印诊断：窗口消息流 + 交给 egui 的输入事件。

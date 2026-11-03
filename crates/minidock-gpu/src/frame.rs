@@ -140,6 +140,24 @@ impl FrameRenderer {
         pos: (i32, i32),
         build: impl FnMut(&mut egui::Ui),
     ) -> Result<FrameOutcome, GpuError> {
+        let (pixels, outcome) = self.render_rgba(gpu, raw, build)?;
+        self.presenter.upload_rgba(&pixels);
+        self.presenter.present(hwnd, pos.0, pos.1)?;
+        Ok(outcome)
+    }
+
+    /// 画一帧并返回预乘 BGRA 像素，**不呈现**。
+    ///
+    /// 与 [`Self::render`] 共用同一段绘制，区别只在最后一步：这里把像素
+    /// 交出去，而不是推给 `UpdateLayeredWindow`。用途是离屏截图
+    /// （`examples/settings_shot.rs`）与将来的像素级回归 —— 有显示器才能
+    /// 看到的界面，至少能先被渲染成文件看一眼。
+    pub fn render_rgba(
+        &mut self,
+        gpu: &Gpu,
+        raw: egui::RawInput,
+        build: impl FnMut(&mut egui::Ui),
+    ) -> Result<(Vec<u8>, FrameOutcome), GpuError> {
         let full = self.ctx.run_ui(raw, build);
 
         let delay = full
@@ -204,28 +222,26 @@ impl FrameRenderer {
         gpu.queue
             .submit(buffers.into_iter().chain([encoder.finish()]));
 
-        // 读回 + 呈现。**错误不能在这里直接 `?` 掉**：下面的
-        // `textures_delta.clear()` 必须执行，否则这个 delta 在函数退出时
-        // 被 Drop 检查抓住，报成"纹理增量没人处理"，把真正的错误盖掉。
-        // （起动台在全屏尺寸下 present 失败时就是这么被误导过一次。）
-        let submitted = (|| -> Result<(), GpuError> {
-            let pixels = self
-                .offscreen
-                .read_pixels(&gpu.device)
-                .map_err(GpuError::Wgpu)?;
-            self.presenter.upload_rgba(&pixels);
-            self.presenter.present(hwnd, pos.0, pos.1)
-        })();
+        // 读回。**错误不能在这里直接 `?` 掉**：下面的 `textures_delta.clear()`
+        // 必须执行，否则这个 delta 在函数退出时被 Drop 检查抓住，报成
+        // "纹理增量没人处理"，把真正的错误盖掉。（起动台在全屏尺寸下 present
+        // 失败时就是这么被误导过一次。）
+        let pixels = self
+            .offscreen
+            .read_pixels(&gpu.device)
+            .map_err(GpuError::Wgpu);
 
         for id in &textures_delta.free {
             self.renderer.free_texture(id);
         }
         textures_delta.clear();
-        submitted?;
 
-        Ok(FrameOutcome {
-            cursor,
-            repaint_delay: delay,
-        })
+        Ok((
+            pixels?,
+            FrameOutcome {
+                cursor,
+                repaint_delay: delay,
+            },
+        ))
     }
 }

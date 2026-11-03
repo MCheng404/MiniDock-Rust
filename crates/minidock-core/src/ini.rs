@@ -3,15 +3,15 @@
 //! 为什么不用第三方 ini crate：这个文件不是通用配置，它有三个硬约束，
 //! 现成 crate 一个都不满足：
 //!
-//! 1. **UTF-16LE + BOM**。原版用 `WritePrivateProfileStringW`，文件是
-//!    UTF-16LE 且带 `FF FE` 头。用 UTF-8 写回去，C 版再读就会乱码。
-//! 2. **键序稳定**。配置要在 C 版与 Rust 版之间来回读写；每次保存都把
-//!    键序打乱会产生无意义的 diff，也让"改了什么"无从判断。
+//! 1. **UTF-16LE + BOM**。用 `WritePrivateProfileStringW`，文件是
+//!    UTF-16LE 且带 `FF FE` 头。用 UTF-8 写回去，再读就会乱码。
+//! 2. **键序稳定**。每次保存都按同一顺序写回；键序被打乱会产生无意义的
+//!    diff，也让"改了什么"无从判断。
 //! 3. **保留未知键**。老版本读新版本写的 ini 时，不认识的键必须原样留着，
 //!    否则一次运行就抹掉别人的配置。
 //!
 //! 这里实现的是"够用的 profile API 子集"：段、`k=v`、`;` 注释、
-//! 大小写不敏感的查找。不做转义 —— 原版也不做，`|` 分隔的条目格式
+//! 大小写不敏感的查找。不做转义：条目格式本身用 `|` 分隔，
 //! 见 `CONFIG.md` 的已知限制。
 
 use std::fs;
@@ -21,7 +21,7 @@ use std::path::Path;
 /// 文件编码。读进来是什么，写回去就是什么。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum Encoding {
-    /// `FF FE` + 每字符 2 字节小端。原版行为。
+    /// `FF FE` + 每字符 2 字节小端。行为。
     #[default]
     Utf16Le,
     /// `FE FF` + 大端。
@@ -215,7 +215,7 @@ impl Ini {
 
     /// 删除单个键。段或键不存在时什么都不做。
     ///
-    /// 原版没有对应 API（`WritePrivateProfileStringW(sec, key, NULL, ...)`
+    /// 没有对应 API（`WritePrivateProfileStringW(sec, key, NULL, ...)`
     /// 就是删键），但它的调用方从不删键 —— 于是"待办从 3 条减到 1 条"
     /// 时文件里会留着 `T1` / `T2`。这里补上。
     pub fn remove_key(&mut self, section: &str, key: &str) {
@@ -227,7 +227,7 @@ impl Ini {
             .retain(|(k, _)| !k.eq_ignore_ascii_case(key));
     }
 
-    /// 删除整个段（原版 `WritePrivateProfileStringW(sec, NULL, NULL, ...)`）。
+    /// 删除整个段（`WritePrivateProfileStringW(sec, NULL, NULL, ...)`）。
     pub fn remove_section(&mut self, section: &str) {
         self.sections
             .retain(|s| !s.name.eq_ignore_ascii_case(section));
@@ -257,7 +257,7 @@ impl Ini {
 
     /// 原子写入：先写 `<path>.tmp`，再改名覆盖。
     ///
-    /// 原版是逐键 `WritePrivateProfileStringW`，进程在保存中途被杀就会留下
+    /// 是逐键 `WritePrivateProfileStringW`，进程在保存中途被杀就会留下
     /// 半截文件；`pr_en.md` 提到的"部分写入的 ini"就是这么来的。
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();

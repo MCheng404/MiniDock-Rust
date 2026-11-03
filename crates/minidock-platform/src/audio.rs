@@ -1,7 +1,6 @@
 //! 系统音量：Core Audio 的 `IAudioEndpointVolume`。
 //!
-//! 上游 v1.6.0 用同一套接口（`CcVolInit` / `CcVolGet` / `CcVolumeSet`，
-//! minidock.c:6120-6145）。**不用模拟 `VK_VOLUME_*` 按键**：那会改动系统
+//! **不用模拟 `VK_VOLUME_*` 按键**：那会改动系统
 //! 的"应用程序音量"分组、会在音量 OSD 上闪一下，而且拿不到真实数值。
 //!
 //! 三件事要注意：
@@ -96,7 +95,7 @@ pub struct Battery {
 }
 
 impl Battery {
-    /// 读一次。上游用的是 `GetSystemPowerStatus`（minidock.c:6264）。
+    /// 读一次。用的是 `GetSystemPowerStatus`。
     #[must_use]
     pub fn read() -> Self {
         use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};

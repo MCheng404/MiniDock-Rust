@@ -71,8 +71,11 @@ minidock-core        （无 Win32 依赖，纯逻辑）
 5. `renderer.update_buffers` 写顶点/索引缓冲。
 6. `begin_render_pass`，`LoadOp::Clear(Color::TRANSPARENT)` —— **透明清屏是窗口能透出桌面的关键**。
 7. `renderer.render(&mut pass, ...)`，`queue.submit`。
-8. `copy_texture_to_buffer` → 同步回读 → 预乘 BGRA 写入 DIB → `UpdateLayeredWindow`。
-9. `textures_delta.free` 回收，然后 `clear()`（不 clear 会在 Drop 时断言 panic）。
+8. `copy_texture_to_buffer` → 同步回读 → 预乘 BGRA。
+9. 之后分两路：`render` 把像素交给 DIB 并 `UpdateLayeredWindow`；
+   `render_rgba` 直接把像素返回，不呈现 —— 离屏截图（
+   `examples/settings_shot.rs`）与将来的像素级回归走这条路。
+10. `textures_delta.free` 回收，然后 `clear()`（不 clear 会在 Drop 时断言 panic）。
 
 返回 `FrameOutcome { cursor, repaint_delay }` —— 调用方只需要这两个值。
 
@@ -92,6 +95,41 @@ minidock-core        （无 Win32 依赖，纯逻辑）
 
 GPU 版与 GDI+ 版都只是"取结果 → 画"。这套逻辑曾经两边各写一遍，
 已经漂移过（GDI+ 版拿动画中的 `cur` 去算基准宽度，导致基准槽位每帧移动）。
+
+### 设置界面：左导航 + 右侧卡片
+
+`minidock-settings` 是**纯 UI**：没有 HWND、没有 device、没有线程，所以能被
+kittest 无头驱动。结构按"一页一个文件"拆开：
+
+```
+crates/minidock-settings/src/
+  pages/
+    mod.rs         Page 枚举、SettingsState、Command、两列骨架
+    widgets.rs     共享控件：card / row / toggle / slider / combo / 侧栏
+    options.rs     下拉选项表（纯数据）
+    general.rs     常规      appearance.rs  外观     position.rs   位置
+    icons.rs       图标      interaction.rs 交互     extras.rs     附件
+    effect.rs      效果      performance.rs 性能     library.rs    图标库
+    add.rs         添加
+```
+
+加一页设置 = 加一个文件 + `Page` 枚举加一项；加一个设置项 = `core::config`
+加一个键 + 对应页面加一行。**控件长什么样、怎么排版只在 `widgets.rs` 里改**。
+
+布局不是 `SidePanel` 而是手工切两块 `Rect`（`ui.new_child(max_rect)`）：
+设置窗口外面还套着标题栏，`SidePanel` 按根 Ui 布局会跟标题抢地方。起点用
+`available_rect_before_wrap()` —— `max_rect()` 不随已用内容收缩，用它会把
+两列画到标题上。
+
+视觉基准是 [`docs/settings-prototype.html`](docs/settings-prototype.html)：
+页面、卡片、行与 Rust 端一一对应，改设计先改雏形。**不靠人肉截图验收** ——
+
+```bash
+cargo run -p minidock-gpu --example settings_shot -- 出图.bmp 外观 [dark]
+```
+
+走的是与真实窗口完全相同的 `FrameRenderer` + `settings_win::shell`，只把最后
+一步的 `UpdateLayeredWindow` 换成写 BMP。
 
 ## 四、帧调度：空闲不提交
 
@@ -157,7 +195,7 @@ async 运行时带来的调度开销与栈占用都不划算。
 | `InitPaths` | `platform::paths` | ✅ |
 | `GetMon` / `GetDeviceCaps` | `platform::display` / `win` | ✅ |
 | `SystemDark` / `GetAutostart` | `platform::theme` | ✅ |
-| `BuildRows` / `PaintSettings` / `SetProc` | `settings::pages` | ✅ M0 壳（9 页） |
+| `BuildRows` / `PaintSettings` / `SetProc` | `settings::pages`（10 页，一页一文件） | ✅ 布局重做（ADR-049） |
 | `RenderFrame` / `DrawBar` / `DrawBubbleAt` | `gpu::dock`（待写） | ⏳ M1 |
 | `LoadItemIcon` / `HiconToGp` / `FitBitmap` | `platform::icons`（待写） | ⏳ M2 |
 | `UpdateFrost` / `BlurPass` | `gpu::frost`（DXGI + compute） | ⏳ M3 |

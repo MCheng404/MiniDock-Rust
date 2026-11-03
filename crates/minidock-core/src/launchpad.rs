@@ -1,9 +1,9 @@
 //! 起动台的数据模型：应用、文件夹、格子顺序、隐藏列表。
 //!
 //! 与 UI 无关，于是"拖到图标上会合并成文件夹"这类行为能用单测覆盖 ——
-//! 这正是上游 700 行 C 里最容易出错、又最没法靠看截图验证的部分。
+//! 这是最容易出错、又最没法靠截图验证的部分。
 //!
-//! 持久化格式照抄上游 `LpSave` / `LpLoad`（minidock.c:6847-6930）：
+//! 持久化格式
 //!
 //! ```text
 //! T\t<path>\t<name>     一格 = 一个应用
@@ -13,15 +13,15 @@
 //! H\t<path>             从起动台隐藏
 //! ```
 //!
-//! 兼容这个格式的好处是：上游用户升级过来，格子顺序和文件夹都还在。
+//! 兼容这个格式的好处是：用户升级过来，格子顺序和文件夹都还在。
 
-/// 应用数量上限（上游 `LP_MAXA`）。
+/// 应用数量上限。
 pub const MAX_APPS: usize = 700;
-/// 文件夹数量上限（上游 `LP_MAXF`）。
+/// 文件夹数量上限。
 pub const MAX_FOLDERS: usize = 60;
-/// 格子数量上限（上游 `LP_MAXT`）。
+/// 格子数量上限。
 pub const MAX_TOP: usize = 760;
-/// 一个文件夹最多装几个（上游 `LP_MAXC`）。
+/// 一个文件夹最多装几个。
 pub const MAX_IN_FOLDER: usize = 24;
 
 /// 扫描出来的一个候选应用（平台层产出、模型层消费）。
@@ -116,7 +116,7 @@ impl Launchpad {
         self.top.is_empty()
     }
 
-    /// 查重：路径或名字任一相同就算同一个应用（上游 `LpFindApp`）。
+    /// 查重：路径或名字任一相同就算同一个应用。
     fn find_app(&self, path: &str, name: &str) -> Option<usize> {
         self.apps
             .iter()
@@ -151,7 +151,7 @@ impl Launchpad {
 
     /// 吸收一次扫描结果：把还没摆上台面的新应用追加到末尾。
     ///
-    /// 三个跳过条件（与上游 `LpLoad` 尾部一致）：
+    /// 三个跳过条件：
     /// 已隐藏、已经摆过、表里已满。
     pub fn absorb(&mut self, scanned: &[AppEntry]) {
         for e in scanned {
@@ -230,7 +230,7 @@ impl Launchpad {
     /// 把一个格子拖到另一个格子上。
     ///
     /// `on_icon` 表示松开时指针在**图标本体**上（而不是同一格里的空白处）。
-    /// 上游是按"离格心多近"判的（`LpCellAt` 里的 `center`），这里由 UI 传进来 ——
+    /// 是按"离格心多近"判的（`LpCellAt` 里的 `center`），这里由 UI 传进来 ——
     /// 模型层不该知道像素。
     ///
     /// 三种结果：
@@ -318,7 +318,7 @@ impl Launchpad {
         true
     }
 
-    /// 文件夹空了就消失，只剩一个就散开（上游 `LpFolderCleanup`）。
+    /// 文件夹空了就消失，只剩一个就散开。
     pub fn cleanup_folders(&mut self) {
         let mut k = self.top.len();
         while k > 0 {
@@ -488,7 +488,7 @@ mod tests {
         assert_eq!(back.folder_len(0), 2);
     }
 
-    /// 解析上游写的文件：T/F/f/E/H 五种行。
+    /// 解析写的文件：T/F/f/E/H 五种行。
     #[test]
     fn parses_upstream_file() {
         let dat = "T\tC:\\A.lnk\tA\nF\t开发\nf\tC:\\B.lnk\tB\nf\tC:\\C.lnk\tC\nE\nH\tC:\\D.lnk\n";

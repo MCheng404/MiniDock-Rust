@@ -1,13 +1,10 @@
 //! M1 的 Dock 本体：布局状态机 + egui 绘制。
 //!
-//! 几何**逐条照抄 C 版 v1.4.0 的 `Paint()`**（`minidock.c` 的 `DrawBar` /
-//! `DrawBubbleAt` / `HitIndex` / `MapActualToBase`），验收标准是"与 C 版
-//! 同配置并排截图，栏体几何误差 ≤ 1 px"。
+//! 几何的验收标准是：同一份配置下，栏体几何误差 ≤ 1 px。
 //!
 //! ## 单位
 //!
-//! `core::layout` 的度量是**物理像素**（与 C 版一致：`cfg` 里存的就是
-//! `Sc()` 缩放后的物理值，C 版的 `LW/LH` 也是物理像素）。
+//! `core::layout` 的度量是**物理像素**（配置里存的就是 DPI 缩放后的值）。
 //! egui 的画布是**逻辑点**，所以绘制时统一乘 `1 / ppp` 换算。
 //! 搞混这两套单位是 M0 已经踩过的坑（表面尺寸与客户区错位）。
 //!
@@ -41,7 +38,7 @@ pub struct IconTex {
     src_w: u32,
     src_h: u32,
     bbox: BBox,
-    /// 内容在槽位里的填充比例（原版 0.94 / 1.0）。
+    /// 内容在槽位里的填充比例。
     fill: f32,
 }
 
@@ -78,7 +75,7 @@ impl IconTex {
 
 /// 拖拽重排的运行时状态。
 ///
-/// 与原版对应的全局量：`pressIdx` / `pressPt` / `dragging` / `dragIdx` / `dragPtA`。
+/// 一次拖拽的完整状态：按下的条目、起点、是否已成拖拽。
 /// 收进一个结构体是因为它们必须同时成立 —— 分散成四个字段时很容易
 /// 出现"`dragging` 为真但 `dragIdx` 还是 -1"这种半截状态。
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +93,7 @@ pub struct DragState {
     press_pt: (f32, f32),
 }
 
-/// 起拖阈值（物理像素）。与 C 版 `abs(x - pressPt.x) > 6` 一致。
+/// 起拖阈值（物理像素）。
 const DRAG_THRESHOLD: f32 = 6.0;
 
 /// 一条 Dock 条目的运行时状态。
@@ -111,9 +108,9 @@ pub struct DockItem {
     /// 用户看到的是整条 Dock 闪一下。
     pub path: String,
     pub kind: ItemKind,
-    /// 当前边长。放大动画的值，对应 C 版 `items[i].cur`。
+    /// 当前边长，由放大动画逐帧逼近目标值。
     pub cur: f32,
-    /// 拖拽滑动的偏移，对应 C 版 `items[i].slide`。
+    /// 拖拽滑动的偏移。
     pub slide: f32,
     /// 该条目对应的应用当前是否在运行（决定要不要画运行指示点）。
     ///
@@ -129,7 +126,7 @@ pub struct DockItem {
     ///
     /// 重排时先把每个条目的当前位置记下来，移动后
     /// `slide += prev_l - 新 slot_l` —— 于是图标会从原位"滑"到新位，
-    /// 而不是瞬移。这是原版 `items[i].prevL` 的同一套做法。
+    /// 而不是瞬移。
     pub prev_l: f32,
 }
 
@@ -149,7 +146,7 @@ impl DockItem {
         )
     }
 
-    /// 从配置条目构造。`cur` 初始为 0 —— C 版也是 0，靠动画长出来。
+    /// 从配置条目构造。`cur` 初始为 0，靠动画长出来。
     #[must_use]
     pub fn from_item(item: &Item) -> Self {
         Self {
@@ -231,7 +228,7 @@ pub struct Dock {
     pub anim: bool,
     pub metrics: Metrics,
     pub geom: DockGeom,
-    /// 上一帧的实际中心，供 `map_actual_to_base` 用（与 C 版同序）。
+    /// 上一帧的实际中心，供 `map_actual_to_base` 用。
     prev_act_c: Vec<f32>,
     /// 按条目下标存放的图标纹理。`None` = 该条目没有图标（画首字占位）。
     icons: Vec<Option<IconTex>>,
@@ -253,7 +250,7 @@ pub struct Dock {
     ///
     /// 与 `hide_target` 分开是因为语义不同：`hide_target` 是自动隐藏算出来的，
     /// `force_hide` 是用户手动的，**优先级更高且不受鼠标位置影响**。
-    /// C 版用 `ht = gForceHide ? 1 : gHideTgt` 表达同一件事。
+    /// 收起目标 = 手动收起 或 自动隐藏。
     pub force_hide: bool,
     /// 最近一次"鼠标靠近 / 正在操作"的时刻（毫秒，单调时钟）。
     last_near_ms: u64,
@@ -275,7 +272,7 @@ pub struct Dock {
     /// 用 `hot` 会在"注入鼠标/消息乱序"时启动错项。
     ///
     /// 带 `force` 是因为 Shift+点击 与中键的语义是"不管是否已在运行，
-    /// 都新起一个实例"（原版 `LaunchItem(i, force)`）。把两种点击
+    /// 都新起一个实例"。把两种点击
     /// 收进同一条路径，主循环只需处理一次。
     click: Option<(usize, bool)>,
     /// 待处理的右键请求（客户区物理坐标）。主循环取走后弹菜单。
@@ -285,6 +282,12 @@ pub struct Dock {
     menu_at: Option<(f32, f32)>,
     /// 本次按下是否按着 Shift / 来自中键。抬起时据此决定 `click` 的 force。
     press_force: bool,
+    /// 系统外观变更计数（`WM_SETTINGCHANGE` 时 +1）。
+    ///
+    /// 窗口过程拿不到 `App`（它只有 `Dock` 的指针），而强调色、深浅色这类
+    /// 东西存在 `App` 里。用一个单调递增的计数当信号：窗口过程只管 +1，
+    /// 主循环发现计数变了再去重读。方向单一，不会互相覆盖。
+    pub look_epoch: u32,
 }
 
 impl Dock {
@@ -319,6 +322,7 @@ impl Dock {
             press: None,
             click: None,
             press_force: false,
+            look_epoch: 0,
             menu_at: None,
         }
     }
@@ -336,7 +340,7 @@ impl Dock {
     /// 在给定**物理像素**坐标上做命中测试，用上一帧的几何。
     ///
     /// 为什么不直接用 `hot`：按下与移动可能在同一轮消息里到达，
-    /// 那时 `hot` 还停在上上帧的位置。原版也是在按下时重新 `HitIndex`。
+    /// 那时 `hot` 还停在上上帧的位置。所以按下时重新做一次命中。
     #[must_use]
     pub fn hit_at(&self, u: f32, v: f32) -> Option<usize> {
         let visible: Vec<bool> = self.items.iter().map(|i| i.cur > 1.0).collect();
@@ -386,7 +390,7 @@ impl Dock {
 
     /// 鼠标落在哪个小组件卡片上。
     ///
-    /// 对应上游 v1.6.0 的 `WidgetAt()`（minidock.c:9092）：
+    /// 命中判定：
     /// 卡片在栏体的外侧，纵向范围是栏体上下各放宽 4 px。
     #[must_use]
     pub fn widget_at(&self, u: f32, v: f32) -> Option<layout::WidgetKind> {
@@ -434,7 +438,7 @@ impl Dock {
 
     /// 拖动中：更新位置，必要时重排。
     ///
-    /// 阈值（6 px）是原版行为：没有它，手指/鼠标的微小抖动会让每次点击
+    /// 阈值 6 px：没有它，手指/鼠标的微小抖动会让每次点击
     /// 都先"拖"一下再松手，观感很差。
     pub fn drag_to(&mut self, u: f32, v: f32) {
         let Some(mut d) = self.drag.take() else {
@@ -443,7 +447,7 @@ impl Dock {
         d.pt = (u, v);
         if !d.active {
             let (dx, dy) = (u - d.press_pt.0, v - d.press_pt.1);
-            // 锁定状态下一律不允许拖动（原版 `!cfg.lock`）。
+            // 锁定状态下一律不允许拖动。
             if !self.cfg.lock && dx.abs().max(dy.abs()) > DRAG_THRESHOLD {
                 d.active = true;
             }
@@ -465,7 +469,7 @@ impl Dock {
 
     /// 拖到 `u` 时应插入的下标。
     ///
-    /// 原版是"数一数有多少条目的实际中心在光标左边"（不含被拖的那条）。
+    /// 数一数有多少条目的实际中心在光标左边（不含被拖的那条）。
     /// 这直接给出**移除被拖项之后**的插入位置，正好与
     /// [`Self::move_item`] 的"取出再插入"语义对齐。
     fn place_for(&self, u: f32, dragged: usize) -> usize {
@@ -515,7 +519,7 @@ impl Dock {
 
     /// 左键抬起：只有"按下与抬起落在同一个条目上"才算点击。
     ///
-    /// 这条规则来自原版：`if (HitIndex(u, v) == pi) LaunchItem(pi, ...)`。
+    /// 判据是按下与抬起命中同一条目。
     /// 少了它，从图标上按下、拖到别处松手也会误启动。
     pub fn release_at(&mut self, u: f32, v: f32) -> Option<usize> {
         // 拖过就不算点击：这条必须先判断，否则每次重排都会顺带启动一次应用。
@@ -542,7 +546,11 @@ impl Dock {
     pub fn cancel_drag(&mut self) {
         let was = self.drag.take().is_some_and(|d| d.active);
         self.press = None;
-        self.click = None;
+        // **不能清 `click`。** 这个函数在 `WM_CAPTURECHANGED` 里被调用，而
+        // "自己交还捕获"（`ReleaseCapture`）同样会同步触发那条消息 ——
+        // 清掉 `click` 就等于把刚结算好的点击一起抹了。真正丢失捕获时
+        // `click` 本来就是 `None`（它只由 `release_at` 写，写完主循环
+        // 立刻取走），所以这里不清是安全的。
         if was {
             // 拖拽被中断：图标回弹到原位，不能留在半路。
             self.mark_dirty();
@@ -639,7 +647,6 @@ impl Dock {
 
     /// 让某个条目弹一下（启动应用后的反馈）。
     ///
-    /// 对应 C 版 `if (cfg.bounce) it->bounce = GetTickCount() | 1;`。
     /// `Bounce` 关掉时直接不弹 —— 配置项存在却无效是最糟的。
     pub fn start_bounce(&mut self, index: usize) {
         if !self.cfg.bounce {
@@ -716,7 +723,7 @@ impl Dock {
 
     /// 窗口的**物理**像素尺寸。egui 画布尺寸 = 这个值 / ppp。
     ///
-    /// 名字里带 `physical` 是有意的：`metrics.lw/lh` 与 C 版一致都是物理像素，
+    /// 名字里带 `physical` 是有意的：`metrics.lw/lh` 是物理像素，
     /// 早期叫 `logical_size` 让人以为可以直接当 egui 尺寸用。
     #[must_use]
     pub fn physical_size(&self) -> (f32, f32) {
@@ -786,7 +793,7 @@ impl Dock {
             base_c,
         };
         // 重排后的位移：每项从"上一帧的位置"滑到"本帧的位置"。
-        // 顺序与原版一致 —— 先按当前位置差补上 slide，再衰减一次。
+        // 顺序：先按当前位置差补上 slide，再衰减一次。
         if moved {
             for (it, &l) in self.items.iter_mut().zip(&slots.slot_l) {
                 it.slide += it.prev_l - l;
@@ -806,12 +813,12 @@ impl Dock {
             anim = true;
         }
 
-        // 下一帧的 `map_actual_to_base` 用本帧的实际中心（C 版同序）。
+        // 下一帧的 `map_actual_to_base` 用本帧的实际中心。
         self.prev_act_c = slots.act_c;
         self.anim = anim;
     }
 
-    /// 鼠标离开后多久才隐藏（毫秒）。原版是 450。
+    /// 鼠标离开后多久才隐藏（毫秒）。
     ///
     /// 给宽限期是必要的：鼠标划过屏幕底边去点任务栏时不该把 Dock 弹出来，
     /// 反过来刚离开 Dock 立刻缩回去也很烦躁。
@@ -819,7 +826,7 @@ impl Dock {
 
     /// 自动隐藏的每 tick 决策。
     ///
-    /// 与原版 `OnAutoHide()` 的分工一致：**"光标算不算靠近"由调用方判断**
+    /// 分工：**"光标算不算靠近"由调用方判断**
     /// （需要屏幕坐标与窗口位置，那是 Win32 的事），这里只负责
     /// "靠近就显示、离开超过宽限期就收起"以及动画推进。
     ///
@@ -916,7 +923,7 @@ impl Dock {
                 Color32::from_rgba_unmultiplied(255, 255, 255, 190),
             );
         }
-        // 小组件条带（上游 v1.6.0 / 1.6.5）：时钟、资源、计时器、托盘。
+        // 小组件条带：时钟、资源、计时器、托盘。
         // 位置由 `WidgetStrip::left_of` 给，不是硬编码的"栏体右缘"。
         //
         // 开了 `WMerge`（1.6.5 默认）时，整条带共用一块胶囊，卡片自己
@@ -943,19 +950,45 @@ impl Dock {
     /// 位移，也以物理像素计。**先加位移再乘 k**，顺序反了在 150% 缩放下
     /// 会差半屏。
     fn projection(&self, ppp: f32) -> Proj {
-        let m = &self.metrics;
-        let off = self.hide_cur * (m.bar_h + m.margin + 14.0);
-        let (tx, ty) = match self.cfg.edge {
-            Edge::Top => (0.0, -off),
-            Edge::Left => (-off, 0.0),
-            Edge::Right => (off, 0.0),
-            Edge::Bottom => (0.0, off),
-        };
+        let (tx, ty) = self.hide_offset();
         Proj {
             k: 1.0 / ppp,
             tx,
             ty,
         }
+    }
+
+    /// 隐藏动画把整条 Dock 推出了多少**物理像素**。
+    ///
+    /// 单独抽出来是因为栏体之外还有东西要跟着走：烟雾光晕、云团粒子都画在
+    /// 栏体外侧，靠这个位移才能和栏体同步滑出去。各算一遍必然会有一处
+    /// 忘记乘 `(bar_h + margin + 14)`。
+    #[must_use]
+    pub fn hide_offset(&self) -> (f32, f32) {
+        let m = &self.metrics;
+        let off = self.hide_cur * (m.bar_h + m.margin + 14.0);
+        match self.cfg.edge {
+            Edge::Top => (0.0, -off),
+            Edge::Left => (-off, 0.0),
+            Edge::Right => (off, 0.0),
+            Edge::Bottom => (0.0, off),
+        }
+    }
+
+    /// 栏体在**窗口物理坐标**里的矩形 `(x, y, w, h)`，不含隐藏位移。
+    ///
+    /// `geom.bar_l` / `bar_top` 是逻辑坐标（四边停靠的翻转规则在
+    /// `layout::map_rect` 里），烟雾要用屏幕坐标，所以这里统一换算一次。
+    #[must_use]
+    pub fn bar_phys(&self) -> (f32, f32, f32, f32) {
+        layout::map_rect(
+            self.cfg.edge,
+            self.geom.bar_l,
+            self.geom.bar_top,
+            self.geom.bar_w,
+            self.metrics.bar_h,
+            self.metrics.lh as f32,
+        )
     }
 
     /// 栏体。返回画布上的矩形（空状态提示要用它的中心）。
@@ -978,14 +1011,14 @@ impl Dock {
         r * p.k
     }
 
-    /// 条带是否合并成一块胶囊（上游 1.6.5 `WMerge`，默认开）。
+    /// 条带是否合并成一块胶囊（`WMerge`，默认开）。
     fn widgets_merged(&self) -> bool {
         self.cfg.get_i32(Key::W_MERGE) != 0 && self.metrics.widgets.len > 0
     }
 
     /// 合并胶囊：整条带共用一块底盘。
     ///
-    /// 上游 `RenderFrame` 画的是"首尾成员的**外接框**"
+    /// 画的是"首尾成员的**外接框**"
     /// （`g_wU[first]` 到 `g_wU[last] + g_wWid[last]`），成员之间的间隔
     /// 留在胶囊内部——所以位置不用改，只是少画 N-1 块底盘。
     fn paint_widget_capsule(&self, painter: &egui::Painter, p: Proj, dark: bool) {
@@ -1025,7 +1058,7 @@ impl Dock {
 
     /// 系统托盘卡片：一个向下的箭头，点了打开 Windows 通知区域。
     ///
-    /// 图形照上游 `DrawTray()`：两条线段组成的 chevron，线宽随手，
+    /// 图形：两条线段组成的 chevron，线宽随手，
     /// 位置按卡片短边算。
     fn paint_tray_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
         let m = &self.metrics;
@@ -1075,12 +1108,11 @@ impl Dock {
 
     /// 资源监视器卡片：栏体 + "CPU xx%"（双倍宽时加内存）。
     ///
-    /// 对应上游 v1.6.0 的 `DrawRes()`（minidock.c:6521）。
-    /// 上游的文案是 `CPU %d%%`，双倍宽时是 `CPU %d%%   RAM %d%%`。
+    /// 文案：`CPU %d%%`，双倍宽时 `CPU %d%%   RAM %d%%`。
     /// 计时器 / 待办卡片：栏体 + 钟表图标。
     ///
-    /// 对应上游 v1.6.0 的 `DrawTool()`（minidock.c:6499）：一个圆 + 两根指针。
-    /// 上游不显示数字 —— 时间在面板里看，卡片只做入口。
+    /// 一个圆 + 两根指针。
+    /// 卡片不显示数字，时间在面板里看。
     fn paint_tool_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
         let m = &self.metrics;
         let Some(idx) = m
@@ -1157,7 +1189,7 @@ impl Dock {
         let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
         self.paint_card_bg(painter, c, dark, p);
 
-        // 上游双倍宽时把内存也塞进同一张卡片。
+        // 双倍宽时把内存也塞进同一张卡片。
         let text = if m.widgets.on_left || layout::WidgetKind::Resource.is_wide(&self.cfg) {
             format!(
                 "CPU {}%   RAM {}%",
@@ -1171,7 +1203,7 @@ impl Dock {
         } else {
             Color32::from_rgba_unmultiplied(232, 30, 32, 40)
         };
-        // 上游靠 GDI+ 的 fit-to-rect 自动缩字，egui 不会 ——
+        // egui 不会自动缩字，所以先量再缩 ——
         // 这里量一次宽度，装不下就缩字号。卡片留 4 px 内边距。
         let mut size = self.small_font_size();
         let avail = c.width() - 8.0;
@@ -1197,13 +1229,13 @@ impl Dock {
 
     /// 资源监视器卡片用的字号。
     ///
-    /// 上游用 `Sc(10)`（固定 10 逻辑像素，`v1.6.0:9505`）。
-    /// 这里不能照抄成固定值 —— 卡片宽度是 `barH × 1.16`，栏高会随
+    /// 固定 10 逻辑像素。
+    /// 这里不能沿用成固定值 —— 卡片宽度是 `barH × 1.16`，栏高会随
     /// 条目数量被压缩（128 个条目时 `barH` 从 76 掉到 37），
     /// 固定 10pt 在窄卡片里会被裁成 "PU%"。
     ///
     /// 所以按**栏高**的比例走：`barH × 0.27` 在 76 栏高下约 20 物理像素
-    /// （= 13.5 逻辑点，与上游 `Sc(10)` 同量级），栏高被压缩时同比缩小，
+    /// （= 13.5 逻辑点），栏高被压缩时同比缩小，
     /// 文字始终装得下。
     fn small_font_size(&self) -> f32 {
         (self.metrics.bar_h * 0.27).max(8.0)
@@ -1213,7 +1245,7 @@ impl Dock {
     ///
     /// **不能每帧都调**：`GetSystemTimes` 与 `GlobalMemoryStatusEx` 都不是
     /// 便宜调用，而 CPU 占用率本身要 1 秒才有意义。1 秒一次足够，
-    /// 上游的绘制也是每次重绘才重新采样。
+    /// 每次重绘重新采样。
     pub fn refresh_sysinfo(&mut self) {
         self.sysinfo = minidock_platform::sysinfo::sample(&mut self.cpu_sampler);
     }
@@ -1254,7 +1286,7 @@ impl Dock {
                 Color32::from_rgba_unmultiplied(190, 60, 60, 70),
             )
         };
-        // 卡片高度按**行数均分**（原版 `lh = (ch0 - 8) / nl`）。
+        // 卡片高度按**行数均分**。
         // 写死两行会出错：只显示时间或只显示日期时只有一行。
         let n = lines.len().max(1);
         let line_h = (c.height() - 8.0 * p.k) / n as f32;
@@ -1272,7 +1304,7 @@ impl Dock {
                 FontId::proportional(size * p.k),
                 color,
             );
-            // 时间组与日期组之间一条细线（原版同款）。
+            // 时间组与日期组之间一条细线。
             if let Some(pv) = prev {
                 if pv.is_date != line.is_date {
                     let y = c.top() + 4.0 * p.k + line_h * k as f32;
@@ -1332,10 +1364,10 @@ impl Dock {
             let sz = it.cur;
             let lx = self.geom.slot_l[i] + it.slide;
             // 弹跳沿"栏体厚度方向"往外，所以在逻辑坐标的 `v` 上减 ——
-            // `map_rect` 里 v 越小越靠外侧（与 C 版 `iconBottom - sz - bo` 等价）。
+            // `map_rect` 里 v 越小越靠外侧。
             let bo = it.bounce_offset(self.metrics.s);
             self.paint_icon(painter, p, dark, i, it, lx, sz, bo);
-            // 只给**正在运行**的应用画指示点（原版是 `if (items[i].running)`）。
+            // 只给**正在运行**的应用画指示点。
             if self.cfg.dots && it.running {
                 self.paint_running_dot(painter, p, dark, lx, sz);
             }
@@ -1343,7 +1375,7 @@ impl Dock {
     }
 
     /// 单个图标：可选底盘 + 首字占位。
-    #[allow(clippy::too_many_arguments)] // 参数与 C 版 `DrawImg` 调用点一一对应
+    #[allow(clippy::too_many_arguments)] // 参数就是画一张图标所需的全部输入
     fn paint_icon(
         &self,
         painter: &egui::Painter,
@@ -1367,7 +1399,7 @@ impl Dock {
         let rect = EguiRect::from_min_size(self.to_egui(ix, iy, p), egui::vec2(iw * p.k, ih * p.k));
 
         // 底盘（macOS 风格的圆角方块）。0 = 不画，1 = 纯色，2 = 半透明 + 描边。
-        // 配色由「主题 + 不透明度」算出来，对应原版 `PlateArgb()`：
+        // 配色由「主题 + 不透明度」算出来：
         // `PlateTheme` 0 = 强制浅色 / 1 = 强制深色 / 2 = 跟随 Dock。
         let plate = self.cfg.get_i32(Key::PLATE_MODE);
         let mut inner = rect;
@@ -1392,7 +1424,7 @@ impl Dock {
                 (255, 255, 255)
             };
             painter.rect_filled(rect, radius, argbc(a, r, g, b));
-            // 只有半透明档带描边（原版 `plateMode == 2`）。
+            // 只有半透明档带描边。
             if plate == 2 {
                 painter.rect_stroke(
                     rect,
@@ -1410,7 +1442,7 @@ impl Dock {
         }
 
         // 真图标：按 `bbox` 采样，内容占 `fill` 比例，长边对齐、居中。
-        // 这是原版 `FitBitmap` 的绘制端对应实现（它把缩放做在预渲染里，
+        // 缩放已经在预渲染里做过，
         // 我们交给 GPU —— 放大动画每帧尺寸都变，预渲染会糊）。
         if let Some(icon) = self.icons.get(index).and_then(Option::as_ref) {
             let (aw, ah) = icon.aspect();
@@ -1420,7 +1452,7 @@ impl Dock {
             return;
         }
 
-        // 没有图标 → 首字占位（原版 `LetterTile` 的简化版）。
+        // 没有图标 → 首字占位。
         let fill = if dark {
             Color32::from_rgba_unmultiplied(90, 120, 130, 160)
         } else {
@@ -1447,7 +1479,7 @@ impl Dock {
     fn paint_running_dot(&self, painter: &egui::Painter, p: Proj, dark: bool, lx: f32, sz: f32) {
         let m = &self.metrics;
         let round = self.cfg.get_i32(Key::DotStyle) != 0;
-        // 上游 v1.4.0：横条宽 0.34·S、高 S/12（下限 3.6）；圆点直径 S/10（下限 7）。
+        // 横条宽 0.34·S、高 S/12（下限 3.6）；圆点直径 S/10（下限 7）。
         let mut pw = if round { m.s / 10.0 } else { m.s * 0.34 };
         let mut ph = m.s / 12.0;
         if ph < 3.6 {
@@ -1470,7 +1502,7 @@ impl Dock {
         );
         let dot = EguiRect::from_min_size(self.to_egui(dx, dy, p), egui::vec2(dw * p.k, dh * p.k));
         let radius = CornerRadius::same(r8((dot.width().min(dot.height())) / 2.0));
-        // 原版是在点后面垫一块**向外扩 1 px 的半透明黑**（不是描边），
+        // 点后面垫一块**向外扩 1 px 的半透明黑**（不是描边），
         // 靠它让白点压在任何壁纸上都看得清。
         painter.rect_filled(
             dot.expand(p.k),
@@ -1494,13 +1526,13 @@ impl Dock {
             return;
         };
         let sz = self.metrics.s * 1.15;
-        // 原版 `dragPtA.y - sz * 0.6`：手指/光标压在图标的偏下位置，
+        // `dragPtA.y - sz * 0.6`：手指/光标压在图标的偏下位置，
         // 视觉上是"捏着图标下半部在拖"。
         let lx = d.pt.0 - sz / 2.0;
         let ly = d.pt.1 - sz * 0.6;
         let rect = EguiRect::from_min_size(self.to_egui(lx, ly, p), egui::vec2(sz * p.k, sz * p.k));
 
-        // 0.78 透明度对应原版 `g_attrFade` 的 alpha 0.78。
+        // 透明度 0.78。
         let tint = Color32::from_white_alpha(200);
         if let Some(icon) = self.icons.get(d.index).and_then(Option::as_ref) {
             let (aw, ah) = icon.aspect();
@@ -1611,7 +1643,7 @@ impl Dock {
         }
     }
 
-    /// 悬停气泡（C 版 `DrawBubbleAt`）：宽 = 文本宽 + 24，高 = 28，圆角 9。
+    /// 悬停气泡：宽 = 文本宽 + 24，高 = 28，圆角 9。
     ///
     /// 位置由气泡**自己**按图标槽位算：气泡要贴在被悬停图标的哪一侧、
     /// 以及夹进窗口内的规则，都与停靠边有关，放在这里比让调用方拼参数清楚。
@@ -1697,12 +1729,12 @@ struct Proj {
     ty: f32,
 }
 
-/// 按 C 版 `ARGBC(a, r, g, b)` 的参数顺序构造颜色。
+/// 按 `(a, r, g, b)` 的顺序构造颜色。
 ///
-/// 存在的理由：原版所有颜色都写成 `ARGBC(alpha, r, g, b)`（alpha 在前），
-/// 而 Rust 的 `Color32::from_rgba_unmultiplied(r, g, b, a)` 是 alpha 在后。
-/// 迁移时逐条手抄极易按原顺序写进去 —— 本项目就因此出过"白色描边变青色"
-/// 的问题。以后搬 C 的颜色一律走这个函数，顺序只在这里出现一次。
+/// 存在的理由：颜色常量都按 alpha 在前的顺序写，而
+/// `Color32::from_rgba_unmultiplied(r, g, b, a)` 把 alpha 放在最后。
+/// 照着手写极易把顺序弄反（曾出过"白色描边变青色"），所以顺序只在
+/// 这个函数里出现一次。
 fn argbc(a: u8, r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
@@ -1832,7 +1864,7 @@ fn rounded_gradient(
 
 /// egui 0.37 的 `CornerRadius` 用 `u8` 表示半径，**亚像素会丢失**。
 ///
-/// C 版的圆角是浮点物理像素；换算到画布后不足 1 逻辑点的差异在这里被抹平，
+/// 圆角是浮点物理像素；换算到画布后不足 1 逻辑点的差异在这里被抹平，
 /// 属于可接受误差（验收线是 1 px）。
 fn r8(v: f32) -> u8 {
     v.round().clamp(0.0, u8::MAX as f32) as u8
@@ -1855,9 +1887,9 @@ fn to_rgb(c: color::Argb) -> (f32, f32, f32) {
 mod tests {
     use super::*;
 
-    /// `argbc` 必须按 C 版顺序（alpha 在前）解释参数。
+    /// `argbc` 按 alpha 在前的顺序解释参数。
     ///
-    /// 这条是为一个真实缺陷加的：整片代码曾经照抄 `ARGBC(a, r, g, b)` 的
+    /// 这条是为一个真实缺陷加的：整片代码曾经沿用 `ARGBC(a, r, g, b)` 的
     /// 字面顺序传给 `from_rgba_unmultiplied(r, g, b, a)`，结果是
     /// "白色描边"变成青色、"深色气泡"变成半透明红。颜色错了不会崩溃，
     /// 只会安静地难看，所以必须靠断言守。
@@ -1873,7 +1905,7 @@ mod tests {
     /// 圆角 + 渐变必须真的走网格，且轮廓要离开矩形四角。
     ///
     /// 这是"填充是方角、只有描边是圆角"那个缺陷的回归测试：
-    /// 旧实现用的是 `Shape::gradient_rect`（4 个顶点、方角）。
+    /// `Shape::gradient_rect` 只有 4 个顶点，带不了圆角。
     #[test]
     fn rounded_gradient_leaves_the_corners_empty() {
         let rect = EguiRect::from_min_size(Pos2::new(100.0, 50.0), egui::vec2(200.0, 60.0));
@@ -1941,6 +1973,13 @@ mod tests {
     }
 
     /// 造一个已"长成"的 Dock：`cur` 直接置为基准尺寸，跳过入场动画。
+    /// 第 `i` 个槽位的中心（物理像素，窗口坐标）。点击测试用它取点。
+    fn item_center(dock: &Dock, i: usize) -> (f32, f32) {
+        let (l, r) = (dock.geom.slot_l[i], dock.geom.slot_r[i]);
+        let y = (dock.geom.bar_top + dock.geom.bar_bottom) / 2.0;
+        ((l + r) / 2.0, y)
+    }
+
     fn settled_dock(n: usize) -> Dock {
         let cfg = Config::defaults(96);
         let items: Vec<DockItem> = (0..n)
@@ -1975,7 +2014,7 @@ mod tests {
         assert_eq!(dock.hit_at(dock.geom.bar_l - 30.0, 120.0), None);
     }
 
-    /// 小组件卡片的命中判定（上游 `WidgetAt()`）。
+    /// 小组件卡片的命中判定。
     #[test]
     fn widget_at_finds_the_card() {
         let mut c = Config::defaults(96);
@@ -2155,6 +2194,41 @@ mod tests {
                 it.cur
             );
         }
+    }
+
+    /// 点击必须在**释放捕获之前**结算，且不能被 `cancel_drag()` 抹掉。
+    ///
+    /// 这条钉的是一个真实 bug：窗口过程原来先 `ReleaseCapture()` 再
+    /// `release_at()`，而 `ReleaseCapture` 会**同步**给自己的窗口发
+    /// `WM_CAPTURECHANGED`（那里调 `cancel_drag()` 清掉 `press`）。
+    /// 等 `release_at()` 运行时已经不知道"按在哪个图标上"，于是每一次点击
+    /// 都被吞掉 —— 表现就是"点图标没反应"，而且既没有日志也没有弹跳。
+    #[test]
+    fn click_survives_release_capture() {
+        let mut dock = settled_dock(2);
+        let (u, v) = item_center(&dock, 0);
+
+        assert!(dock.press_at(u, v, false), "按下应当命中第一项");
+        // 顺序与 `WM_LBUTTONUP` 修好之后一致：先结算，再交还捕获。
+        assert_eq!(dock.release_at(u, v), Some(0), "抬起应当判成点击");
+        dock.cancel_drag(); // 这就是 `ReleaseCapture` 的副作用
+
+        assert_eq!(
+            dock.take_click().map(|c| c.0),
+            Some(0),
+            "交还捕获不该把已经结算好的点击抹掉"
+        );
+    }
+
+    /// 反过来：**真的**丢了捕获（弹窗、Alt+Tab）时，这次点击必须作废。
+    #[test]
+    fn lost_capture_drops_the_click() {
+        let mut dock = settled_dock(2);
+        let (u, v) = item_center(&dock, 0);
+        assert!(dock.press_at(u, v, false));
+        dock.cancel_drag();
+        assert_eq!(dock.release_at(u, v), None, "丢了捕获就不该再触发点击");
+        assert!(dock.take_click().is_none());
     }
 
     /// 自动隐藏：宽限期内不收起，超过才收起；一靠近立刻回来。

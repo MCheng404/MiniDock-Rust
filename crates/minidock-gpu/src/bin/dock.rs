@@ -22,6 +22,7 @@ use minidock_core::item::{Item, ItemKind};
 use minidock_core::layout;
 use minidock_core::layout::Rect as LRect;
 use minidock_core::running;
+use minidock_core::smoke::{Tuning, PALETTE};
 use minidock_core::store;
 use minidock_gpu::calendar_win::CalendarWindow;
 use minidock_gpu::cc_win::CcWindow;
@@ -32,6 +33,7 @@ use minidock_gpu::launchpad_win::LaunchpadWindow;
 use minidock_gpu::menu::{Menu, MenuCmd};
 use minidock_gpu::resmon_win::ResMonWindow;
 use minidock_gpu::settings_win::SettingsWindow;
+use minidock_gpu::smoke::{SmokeFx, View as SmokeView};
 use minidock_gpu::tool_win::ToolWindow;
 use minidock_gpu::worker::{
     DiskWriter, IconLoader, IconRequest, OpenJob, Opener, ScanInput, Scanner, Waker, WriteJob,
@@ -96,7 +98,7 @@ mod trace {
         std::env::var_os(name).is_some()
     }
 
-    /// 几何 / 重排 / 点击 / 扫描的详细日志，用于与 C 版逐项对拍。
+    /// 几何 / 重排 / 点击 / 扫描的详细日志。
     pub fn geom() -> bool {
         static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_GEOM"));
         *V
@@ -136,7 +138,7 @@ struct App {
     raw: Vec<Item>,
     dpi: i32,
     ppp: f32,
-    /// 目标显示器的工作区（物理像素），C 版用 `g_mi.rcWork`。
+    /// 目标显示器的工作区（物理像素）。
     work: LRect,
     appbar: AppBar,
     /// AppBar 申请到的预留矩形；`None` = 没有预留（或申请失败）。
@@ -176,6 +178,15 @@ struct App {
     tool_save_at: Option<Instant>,
     /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
     widgets_dump: String,
+    /// 栏体周围的环境烟雾。
+    smoke: SmokeFx,
+    /// DWM 强调色。启动时读一次：它只在用户改主题时变，而改主题会发
+    /// `WM_SETTINGCHANGE` —— 那时才需要重读，不必每帧问系统。
+    accent: [f32; 3],
+    /// 已处理到的外观变更计数（见 [`Dock::look_epoch`]）。
+    look_epoch: u32,
+    /// 下一帧烟雾最早可以在什么时候画。
+    next_smoke: Instant,
     /// 写 ini（串行，天然保序）。
     disk: DiskWriter,
     /// 启动 / 激活应用（`ShellExecuteW`）。
@@ -193,8 +204,20 @@ struct App {
 
     /// 扫描线程最近一次给出的遮挡结果（仅智能隐藏用）。
     covered: bool,
-    /// 已发给扫描线程的遮挡检测矩形；`None` = 不检测。
-    cover_target: Option<LRect>,
+    /// 「未固定的运行中应用」的临时条目。
+    ///
+    /// 只活在内存里：不写 ini、不参与拖拽重排。它们永远是 `dock.items`
+    /// 的**最后一段**，这样 `dock.items[i]` 与 `raw[i]` 在 `i < raw.len()`
+    /// 时仍然一一对应，点击与菜单的既有下标逻辑不用改。
+    temps: Vec<Item>,
+    /// 上一轮临时条目的 exe（小写）。用来判断"要不要重建列表"，
+    /// 顺便保住顺序：已有的不动，新出现的追加在后面。
+    temp_keys: Vec<String>,
+    /// 已发给扫描线程的那份参数；`None` = 还没发过。
+    ///
+    /// 存整份 `ScanInput` 而不是单存遮挡矩形：其中任何一项变化都要重发，
+    /// 分开记会出现"挡住了新值不生效"这种难查的偏差。
+    scan_sent: Option<ScanInput>,
 
     last_fs_check: Instant,
     fs_hidden: bool,
@@ -247,12 +270,12 @@ impl App {
         let paths = Paths::resolve()?;
         let dpi = display::system_dpi();
         let mut ini = Ini::load(&paths.ini)?;
-        // 上游格式就地升级：读一次就变成新格式，用户不需要知道有这回事。
+        // 旧格式就地升级：读一次就换成新格式，用户不需要知道。
         // 只在这一步写盘 —— 迁移失败也不影响本次运行（`from_ini` 两种格式都认）。
         if Config::upgrade_legacy(&mut ini, dpi) {
             match ini.save(&paths.ini) {
                 Ok(()) => eprintln!(
-                    "配置已从上游格式升级到 v{}（各设置保持不变）。",
+                    "配置已从旧格式升级到 v{}（各设置保持不变）。",
                     minidock_core::config::CONFIG_VERSION
                 ),
                 Err(e) => eprintln!("配置升级后保存失败（本次仍按新格式使用）：{e}"),
@@ -289,7 +312,7 @@ impl App {
 
         // 先按"没有预留区"的位置建窗：AppBar 的 `ABM_NEW` 需要 hwnd，
         // 而位置又要用到 AppBar 拿回来的矩形 —— 顺序上只能先建后挪。
-        // C 版也是这么做的（`UpdateGeometry` 里先建后 `SetWindowPos`）。
+        // 顺序不能反：先算尺寸再 SetWindowPos。
         let (mut x, mut y) = layout::window_origin(dock.cfg.edge, work, None, win_w, win_h);
         let hwnd = unsafe {
             CreateWindowExW(
@@ -309,7 +332,7 @@ impl App {
         };
 
         // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
-        // 留着那块空白反而更怪（C 版同样是 `cfg.reserve && cfg.mode == 0`）。
+        // 留着那块空白反而更怪，所以只在预留 + 常显时避让。
         let mut appbar = AppBar::new(hwnd);
         let reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
             appbar.apply(
@@ -381,7 +404,7 @@ impl App {
         // 先把所有图标排进队列：工作线程攒批处理，UI 线程立刻返回。
         request_missing_icons(&icons, &dock, &raw);
 
-        // 全局快捷键 `Ctrl+Alt+D`：强制收起 / 恢复。原版用 `cfg.hotkey` 开关。
+        // 全局快捷键 `Ctrl+Alt+D`：强制收起 / 恢复，由 `cfg.hotkey` 开关。
         // 注册失败（被别的程序占了）只警告，不影响启动。
         if dock.cfg.hotkey {
             let ok = unsafe {
@@ -425,13 +448,19 @@ impl App {
             last_launch_ms,
             tool_save_at,
             widgets_dump,
+            smoke: SmokeFx::new(),
+            accent: theme::accent().unwrap_or(PALETTE[0]),
+            look_epoch: 0,
+            next_smoke: Instant::now(),
             disk,
             opener,
             dirty_at: None,
             dirty_items: None,
             dirty_cfg: None,
             covered: false,
-            cover_target: None,
+            temps: Vec::new(),
+            temp_keys: Vec::new(),
+            scan_sent: None,
             last_fs_check: Instant::now(),
             fs_hidden: false,
             fake_mouse: fake_mouse_from_env(),
@@ -497,6 +526,8 @@ impl App {
             need_frame |= self.step_fullscreen();
             // ⑪ 自动隐藏 / 智能隐藏。
             need_frame |= self.step_auto_hide();
+            // ⑫ 环境烟雾：自己控制帧率（见 `step_smoke`）。
+            need_frame |= self.step_smoke();
 
             if need_frame || self.dock.anim {
                 self.render()?;
@@ -552,12 +583,21 @@ impl App {
     /// 据此补位移动画，而 `update` 自身就会要求出帧。
     fn step_reorder(&mut self) {
         let mut moved = false;
+        let mut dropped = false;
         while let Some((from, to)) = self.dock.take_pending_move() {
             if from < self.raw.len() && to < self.raw.len() {
                 let item = self.raw.remove(from);
                 self.raw.insert(to, item);
                 moved = true;
+            } else {
+                // 拖进了临时条目那一段（或从那儿拖出来）：配置里没有这一项，
+                // 只能丢弃。丢弃之后栏体上已经是"拖过"的顺序，必须按配置
+                // 重建一次，否则下一次点击会点到别的条目上。
+                dropped = true;
             }
+        }
+        if dropped {
+            self.sync_items();
         }
         if moved || self.dock.take_order_changed() {
             self.touch_items();
@@ -577,14 +617,13 @@ impl App {
             );
         }
         // 图标数与配置不一致时不要静默吞掉，这类错配要能看见。
-        let Some(item) = self.raw.get(i) else {
+        let Some(item) = self.item_at(i) else {
             eprintln!("点击了第 {i} 项，但配置里没有对应条目");
             return;
         };
 
         // `force`（Shift+点击 / 中键）= 不管有没有在跑，都新起一个。
-        // 原版 `LaunchItem(i, force)` 的同一个开关：开了 force 就连
-        // "激活已有窗口"都跳过 —— 否则想开第二个实例永远开不出来。
+        // `force` 连"激活已有窗口"一起跳过，否则想开第二个实例永远开不出来。
         let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
         // 交给工作线程：`ShellExecuteW` 冷启动时几十毫秒起步，而
         // "激活已有窗口"要枚举一遍顶层窗口。两者都不该占着 UI 线程。
@@ -605,9 +644,13 @@ impl App {
             return Ok(false);
         };
         let hit = self.dock.hit_at(u, v);
-        let target = hit.and_then(|i| self.raw.get(i));
+        let target = hit.and_then(|i| self.item_at(i));
         let running = target.is_some_and(|it| it.running);
-        let Some(menu) = Menu::build(target, running) else {
+        // 临时条目（运行中但没固定）不给"从 Dock 移除""加分割线"这类结构性
+        // 命令：它们不是配置的一部分，删了下一轮扫描还会回来；更要紧的是
+        // 那两个命令按 `raw` 的下标改配置，拿临时条目的下标去打会改错条目。
+        let temp = hit.is_some_and(|i| i >= self.raw.len());
+        let Some(menu) = Menu::build(target, running, temp) else {
             return Ok(false);
         };
 
@@ -645,7 +688,7 @@ impl App {
             if trace::geom() {
                 eprintln!(
                     "[menu] 命中 hit={hit:?} name={:?} cmd={cmd:?}",
-                    hit.and_then(|i| self.raw.get(i)).map(|it| it.name.clone())
+                    hit.and_then(|i| self.item_at(i)).map(|it| it.name.clone())
                 );
             }
             if cmd == MenuCmd::Launchpad {
@@ -759,7 +802,7 @@ impl App {
         match cmd {
             // 与左键点击同一条路径：已运行则激活，否则启动。
             MenuCmd::Open => {
-                let Some(item) = hit.and_then(|i| self.raw.get(i)) else {
+                let Some(item) = hit.and_then(|i| self.item_at(i)) else {
                     return;
                 };
                 let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
@@ -771,7 +814,7 @@ impl App {
                 self.last_launch_ms = Some(self.now_ms());
             }
             MenuCmd::OpenInExplorer => {
-                if let Some(item) = hit.and_then(|i| self.raw.get(i)) {
+                if let Some(item) = hit.and_then(|i| self.item_at(i)) {
                     if let Err(e) = launch::open_folder(&item.path) {
                         eprintln!("打开文件夹「{}」失败：{e}", item.name);
                     }
@@ -779,7 +822,7 @@ impl App {
             }
             MenuCmd::QuitApp => {
                 if let Some(exe) = hit
-                    .and_then(|i| self.raw.get(i))
+                    .and_then(|i| self.item_at(i))
                     .and_then(running::running_key)
                 {
                     if !app_window::close_app(&exe) {
@@ -830,10 +873,98 @@ impl App {
     /// 写盘走防抖，这里只标记脏 —— 失败不回滚内存里的改动：宁可
     /// "这次生效但没保存"，也不要"点了没反应"。
     fn apply_item_change(&mut self) {
-        let items: Vec<DockItem> = self.raw.iter().map(DockItem::from_item).collect();
-        self.dock.replace_items(items);
+        self.sync_items();
         request_missing_icons(&self.icons, &self.dock, &self.raw);
         self.touch_items();
+    }
+
+    /// 栏体上的第 `i` 个条目。
+    ///
+    /// 前 `raw.len()` 个是配置里的固定条目，之后是临时条目（运行中但没固定
+    /// 的应用）。所有"按下标取条目"的地方都必须走这里 —— 直接用
+    /// `raw.get(i)` 会在有临时条目时取到错的（或者一个都取不到）。
+    fn item_at(&self, i: usize) -> Option<&Item> {
+        self.raw
+            .get(i)
+            .or_else(|| self.temps.get(i.checked_sub(self.raw.len())?))
+    }
+
+    /// 把"固定条目 + 临时条目"重新拼成栏体列表。
+    ///
+    /// `replace_items` 会清掉 hover / 拖拽状态并置 `anim`，所以只在列表
+    /// 真的变了时调用 —— 每 1.2 秒重建一次的话，悬停会一直被打断。
+    fn sync_items(&mut self) {
+        let all: Vec<DockItem> = self
+            .raw
+            .iter()
+            .chain(self.temps.iter())
+            .map(DockItem::from_item)
+            .collect();
+        self.dock.replace_items(all);
+        self.request_temp_icons();
+    }
+
+    /// 为临时条目取图标。它们的下标从 `raw.len()` 开始。
+    fn request_temp_icons(&self) {
+        for (k, t) in self.temps.iter().enumerate() {
+            let i = self.raw.len() + k;
+            if self.dock.has_icon(i) {
+                continue;
+            }
+            self.icons.submit(IconRequest {
+                index: i,
+                kind: t.kind,
+                path: t.path.clone(),
+                fit: t.fit,
+            });
+        }
+    }
+
+    /// 同步"未固定的运行中应用"。
+    ///
+    /// 返回列表是否变了。三条规则：
+    ///
+    /// 1. **只追加不重排**：已有的临时条目保持原位。`EnumWindows` 给的是
+    ///    Z 序（最近用过的在前），每轮都按它重排会让图标互相穿插、还要重传
+    ///    图标纹理。
+    /// 2. 已经固定在 Dock 上的应用不重复出现（按 `running_key` 比）。
+    /// 3. 上限 [`MAX_TEMP`]：栏体会按条目数等比缩小，几十个临时图标会把
+    ///    整条 Dock 压成一条细线。
+    fn sync_temps(&mut self, running: &std::collections::HashSet<String>) -> bool {
+        let want = if self.dock.cfg.get_i32(Key::ShowRunning) != 0 {
+            // 固定条目占用的 exe。临时条目要排除它们，否则同一个应用出现两次。
+            let pinned: std::collections::HashSet<String> =
+                self.raw.iter().filter_map(running::running_key).collect();
+            running::temp_keys(running, &pinned, &self.temp_keys, MAX_TEMP, self.self_exe())
+        } else {
+            // 关掉开关时把已有的一次性清空。
+            Vec::new()
+        };
+        if want == self.temp_keys {
+            return false;
+        }
+        self.temps = want
+            .iter()
+            .map(|exe| {
+                let mut it = Item::new(ItemKind::File, temp_name(exe), exe.clone());
+                // 临时条目按定义就是"在运行"，指示点要亮。
+                it.running = true;
+                it
+            })
+            .collect();
+        self.temp_keys = want;
+        self.sync_items();
+        true
+    }
+
+    /// Dock 自己的 exe 路径（小写）。临时条目要跳过它。
+    fn self_exe(&self) -> &'static str {
+        static SELF_EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        SELF_EXE.get_or_init(|| {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        })
     }
 
     /// 标记 `[Items]` 段需要写回。
@@ -943,6 +1074,9 @@ impl App {
         let mut need_frame = false;
         for out in self.scanner.drain() {
             if let Some(running) = out.running {
+                if self.sync_temps(&running) {
+                    need_frame = true;
+                }
                 if running::refresh_running(&mut self.raw, &running) {
                     // `Dock` 与 `raw` 是两份列表，指示点画在前者上。
                     for (slot, item) in self.dock.items.iter_mut().zip(self.raw.iter()) {
@@ -966,7 +1100,7 @@ impl App {
     /// `GlobalMemoryStatusEx` 都不是便宜调用，而 CPU 占用率本身
     /// 也只有秒级意义。
     ///
-    /// 上游是"每次重绘才重新采样"，但它的重绘频率本来就低；
+    /// 每次重绘都重新采样，采样频率本来就低；
     /// 我们这边空闲时几乎不出帧，所以改成定时更合适。
     fn step_sysinfo(&mut self) -> bool {
         // 条带里没有资源监视器就不用采样。
@@ -1237,14 +1371,19 @@ impl App {
             return;
         }
         // 注入了假结果就不用再算。
-        let want = if self.dock.mode == DockMode::SmartHide && self.fake_covered.is_none() {
+        let cover = if self.dock.mode == DockMode::SmartHide && self.fake_covered.is_none() {
             Some(self.bar_screen_rect())
         } else {
             None
         };
-        if want != self.cover_target {
-            self.cover_target = want;
-            self.scanner.update(ScanInput { cover: want });
+        // 指示点与"正在运行"气泡都关掉时不必扫运行状态（见 `ScanInput`）。
+        let want = ScanInput {
+            cover,
+            want_running: self.dock.cfg.scan_enabled(),
+        };
+        if Some(want) != self.scan_sent {
+            self.scan_sent = Some(want);
+            self.scanner.update(want);
         }
     }
 
@@ -1253,7 +1392,7 @@ impl App {
         let left = self.dock.geom.bar_l.round() as i32;
         let top = self.dock.geom.bar_top.round() as i32;
         let right = (self.dock.geom.bar_l + self.dock.geom.bar_w).round() as i32;
-        // 与原版一致：算到 `barH + margin`，把下方的留白也算进去。
+        // 算到 `barH + margin`，把下方的留白也算进去。
         let bottom = (self.dock.geom.bar_bottom + self.dock.metrics.margin).round() as i32;
         LRect::new(
             self.pos.0 + left,
@@ -1396,22 +1535,59 @@ impl App {
         // 画成另一套配色，而且看起来"只是颜色不对"，很难察觉是取值取错了。
         let dark = self.dock.cfg.dock_is_dark(theme::is_dark());
         // 文字由 `core::clock` 生成：日期格式、周几、行数、顺序都在那里，
-        // 与 C 版 `ClockLines()` 一一对应（曾经在 bin 里手拼，少了年份）。
+        // 日期格式、周几、行数、顺序都在那里（曾经在 bin 里手拼，少了年份）。
         let clock: Option<Vec<ClockLine>> = if self.dock.cfg.clock {
             Some(clock::clock_lines(&self.dock.cfg, &now_parts()))
         } else {
             None
         };
+        // 系统外观变过就重读强调色（烟雾的 `accent` 色档要用）。
+        if self.dock.look_epoch != self.look_epoch {
+            self.look_epoch = self.dock.look_epoch;
+            self.accent = theme::accent().unwrap_or(PALETTE[0]);
+        }
 
         let ppp = self.ppp;
         let dock = &*self.dock;
+        // 烟雾的输入全部在闭包外取好：闭包里同时持有 `&Dock` 与
+        // `&mut SmokeFx`，再读 `self` 的其它字段就会撞借用。
+        let tune = Tuning::from_config(&dock.cfg, self.accent);
+        let view = SmokeView {
+            bar: dock.bar_phys(),
+            offset: dock.hide_offset(),
+            cursor: dock.hover.then_some(dock.mouse),
+            now_s: self.start.elapsed().as_secs_f64(),
+        };
+        let smoke = &mut self.smoke;
         let raw = raw_input(self.frame.size(), ppp, self.start);
         self.frame
             .render(&self.gpu, raw, self.hwnd, self.pos, |ui| {
+                // 烟必须先画：它是**背景**光晕，栏体要盖在它上面
+                // （画在上面会把图标染紫）。
+                smoke.paint(ui, ppp, &tune, view);
                 dock.paint(ui, ppp, dark, clock.as_deref());
             })?;
         self.dump_widgets();
         Ok(())
+    }
+
+    /// 烟雾是否需要本帧出图。返回 `true` 时顺带把下一帧的时刻推后。
+    ///
+    /// 三重闸门：开关关掉、看不见（全屏 / 已收起）、还没到下一帧的时刻。
+    /// 最后一关是**故意的限速**：每次出帧都要把整块画面从 GPU 读回 CPU
+    /// （`FrameRenderer` 的同步回读），30 fps 已经看不出烟的停顿，
+    /// 60 fps 只是把回读次数翻倍。
+    fn step_smoke(&mut self) -> bool {
+        let tune = Tuning::from_config(&self.dock.cfg, self.accent);
+        if !tune.enabled || self.fs_hidden || self.dock.hide_cur > 0.999 {
+            return false;
+        }
+        let now = Instant::now();
+        if now < self.next_smoke {
+            return false;
+        }
+        self.next_smoke = now + SMOKE_FRAME;
+        true
     }
 
     /// 按当前停靠边 / 预留区 / 尺寸重算窗口位置并移动。
@@ -1437,18 +1613,28 @@ impl App {
     }
 
     /// 等下一个事件。有消息就醒；动画中按 16 ms 醒一次；自动隐藏 / 强制
-    /// 收起开着时按 100 ms 轮询光标。
+    /// 收起开着时按 100 ms 轮询光标；开着烟雾时按到点叫醒。
     ///
     /// 后台线程的结果**不用轮询**：它们各自 `PostMessage(WM_APP_WAKE)`
     /// 打断这次等待，所以这里可以真的睡到 `FS_CHECK_MS`（全屏检测周期）。
     fn wait(&self) {
-        let timeout = if self.dock.anim {
+        let mut timeout = if self.dock.anim {
             16
         } else if self.dock.needs_hide_tick() {
             100
         } else {
             FS_CHECK_MS
         };
+        // 烟雾按自己的节奏睡：睡满 16 ms 再发现"还差 17 ms"是每秒白醒
+        // 30 次，而每次醒来都要过一遍消息队列与全部 step。
+        if Tuning::from_config(&self.dock.cfg, self.accent).enabled && !self.fs_hidden {
+            let left = self
+                .next_smoke
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(u128::from(u32::MAX)) as u32;
+            timeout = timeout.min(left.max(1));
+        }
         unsafe {
             MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
@@ -1500,8 +1686,7 @@ fn fake_covered_from_env() -> Option<bool> {
     }
 }
 
-/// `MINIDOCK_GEOM=1` 时打印度量与槽位，用于与 C 版逐项对拍
-/// （验收 ≤1 px 时靠它定位）。
+/// `MINIDOCK_GEOM=1` 时打印度量与槽位，用于定位几何偏差（验收线 ≤1 px）。
 fn dump_geometry(dock: &Dock, dpi: i32) {
     if !trace::geom() {
         return;
@@ -1645,8 +1830,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let (u, v) = physical_xy(lparam);
             let ptr = dock_ptr(hwnd);
             if !ptr.is_null() {
-                // 原版在命中时 `SetCapture`：把后续消息都收到自己这里，
-                // 鼠标移出窗口也不会丢抬起事件（否则 Dock 会"卡住"）。
+                // 命中时 `SetCapture`：把后续消息都收到自己这里，鼠标移出
+                // 窗口也不会丢抬起事件（否则 Dock 会"卡住"）。
                 // Shift 必须在**按下**时读：抬起那一刻用户可能已经松开，
                 // 而 Shift+点击的语义是"我要开第二个实例"，读晚了就丢。
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
@@ -1663,19 +1848,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let ptr = dock_ptr(hwnd);
             if !ptr.is_null() {
                 unsafe {
-                    if GetCapture() == hwnd {
-                        let _ = ReleaseCapture();
-                    }
+                    // **先结算点击，再释放捕获。** 顺序反了会把每一次点击都
+                    // 吞掉：`ReleaseCapture()` 会**同步**送一条
+                    // `WM_CAPTURECHANGED` 给本窗口（见下面那条分支），而那条
+                    // 分支会 `cancel_drag()` 清掉 `press` —— 等轮到
+                    // `release_at()` 时"按在哪个图标上"已经没人记得了。
+                    // 这个 bug 从 M1 就存在，表现为"点图标没有任何反应"。
                     // 小组件卡片在栏体外侧，不在条目槽位里 ——
                     // 先判它，命中就记卡片点击，不当条目点击。
                     if let Some(kind) = (*ptr).widget_at(u, v) {
                         (*ptr).click_widget(kind);
-                        (*ptr).mark_dirty();
                     } else {
                         // 只记录"点了哪个"，真正的启动放在主循环里做：
                         // `ShellExecuteW` 可能阻塞几十毫秒，不该占着窗口过程。
                         let _ = (*ptr).release_at(u, v);
-                        (*ptr).mark_dirty();
+                    }
+                    (*ptr).mark_dirty();
+                    // 结算完再交还捕获（此时 `WM_CAPTURECHANGED` 已经没有
+                    // 状态可清了）。
+                    if GetCapture() == hwnd {
+                        let _ = ReleaseCapture();
                     }
                 }
             }
@@ -1683,7 +1875,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         // **不要抢焦点**。Dock 是常驻工具窗，点图标时如果把焦点从用户
         // 正在用的窗口抢走，接着启动的应用反而拿不到预期的前台位置，
-        // 观感是"点一下整个桌面闪一下"。原版同样返回 MA_NOACTIVATE。
+        // 观感是"点一下整个桌面闪一下"。
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         // 鼠标捕获被抢走（UAC 弹窗、Alt+Tab、别的程序 SetCapture）：
         // 抬起事件永远不会到，必须主动取消拖拽，否则下次点击会带着
@@ -1697,7 +1889,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        // 中键 = 强制新实例（原版 `LaunchItem(hi, TRUE)`）。
+        // 中键 = 强制新实例。
         WM_MBUTTONUP => {
             let (u, v) = physical_xy(lparam);
             let ptr = dock_ptr(hwnd);
@@ -1727,6 +1919,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 unsafe {
                     (*ptr).mark_dirty();
                     (*ptr).anim = true;
+                    // 强调色 / 深浅色都在 `App` 里，窗口过程够不着 ——
+                    // 用计数把"该重读了"这件事传上去。
+                    (*ptr).look_epoch = (*ptr).look_epoch.wrapping_add(1);
                 }
             }
             LRESULT(0)
@@ -1763,6 +1958,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// 1 秒对用户感知足够快，同时把空闲唤醒压到每秒一次。
 const FS_CHECK_MS: u32 = 1000;
 
+/// 临时条目（未固定的运行中应用）最多显示几个。
+///
+/// 条目多时栏体会整体等比缩小（下限 25%），几十个临时图标会把 Dock 压成
+/// 一条细线。16 已经覆盖"浏览器 + 编辑器 + 聊天 + 几个工具"的常见桌面。
+const MAX_TEMP: usize = 16;
+
+/// 给临时条目起名：优先 shell 的显示名（"Google Chrome"），退回文件名。
+fn temp_name(exe: &str) -> String {
+    if let Some(n) = minidock_platform::icon::display_name(exe) {
+        if !n.is_empty() {
+            return n;
+        }
+    }
+    std::path::Path::new(exe)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(exe)
+        .to_owned()
+}
+
+/// 烟雾的出帧间隔。30 fps。
+///
+/// 不只是省 CPU：`FrameRenderer` 每帧都要把整块画面从 GPU 同步读回
+/// （分层窗口只能经 `UpdateLayeredWindow` 提交），60 fps 下这条回读是
+/// 几百 KB × 每秒 60 次。烟这种"本来就很慢"的效果用 30 fps 完全看不出
+/// 停顿 —— 模拟本身也只有每秒 60 步、每步 5 px 一格。
+const SMOKE_FRAME: Duration = Duration::from_millis(33);
+
 /// 设置面板改动到写盘的防抖窗口（毫秒）。
 ///
 /// 拖一下滑块会产生几十次 `changed`；ini 是 UTF-16 全量回写，逐次写盘
@@ -1777,16 +2000,16 @@ const TOOL_SAVE_DEBOUNCE_MS: u64 = 120;
 
 /// 给每个条目装图标。
 ///
-/// 来源顺序照抄原版 `LoadItemIcon()` 的主干，但只覆盖"能拿到的"几条：
+/// 只覆盖能拿到图标的几类：
 ///
 /// | 条目 | 做法 |
 /// |---|---|
 /// | 分割线 | 不装（画竖线） |
 /// | 有 `icon_src` 且文件存在 | **暂不支持** —— 需要 PNG/JPEG 解码器 |
-/// | 网址 | **暂不支持** —— 原版要联网抓 favicon |
+/// | 网址 | **暂不支持**（要联网抓 favicon）|
 /// | 其余（文件 / 文件夹 / 快捷方式 / 回收站） | 交给 shell 图像列表 |
 ///
-/// 后两条目前退化为首字占位（原版也是这个兜底，只是颜色算法不同）。
+/// 后两条退化为首字占位。
 fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
     for (i, item) in raw.iter().enumerate() {
         // 分割线不画图标；已经有图标的跳过 —— `replace_items` 会按路径把
@@ -1803,7 +2026,7 @@ fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
     }
 }
 
-/// 光标是否算"靠近 Dock"。对应原版 `OnAutoHide()` 里的两套判断。
+/// 光标是否算"靠近 Dock"。
 ///
 /// - **已收起时**只认屏幕边缘的那条窄带：此时 Dock 是看不见的，
 ///   若按"靠近栏体"判断，光标永远够不着它，就再也弹不出来了。
@@ -2010,7 +2233,7 @@ type MenuSlot = Option<(HWND, FrameRenderer)>;
 
 /// 弹出菜单并阻塞到用户选择或取消。返回被选中的命令。
 ///
-/// **模态**：期间不处理 Dock 的其他输入（上游 `ShowMenu` 同样是模态的）。
+/// **模态**：期间不处理 Dock 的其他输入。
 /// 用 `SetCapture` 而不是激活窗口来实现"点外面关闭" —— 菜单不抢焦点，
 /// 关闭后用户原来在用的窗口仍是前台。
 #[allow(clippy::too_many_arguments)]

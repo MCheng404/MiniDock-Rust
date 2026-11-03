@@ -1,7 +1,7 @@
 //! 生成 `CONFIG.md` 里的 `[Settings]` 键表。
 //!
 //! 为什么要用代码生成：这张表有 76 行，手写必然和实现漂移。
-//! 上游每加一个键，这里重新跑一次就能拿到最新的表。
+//! 每加一个键，这里重新跑一次就能拿到最新的表。
 //!
 //! 用法：
 //!
@@ -9,11 +9,11 @@
 //! cargo run -q -p minidock-core --example config_table > /tmp/table.md
 //! ```
 //!
-//! 说明文字（`含义` 列）来自上游设置界面的行标题 —— 那是权威的语义来源。
+//! 说明文字（`含义` 列）来自设置界面的行标题 —— 那是权威的语义来源。
 
 use minidock_core::config::{Config, Key};
 
-/// 每个键的含义。文字取自上游设置行的标题。
+/// 每个键的含义。文字取自设置行的标题。
 fn describe(key: Key) -> &'static str {
     match key {
         Key::IconSize => "图标边长（px，随 DPI 存物理像素）",
@@ -52,7 +52,7 @@ fn describe(key: Key) -> &'static str {
         Key::Notes => "速记工具",
         Key::UiTheme => "**设置窗口**主题：0 浅 / 1 深 / 2 跟随",
 
-        // ---- 上游 v1.4.0 新增 ----
+        // ---- v1.4.0 新增 ----
         Key::PLATE_MODE => "底盘类型：0 无 / 1 纯色 / 2 半透明",
         Key::PLATE_THEME => "底盘配色：0 浅 / 1 深 / 2 跟随 Dock 主题",
         Key::PLATE_OPACITY => "底盘不透明度（%）",

@@ -18,7 +18,7 @@ pub fn from_wide(buf: &[u16]) -> String {
 
 /// 系统 DPI（主显示器）。
 ///
-/// 原版用 `GetDeviceCaps(LOGPIXELSX)`，即**系统 DPI**而不是 per-monitor DPI。
+/// 用 `GetDeviceCaps(LOGPIXELSX)`，即**系统 DPI**而不是 per-monitor DPI。
 /// 这里保持一致：整个程序只按一个 DPI 缩放，进程也不声明 DPI 感知，
 /// 由系统统一做位图拉伸。改成 per-monitor v2 是独立议题（见 PORTING.md）。
 #[must_use]

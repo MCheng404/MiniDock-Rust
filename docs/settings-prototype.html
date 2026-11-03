@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniDock · 设置界面雏形</title>
+<style>
+/* ------------------------------------------------------------------
+   MiniDock 设置窗口 · 布局雏形
+
+   设计方向（2026-11 改版）：
+   · 轻柔 —— 低对比表面、柔和投影、半透明侧栏，没有硬边框；
+   · 圆角 —— 窗口 22 / 卡片 18 / 控件 10~12，全部连续曲率；
+   · 动态间距 —— 行高与留白用 clamp() 跟着窗口高度走，悬停时行内缩进
+     轻微外扩（不是变色块，是"呼吸"）；
+   · 无直线 —— 一条分割线都没有：分区靠留白与色调差，不靠 border。
+
+   高度固定 720（= `settings_win::LOGICAL_SIZE` 的纵向）；
+   **宽度不写死** —— 由导航栏最宽标签 + 2 个空标签 + 内容区算出来，
+   见文件末尾的 `fitWindow()`。
+   ------------------------------------------------------------------ */
+:root {
+  --bg-1:      #f3f5fa;
+  --bg-2:      #e8ecf5;
+  --sheen:     rgba(255,255,255,.55);
+  --surface:   rgba(255,255,255,.72);
+  --card:      #ffffff;
+  --menu:      #ffffff;
+  --hover:     rgba(23,26,35,.045);
+  --field:     rgba(23,26,35,.055);
+  --field-2:   rgba(23,26,35,.09);
+  --text:      #1b1d21;
+  --muted:     #667085;
+  --faint:     #9aa1ac;
+  --accent:    #3b7ddd;
+  --accent-2:  rgba(59,125,221,.13);
+  --warn:      #b8791a;
+  --warn-2:    rgba(184,121,26,.13);
+  --danger:    #c0392b;
+  --danger-2:  rgba(192,57,43,.10);
+
+  /* 窗口与侧栏的宽度：写死，不随导航标签变化 */
+  --nav-w:     193px;
+  --win-w:     893px;
+
+  --r-window:  22px;
+  --r-card:    18px;
+  --r-ctl:     11px;
+  --r-pill:    999px;
+
+  /* 动态间距：跟着视口走，窗口放大时呼吸感跟着变大 */
+  --pad-x:     clamp(18px, 2.3vw, 28px);
+  --pad-card:  clamp(14px, 1.9vh, 18px);
+  --row-y:     clamp(7px, 1vh, 11px);
+  --gap-card:  clamp(12px, 1.7vh, 18px);
+
+  --shadow-card: 0 1px 1px rgba(23,26,35,.03), 0 18px 40px -26px rgba(23,26,35,.38);
+  --shadow-window: 0 1px 1px rgba(23,26,35,.05), 0 36px 90px -34px rgba(23,26,35,.45);
+  --shadow-ctl: 0 1px 2px rgba(23,26,35,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-1:      #191a1f;
+    --bg-2:      #101115;
+    --sheen:     rgba(255,255,255,.05);
+    --surface:   rgba(255,255,255,.045);
+    --card:      #1d1e24;
+    --menu:      #26272f;
+    --hover:     rgba(255,255,255,.055);
+    --field:     rgba(255,255,255,.07);
+    --field-2:   rgba(255,255,255,.12);
+    --text:      #e9eaee;
+    --muted:     #a3a9b4;
+    --faint:     #767d89;
+    --accent:    #7fb0ff;
+    --accent-2:  rgba(127,176,255,.16);
+    --warn:      #e0aa54;
+    --warn-2:    rgba(224,170,84,.14);
+    --danger:    #ef8b82;
+    --danger-2:  rgba(239,139,130,.14);
+    --shadow-card: 0 1px 1px rgba(0,0,0,.35), 0 20px 44px -26px rgba(0,0,0,.85);
+    --shadow-window: 0 1px 1px rgba(0,0,0,.5), 0 40px 100px -40px rgba(0,0,0,.9);
+    --shadow-ctl: 0 1px 2px rgba(0,0,0,.35);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg-2);
+  color: var(--text);
+  font: 13px/1.5 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================ 窗口外壳 ============================ */
+.window {
+  position: relative;
+  /* 宽度由导航栏标签算出来（见文件末尾 `fitWindow()`）：
+     最宽标签 + 2 个空标签的宽度，再加右侧内容区。 */
+  width: var(--win-w);
+  height: 720px;
+  margin: 24px auto;
+  border-radius: var(--r-window);
+  background: linear-gradient(180deg, var(--bg-1), var(--bg-2));
+  box-shadow: var(--shadow-window);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* 顶部一层极淡的光，让"轻柔"落在第一眼而不是只靠颜色 */
+.window::before {
+  content: "";
+  position: absolute; inset: 0 0 auto 0; height: 170px;
+  background: radial-gradient(120% 100% at 50% 0%, var(--sheen), transparent 70%);
+  pointer-events: none;
+}
+
+/* ============================ 顶栏 ============================ */
+/* 三栏网格：左右各 1fr 兜住，中间的搜索才是**真的**居中，
+   不会因为左边品牌文字变长而偏。 */
+.titlebar {
+  position: relative;
+  height: 62px;
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+}
+.brand { justify-self: start; }
+.titlebar h1 {
+  margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.2px;
+}
+
+/* 搜索：无边框，靠底色与焦点光晕区分状态 */
+.search {
+  position: relative;
+  justify-self: center;
+  width: clamp(180px, calc(var(--win-w) * 0.36), 320px);
+  will-change: transform;
+  transition: transform .2s cubic-bezier(.22,1,.36,1);
+}
+.search svg {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; stroke: var(--faint); fill: none;
+  stroke-width: 1.8; stroke-linecap: round; pointer-events: none;
+  transition: stroke .18s;
+}
+.search input {
+  width: 100%; height: 34px;
+  padding: 0 62px 0 34px;
+  border: 0; outline: 0;
+  border-radius: var(--r-pill);
+  background: var(--field);
+  color: var(--text);
+  font: inherit; font-size: 12.5px;
+  transition: background .18s ease, box-shadow .22s ease;
+}
+.search input::placeholder { color: var(--faint); }
+.search input:hover { background: var(--field-2); }
+.search input:focus {
+  background: var(--card);
+  box-shadow: 0 0 0 3px var(--accent-2), var(--shadow-ctl);
+}
+.search:focus-within svg { stroke: var(--accent); }
+.search kbd {
+  position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  font: inherit; font-size: 10.5px; letter-spacing: .3px;
+  color: var(--faint); background: var(--field-2);
+  padding: 2px 6px; border-radius: 6px;
+  pointer-events: none;
+}
+
+
+/* ============================ 主体 ============================ */
+.body {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  padding: 0 10px 10px;
+  gap: 8px;
+}
+
+/* ---------------------------- 侧边导航 ---------------------------- */
+/* 宽度自适应：不写死 px，跟着最长标签走；只有下限兜住空状态 */
+.sidebar {
+  flex: 0 0 auto;
+  width: var(--nav-w);
+  /* 左右各留 12：胶囊不贴面板边，视觉上才"松" */
+  padding: 10px 12px;
+  border-radius: 18px;
+  background: var(--surface);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.sidebar::-webkit-scrollbar { width: 0; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  /* 40 px 高：比原来的 34 更"长"，一行一行读起来不挤 */
+  padding: 10px 12px;
+  margin-bottom: 3px;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  will-change: transform;
+  transition: background .16s ease, color .16s ease, transform .2s cubic-bezier(.22,1,.36,1);
+}
+.nav-item:hover { background: var(--hover); color: var(--text); }
+.nav-item.active {
+  background: var(--accent-2);
+  color: var(--accent);
+  font-weight: 600;
+}
+.nav-item svg {
+  width: 16px; height: 16px; flex: 0 0 16px;
+  stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+  opacity: .9;
+}
+
+/* ---------------------------- 内容区 ---------------------------- */
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: 2px var(--pad-x) 10px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--field-2) transparent;
+}
+.content::-webkit-scrollbar { width: 10px; }
+.content::-webkit-scrollbar-thumb {
+  background: var(--field-2); border-radius: 10px;
+  border: 3px solid transparent; background-clip: padding-box;
+}
+.content::-webkit-scrollbar-track { background: transparent; }
+
+.page { display: none; animation: rise .22s ease both; }
+.page.active { display: block; }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.page-head { margin: 2px 0 clamp(12px, 1.6vh, 18px); }
+.page-head h2 {
+  margin: 0 0 4px; font-size: 19px; font-weight: 600; letter-spacing: -.1px;
+}
+.page-head p { margin: 0; color: var(--muted); font-size: 12px; }
+
+/* ---------------------------- 卡片 ---------------------------- */
+/* 无边框：靠底色与柔和投影浮起来 */
+.card {
+  background: var(--card);
+  border-radius: var(--r-card);
+  padding: var(--pad-card) 8px calc(var(--pad-card) - 4px);
+  margin-bottom: var(--gap-card);
+  box-shadow: var(--shadow-card);
+  will-change: transform;
+  transition: box-shadow .24s ease, transform .22s cubic-bezier(.22,1,.36,1);
+}
+.card:hover {
+  box-shadow: 0 1px 1px rgba(23,26,35,.04), 0 24px 50px -26px rgba(23,26,35,.45);
+}
+
+.card-head { padding: 0 8px 6px; }
+.card-head h3 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .1px; }
+/* 卡片标题下的说明：块级，否则会接在标题后面变成一句长话。 */
+.card-head h3 .desc {
+  display: block; margin-top: 4px;
+  font-weight: 400; font-size: 11.8px; line-height: 1.55;
+  color: var(--muted); max-width: 62ch;
+}
+.card-head p { margin: 4px 0 0; color: var(--muted); font-size: 11.8px; }
+.card-body { padding: 0; }
+
+/* ---------------------------- 行 ---------------------------- */
+/* 没有 border-top：行与行只靠留白分开，悬停时浮出一层圆角底 */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: var(--row-y) 8px;
+  border-radius: 12px;
+  min-height: 38px;
+  transition: background .18s ease;
+}
+.row:hover { background: var(--hover); }
+.row .label { flex: 1; min-width: 0; }
+.row .label .desc {
+  display: block; color: var(--faint); font-size: 11.5px;
+  margin-top: 2px; line-height: 1.45;
+}
+.row .ctl { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+
+/* 开关 */
+.switch {
+  position: relative; width: 40px; height: 22px; border-radius: var(--r-pill);
+  background: var(--field-2); border: 0; cursor: pointer;
+  transition: background .2s ease;
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(23,26,35,.28);
+  transition: transform .2s cubic-bezier(.34,1.4,.64,1);
+}
+.switch.on { background: var(--accent); }
+.switch.on::after { transform: translateX(18px); }
+
+/* 下拉：原生 select 被 JS 换成自绘浮层（见文件末尾），这里只留隐藏规则。
+   原生控件在浅色底上会带系统描边与箭头，跟"无直线 / 轻柔"的语言冲突。 */
+.select { display: none; }
+
+.dd { position: relative; display: inline-flex; }
+
+.dd-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-width: 158px; height: 32px;
+  padding: 0 10px 0 12px;
+  border: 0; border-radius: 12px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit; font-size: 12.5px;
+  cursor: pointer;
+  transition: background .18s ease, box-shadow .2s ease;
+}
+.dd-btn:hover { background: var(--field-2); }
+.dd-btn .txt {
+  flex: 1; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dd-btn svg {
+  width: 12px; height: 12px; flex: 0 0 12px;
+  stroke: var(--faint); fill: none;
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
+  transition: transform .22s cubic-bezier(.22,1,.36,1), stroke .18s ease;
+}
+.dd.open .dd-btn {
+  background: var(--card);
+  box-shadow: 0 0 0 3px var(--accent-2), var(--shadow-ctl);
+}
+.dd.open .dd-btn svg { transform: rotate(180deg); stroke: var(--accent); }
+
+/* 浮层挂在 body 上（避免被滚动容器裁切，也不受卡片磁吸位移影响） */
+.dd-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 158px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 14px;
+  background: var(--menu);
+  box-shadow: 0 1px 2px rgba(23,26,35,.06), 0 26px 50px -22px rgba(23,26,35,.5);
+  /* 关闭时直接 display:none，不靠 opacity:0 藏 ——
+     用 opacity 做过渡时动画跑在合成线程上，截图/低帧率下会拍到半透明，
+     浮层看起来"能看穿"。这里只动 transform，任何时刻都是不透明的。 */
+  display: none;
+  transform-origin: top right;
+}
+.dd-menu.open {
+  display: block;
+  animation: dd-in .16s cubic-bezier(.22,1,.36,1) both;
+}
+@keyframes dd-in {
+  from { transform: translateY(-5px) scale(.97); }
+  to   { transform: none; }
+}
+
+.dd-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0; border-radius: 9px;
+  background: transparent; color: var(--text);
+  font: inherit; font-size: 12.5px;
+  text-align: left; white-space: nowrap;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.dd-item:hover { background: var(--hover); }
+.dd-item[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+.dd-item .tick {
+  width: 12px; height: 12px; flex: 0 0 12px; margin-left: auto;
+  stroke: currentColor; fill: none; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  opacity: 0; transition: opacity .14s ease;
+}
+.dd-item[aria-selected="true"] .tick { opacity: 1; }
+
+/* 说明气泡：行的描述不占版面，收进标题后的圆形提示里 */
+.hint {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-left: 6px;
+  border-radius: 50%;
+  background: var(--field);
+  color: var(--faint);
+  font-size: 10px; font-weight: 700; line-height: 1;
+  cursor: help;
+  user-select: none;
+  vertical-align: 1px;
+  transition: background .16s ease, color .16s ease;
+}
+.hint:hover { background: var(--accent-2); color: var(--accent); }
+
+.tip {
+  position: fixed; z-index: 70;
+  max-width: 240px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--menu);
+  color: var(--muted);
+  font-size: 11.5px; line-height: 1.6;
+  box-shadow: 0 1px 2px rgba(23,26,35,.06), 0 22px 44px -20px rgba(23,26,35,.5);
+  display: none;
+  transform-origin: top left;
+}
+.tip.open {
+  display: block;
+  animation: dd-in .16s cubic-bezier(.22,1,.36,1) both;
+}
+
+/* 滑杆 */
+.slider { display: flex; align-items: center; gap: 10px; }
+.slider input[type=range] { width: 140px; accent-color: var(--accent); cursor: pointer; }
+.slider .val {
+  min-width: 48px; text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted); font-size: 12px;
+}
+
+/* 色块 */
+.swatch {
+  width: 28px; height: 28px; border-radius: 9px;
+  box-shadow: 0 2px 8px -2px rgba(23,26,35,.35);
+  cursor: pointer;
+}
+
+/* 按钮 */
+.btn {
+  height: 30px; padding: 0 13px;
+  border: 0; border-radius: var(--r-ctl);
+  background: var(--field);
+  color: var(--text);
+  font: inherit; font-size: 12.5px;
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease, transform .12s ease;
+}
+.btn:hover { background: var(--field-2); }
+.btn:active { transform: scale(.97); }
+.btn.primary {
+  background: var(--accent); color: #fff;
+  box-shadow: 0 6px 16px -8px var(--accent);
+}
+.btn.primary:hover { filter: brightness(1.05); }
+.btn.danger { color: var(--danger); background: var(--danger-2); }
+.btn + .btn { margin-left: 8px; }
+
+/* 路径 */
+.path {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px; color: var(--muted);
+  background: var(--field);
+  padding: 3px 8px; border-radius: 8px;
+}
+
+/* 统计块 */
+.stat {
+  display: flex; gap: 24px; padding: 2px 8px 4px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px; color: var(--muted);
+}
+.stat b { color: var(--text); font-weight: 600; }
+
+/* 提示条 */
+.note {
+  margin: 8px 8px 4px; padding: 9px 12px;
+  background: var(--accent-2); color: var(--accent);
+  border-radius: 12px; font-size: 11.5px;
+}
+.note.warn { background: var(--warn-2); color: var(--warn); }
+
+/* 按钮组 */
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 8px; }
+.btn-row .btn + .btn { margin-left: 0; }
+
+.caption {
+  max-width: var(--win-w); margin: 0 auto 16px;
+  color: var(--muted); font-size: 12px; line-height: 1.7;
+}
+.caption code {
+  background: rgba(23,26,35,.06); padding: 1px 5px; border-radius: 5px;
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px;
+}
+</style>
+</head>
+<body>
+
+<p class="caption">
+  <strong>MiniDock 设置 · 布局雏形</strong>　顶栏（品牌 + 搜索）+ 自适应宽度的导航 + 多卡片内容区。<br>
+  方向：轻柔 / 圆角 / 动态间距 / 无直线 —— 全文件没有一条 <code>border</code> 分割线，分区靠留白与色调差。
+</p>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="brand"><h1>MiniDock</h1></div>
+
+    <label class="search">
+      <svg viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.2 13.2L17 17"/></svg>
+      <input id="q" type="search" placeholder="搜索设置" aria-label="搜索设置" autocomplete="off" spellcheck="false">
+      <kbd>Ctrl K</kbd>
+    </label>
+
+    <div></div>
+  </div>
+
+  <div class="body">
+    <!-- ===================== 侧边导航 ===================== -->
+    <nav class="sidebar">
+      <button class="nav-item active" data-page="general">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="3"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.3 4.3l1.4 1.4M14.3 14.3l1.4 1.4M15.7 4.3l-1.4 1.4M5.7 14.3l-1.4 1.4"/></svg>
+        常规
+      </button>
+      <button class="nav-item" data-page="appearance">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 3v14"/></svg>
+        外观
+      </button>
+      <button class="nav-item" data-page="position">
+        <svg viewBox="0 0 20 20"><rect x="3" y="3" width="14" height="14" rx="2"/><path d="M3 12h14"/></svg>
+        位置
+      </button>
+
+      <button class="nav-item" data-page="icons">
+        <svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/></svg>
+        图标
+      </button>
+      <button class="nav-item" data-page="interaction">
+        <svg viewBox="0 0 20 20"><path d="M5 3l9 7-4 1 2 5-2 1-2-5-3 3z"/></svg>
+        交互
+      </button>
+      <button class="nav-item" data-page="extras">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg>
+        附件
+      </button>
+      <button class="nav-item" data-page="effect">
+        <svg viewBox="0 0 20 20"><path d="M6 14c-2 0-3-1.5-3-3 0-2 1.5-3 2.5-4C6 6 7 4 9 4s3 2 3 3c1 .5 2 1.5 2 3 0 2-1.5 4-4 4z"/><path d="M4 16h12"/></svg>
+        效果
+      </button>
+
+      <button class="nav-item" data-page="performance">
+        <svg viewBox="0 0 20 20"><path d="M3 14l4-5 3 3 4-6 3 4"/></svg>
+        性能
+      </button>
+      <button class="nav-item" data-page="library">
+        <svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 8h14M7 6h.01M10 6h.01"/></svg>
+        图标库
+      </button>
+      <button class="nav-item" data-page="add">
+        <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+        添加
+      </button>
+    </nav>
+
+    <!-- ===================== 内容区 ===================== -->
+    <main class="content">
+
+      <!-- ---------- 常规 ---------- -->
+      <section class="page active" id="p-general">
+        <div class="page-head">
+          <h2>常规</h2>
+          <p>启动行为、锁定与全局快捷键。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>启动与常规</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">开机自启动<span class="desc">显示的是注册表里的真实状态</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">锁定 Dock 布局<span class="desc">防止误拖动、误移除图标</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">显示未固定的运行中应用<span class="desc">在分割线之后显示正在运行的应用，可拖入固定</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">全局快捷键 Ctrl + Alt + D<span class="desc">随时显示 / 隐藏 Dock</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">网页默认以应用窗口打开<span class="desc">使用 Edge / Chrome 的 --app 模式</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>设置界面</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">设置窗口主题</div>
+              <div class="ctl"><select class="select"><option>跟随系统</option><option>浅色</option><option>深色</option></select></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>数据</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">配置目录</div>
+              <div class="ctl"><span class="path">C:\Users\you\AppData\Roaming\MiniDock</span>
+                <button class="btn">打开</button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 外观 ---------- -->
+      <section class="page" id="p-appearance">
+        <div class="page-head">
+          <h2>外观</h2>
+          <p>栏体尺寸、背景材质与配色。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>尺寸</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">图标大小</div>
+              <div class="ctl"><div class="slider"><input type="range" min="24" max="128" value="48"><span class="val">48 px</span></div></div></div>
+            <div class="row"><div class="label">放大后大小</div>
+              <div class="ctl"><div class="slider"><input type="range" min="32" max="220" value="84"><span class="val">84 px</span></div></div></div>
+            <div class="row"><div class="label">图标间距</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="30" value="6"><span class="val">6 px</span></div></div></div>
+            <div class="row"><div class="label">栏内边距</div>
+              <div class="ctl"><div class="slider"><input type="range" min="2" max="30" value="8"><span class="val">8 px</span></div></div></div>
+            <div class="row"><div class="label">栏圆角</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="40" value="18"><span class="val">18 px</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>背景</h3>
+            <p>磨砂需要桌面捕获与 GPU 模糊，尚未实现；当前会退化成渐变。</p>
+          </div>
+          <div class="card-body">
+            <div class="row"><div class="label">Dock 主题</div>
+              <div class="ctl"><select class="select"><option>深色</option><option>浅色</option><option>跟随系统</option></select></div></div>
+            <div class="row"><div class="label">背景材质</div>
+              <div class="ctl"><select class="select"><option>磨砂玻璃</option><option>渐变</option><option>纯色</option></select></div></div>
+            <div class="row"><div class="label">不透明度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="100" value="60"><span class="val">60 %</span></div></div></div>
+            <div class="row"><div class="label">磨砂模糊强度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="1" max="14" value="6"><span class="val">6</span></div></div></div>
+            <div class="row"><div class="label">显示栏边框</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">跟随系统强调色<span class="desc">根据 Windows 强调色生成 Material You 风格色调</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>自定义颜色</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">颜色 1</div>
+              <div class="ctl"><button class="swatch" style="background:#3b82f6"></button></div></div>
+            <div class="row"><div class="label">颜色 2（渐变终点）</div>
+              <div class="ctl"><button class="swatch" style="background:#1f3f7a"></button></div></div>
+            <div class="row"><div class="label">颜色 3（渐变中间色，可选）</div>
+              <div class="ctl"><button class="swatch" style="background:#6b4bbf"></button></div></div>
+            <div class="row"><div class="label">颜色 1 不透明度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="100" value="100"><span class="val">100 %</span></div></div></div>
+            <div class="row"><div class="label">颜色 2 不透明度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="100" value="100"><span class="val">100 %</span></div></div></div>
+            <div class="row"><div class="label">颜色 3 不透明度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="100" value="100"><span class="val">100 %</span></div></div></div>
+            <div class="row"><div class="label">渐变方向</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="360" value="90"><span class="val">90 °</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>边框与菜单</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">边框粗细</div>
+              <div class="ctl"><div class="slider"><input type="range" min="1" max="6" value="1"><span class="val">1 px</span></div></div></div>
+            <div class="row"><div class="label">右键菜单主题</div>
+              <div class="ctl"><select class="select"><option>跟随系统</option><option>浅色</option><option>深色</option></select></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 位置 ---------- -->
+      <section class="page" id="p-position">
+        <div class="page-head">
+          <h2>位置</h2>
+          <p>停靠边、显示器与显示模式。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>位置</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">Dock 位置</div>
+              <div class="ctl"><select class="select"><option>屏幕底部</option><option>屏幕顶部</option><option>屏幕左侧</option><option>屏幕右侧</option></select></div></div>
+            <div class="row"><div class="label">显示在</div>
+              <div class="ctl"><select class="select"><option>主显示器</option><option>显示器 2</option></select></div></div>
+            <div class="row"><div class="label">距屏幕边缘</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="150" value="8"><span class="val">8 px</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>显示模式</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">模式</div>
+              <div class="ctl"><select class="select"><option>常驻显示</option><option>自动隐藏</option><option>智能隐藏</option></select></div></div>
+            <div class="row"><div class="label">最大化窗口避让 Dock<span class="desc">仅「常驻显示」模式有效，像 macOS 一样为 Dock 预留桌面空间</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 图标 ---------- -->
+      <section class="page" id="p-icons">
+        <div class="page-head">
+          <h2>图标</h2>
+          <p>底盘、分割线、运行指示与标签。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>图标底盘<span class="desc">macOS 风格圆角方块</span></h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">底盘类型</div>
+              <div class="ctl"><select class="select"><option>无底盘</option><option>纯色底盘</option><option>半透明底盘</option></select></div></div>
+            <div class="row"><div class="label">底盘配色</div>
+              <div class="ctl"><select class="select"><option>跟随 Dock 主题</option><option>浅色</option><option>深色</option></select></div></div>
+            <div class="row"><div class="label">底盘不透明度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="100" value="100"><span class="val">100 %</span></div></div></div>
+            <div class="row"><div class="label">底盘圆角</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="50" value="22"><span class="val">22 %</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>分割线</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">分割线宽度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="16" value="2"><span class="val">2 px</span></div></div></div>
+            <div class="row"><div class="label">分割线间距</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="64" value="4"><span class="val">4 px</span></div></div></div>
+            <div class="note">圆角 0% = 方形，22% = 默认圆角方块，50% = 圆形。</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>运行指示与标签</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">显示运行中指示</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">指示样式</div>
+              <div class="ctl"><select class="select"><option>横条</option><option>圆点</option></select></div></div>
+            <div class="row"><div class="label">悬停显示名称标签</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 交互 ---------- -->
+      <section class="page" id="p-interaction">
+        <div class="page-head">
+          <h2>交互</h2>
+          <p>悬停放大、文件夹展开与动画。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>交互</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">悬停放大图标</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">点击文件夹时弧形堆叠展开<span class="desc">像 macOS 一样列出最近的文件，点击即可打开</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>动画</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">最小化动画风格</div>
+              <div class="ctl"><select class="select"><option>压缩飞入（类似 macOS）</option><option>弹性飞入（类似手机，非线性）</option></select></div></div>
+            <div class="row"><div class="label">启动应用时弹跳</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">最小化缩入 Dock 动画<span class="desc">窗口最小化时缩小飞入对应图标</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">悬停运行中应用显示窗口预览</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 附件 ---------- -->
+      <section class="page" id="p-extras">
+        <div class="page-head">
+          <h2>附件</h2>
+          <p>时钟、倒影、小组件与浏览器。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>Dock 附件</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">在 Dock 右侧显示时间与日期<span class="desc">每 30 秒刷新一次，占用极低</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">图标倒影<span class="desc">仅底部停靠时有效</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">倒影大小</div>
+              <div class="ctl"><div class="slider"><input type="range" min="10" max="80" value="38"><span class="val">38 %</span></div></div></div>
+            <div class="row"><div class="label">倒影与 Dock 的距离</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="30" value="3"><span class="val">3 px</span></div></div></div>
+            <div class="row"><div class="label">倒影不透明度</div>
+              <div class="ctl"><div class="slider"><input type="range" min="0" max="100" value="30"><span class="val">30 %</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>小组件</h3>
+            <p>Dock 右侧的条带。每个小组件都能单独开关。</p>
+          </div>
+          <div class="card-body">
+            <div class="row"><div class="label">通知</div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">控制中心</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">控制中心 · 节能磁贴</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">控制中心 · 移动热点磁贴</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">资源监视器</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">计时器 / 待办</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">专注模式</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">小组件位置</div>
+              <div class="ctl"><select class="select"><option>右侧</option><option>左侧</option></select></div></div>
+            <div class="row"><div class="label">小组件顺序</div>
+              <div class="ctl"><select class="select"><option>时钟在前</option><option>通知在前</option></select></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>小工具</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">网页使用的浏览器</div>
+              <div class="ctl"><select class="select"><option>自动（Edge 优先）</option><option>Microsoft Edge</option><option>Google Chrome</option><option>Mozilla Firefox</option><option>系统默认浏览器</option></select></div></div>
+            <div class="row"><div class="label">速记<span class="desc">开启后 Dock 上出现「速记」图标</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 效果 ---------- -->
+      <section class="page" id="p-effect">
+        <div class="page-head">
+          <h2>效果</h2>
+          <p>栏体周围的环境烟雾。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>环境烟雾<span class="desc">移植自 Windhawk 的 Taskbar Smoke：真实流体模拟，烟会上升、卷曲、随鼠标让开。只在底部停靠时启用。</span></h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">启用环境烟雾</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">主色</div>
+              <div class="ctl"><select class="select"><option>紫</option><option>蓝</option><option>青</option><option>绿</option><option>橙</option><option>粉</option><option>红</option><option>白</option><option>灰</option></select></div></div>
+            <div class="row"><div class="label">第二色</div>
+              <div class="ctl"><select class="select"><option>无</option><option>蓝</option><option>青</option><option>绿</option><option>橙</option><option>粉</option><option>红</option><option>白</option></select></div></div>
+            <div class="row"><div class="label">不透明度</div>
+              <div class="ctl"><select class="select"><option>30%</option><option>50%</option><option>70%</option><option>85%</option><option>100%</option></select></div></div>
+            <div class="row"><div class="label">色调</div>
+              <div class="ctl"><select class="select"><option>烟（暗）</option><option>辉光（亮）</option></select></div></div>
+            <div class="row"><div class="label">上升的小烟团</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>烟雾手感<span class="desc">浓度与速度直接改流体参数；厚度同时决定光晕往栏体外延伸多远。</span></h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">浓度</div>
+              <div class="ctl"><select class="select"><option>稀</option><option>正常</option><option>浓</option></select></div></div>
+            <div class="row"><div class="label">速度</div>
+              <div class="ctl"><select class="select"><option>慢</option><option>正常</option><option>快</option></select></div></div>
+            <div class="row"><div class="label">光晕厚度</div>
+              <div class="ctl"><select class="select"><option>薄</option><option>正常</option><option>厚</option><option>很厚</option></select></div></div>
+            <div class="row"><div class="label">鼠标反应</div>
+              <div class="ctl"><select class="select"><option>关闭</option><option>柔和</option><option>明显</option></select></div></div>
+            <div class="row"><div class="label">鼠标范围</div>
+              <div class="ctl"><select class="select"><option>小</option><option>正常</option><option>大</option></select></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 性能 ---------- -->
+      <section class="page" id="p-performance">
+        <div class="page-head">
+          <h2>性能</h2>
+          <p>显卡选择、实时占用与高耗能功能开关。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>图形</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">显卡</div>
+              <div class="ctl"><select class="select"><option>自动（推荐）</option><option>AMD Radeon(TM) 610M</option><option>NVIDIA GeForce RTX 5070 Laptop GPU</option></select></div></div>
+            <div class="row"><div class="label">当前实际使用</div>
+              <div class="ctl"><span class="path">AMD Radeon(TM) 610M</span></div></div>
+            <div class="note">自动：由后端按功耗偏好挑选，通常落在核显上。改动在下次启动生效。</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>当前占用</h3></div>
+          <div class="card-body">
+            <div class="stat">
+              <span>帧耗时 <b>3.8 ms</b></span>
+              <span>常驻内存 <b>118 MB</b></span>
+              <span>采样 <b>312 帧</b></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>高耗能功能</h3>
+            <p>每项都标了开销，可以单独关掉。</p>
+          </div>
+          <div class="card-body">
+            <div class="row"><div class="label">磨砂玻璃背景<span class="desc">中等：桌面捕获 + GPU 模糊</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">扫描运行中应用<span class="desc">中等：每 2.5 秒枚举窗口；关闭后几乎不做后台扫描</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">悬停窗口预览<span class="desc">低：仅悬停时使用系统缩略图</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">时间与日期<span class="desc">低：每 30 秒刷新一次</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">时钟显示内容</div>
+              <div class="ctl"><select class="select"><option>时间 + 日期（上下分栏）</option><option>仅显示时间</option><option>仅显示日期</option></select></div></div>
+            <div class="row"><div class="label">日期格式</div>
+              <div class="ctl"><select class="select"><option>2026年10月22日</option><option>2026/10/22</option><option>2026-10-22</option></select></div></div>
+            <div class="row"><div class="label">日期显示周几</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">时间显示秒数<span class="desc">每秒刷新一次，占用略增</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">图标倒影<span class="desc">低：多画一层半透明图像</span></div>
+              <div class="ctl"><button class="switch"></button></div></div>
+            <div class="row"><div class="label">最小化缩入动画<span class="desc">低：仅在窗口最小化时运行</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>系统与兼容</h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">防止被清理工具关闭<span class="desc">启动一个极小的守护进程，被结束后自动重开</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">点击运行中的应用 = 最小化 / 恢复<span class="desc">窗口在最前时再次点击会缩回 Dock</span></div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">右键菜单显示开机自启开关</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">右键菜单显示速记开关</div>
+              <div class="ctl"><button class="switch on"></button></div></div>
+            <div class="row"><div class="label">空白处右键显示新建项</div>
+              <div class="ctl"><button class="switch"></button></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>预设</h3></div>
+          <div class="card-body">
+            <div class="btn-row">
+              <button class="btn">一键低占用模式</button>
+              <button class="btn">恢复推荐设置</button>
+            </div>
+            <div class="note">空闲时没有常驻动画定时器，只在交互时提交 GPU 帧。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 图标库 ---------- -->
+      <section class="page" id="p-library">
+        <div class="page-head">
+          <h2>图标库</h2>
+          <p>从文件夹批量设置图标。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>从文件夹批量设置图标</h3></div>
+          <div class="card-body">
+            <div class="btn-row">
+              <button class="btn">选择图标文件夹…</button>
+              <button class="btn">自动匹配并应用</button>
+            </div>
+            <div class="note">选择存放图标（png / ico / jpg）的文件夹，文件名与应用名称相同即可自动匹配。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 添加 ---------- -->
+      <section class="page" id="p-add">
+        <div class="page-head">
+          <h2>添加</h2>
+          <p>往 Dock 里加东西，以及配置的导入导出。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>添加</h3></div>
+          <div class="card-body">
+            <div class="btn-row">
+              <button class="btn">添加网页应用…</button>
+              <button class="btn">添加应用 / 文件…</button>
+              <button class="btn">添加文件夹…</button>
+              <button class="btn">新建应用组</button>
+              <button class="btn">添加回收站</button>
+              <button class="btn">添加分割线</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>导入与导出</h3></div>
+          <div class="card-body">
+            <div class="btn-row">
+              <button class="btn">导出完整配置…</button>
+              <button class="btn">导入配置…</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>重置</h3></div>
+          <div class="card-body">
+            <div class="btn-row">
+              <button class="btn danger">恢复默认设置</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script>
+// 雏形的交互：切页 + 搜索。只做这两件 —— 重点是布局，不是控件行为。
+(function () {
+  var nav = Array.prototype.slice.call(document.querySelectorAll('.nav-item'));
+  var pages = Array.prototype.slice.call(document.querySelectorAll('.page'));
+  var content = document.querySelector('.content');
+  var q = document.getElementById('q');
+
+  // ------------------------------------------------------------------
+  // 导航栏与窗口的宽度是**写死**的（`--nav-w` / `--win-w`），不随标签内容
+  // 变化 —— 标签多一个少一个、长短不同，窗口都不该跟着抖。
+  //
+  // 唯一与内容有关的是**高度**：标签最多 12 个（不含空槽），超了侧栏滚动。
+  // ------------------------------------------------------------------
+  var MAX_LABELS = 12;
+
+  function capNavHeight() {
+    var bar = document.querySelector('.sidebar');
+    var n = bar.querySelectorAll('.nav-item').length;
+    if (n > MAX_LABELS) {
+      bar.style.maxHeight = MAX_LABELS * 43 + 20 + 'px';
+      console.warn('导航标签超过 ' + MAX_LABELS + ' 个（当前 ' + n + '），侧栏改为滚动。');
+    } else {
+      bar.style.maxHeight = '';
+    }
+  }
+
+  capNavHeight();
+
+  function activePage() {
+    var on = nav.filter(function (b) { return b.classList.contains('active'); })[0];
+    return on ? on.dataset.page : null;
+  }
+
+  function show(id) {
+    // 首屏被内联关掉的淡入在这里恢复：切页时才需要动画。
+    pages.forEach(function (p) { p.style.animation = ''; });
+    nav.forEach(function (b) { b.classList.toggle('active', b.dataset.page === id); });
+    pages.forEach(function (p) { p.classList.toggle('active', p.id === 'p-' + id); });
+    content.scrollTop = 0;
+  }
+
+  nav.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      show(btn.dataset.page);
+      // 写进地址栏：截图脚本与"发一页给别人看"都靠它。
+      history.replaceState(null, '', '#' + btn.dataset.page);
+    });
+  });
+
+  // 搜索：只过滤左侧标签（雏形的搜索是"按页名找页"，不是全文检索）。
+  // 当前页被过滤掉时自动跳到第一个命中页，免得左右两边对不上。
+  function filter() {
+    var v = (q.value || '').trim().toLowerCase();
+    var first = null;
+    nav.forEach(function (b) {
+      var hit = !v || b.textContent.toLowerCase().indexOf(v) >= 0;
+      b.style.display = hit ? '' : 'none';
+      if (hit && !first) { first = b; }
+    });
+    var cur = activePage();
+    var curVisible = nav.some(function (b) {
+      return b.dataset.page === cur && b.style.display !== 'none';
+    });
+    if (!curVisible && first) { show(first.dataset.page); }
+    document.body.classList.toggle('searching', !!v);
+  }
+
+  q.addEventListener('input', filter);
+  q.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { q.value = ''; filter(); q.blur(); }
+    if (e.key === 'Enter') {
+      var first = nav.filter(function (b) { return b.style.display !== 'none'; })[0];
+      if (first) { show(first.dataset.page); }
+    }
+  });
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault(); q.focus(); q.select();
+    }
+  });
+
+  // 打开时按 hash 定位（无 hash 则保持 HTML 里的默认页）。
+  //
+  // section 的 id 带 `p-` 前缀（`#appearance` → `id="p-appearance"`）就是
+  // 为了让 hash **不**命中任何元素：同名的话浏览器会原生滚动到那个 section，
+  // 整个页面被往下推一百多像素，顶栏直接被切掉。
+  var hash = location.hash.replace('#', '');
+  if (hash && document.getElementById('p-' + hash)) { show(hash); }
+
+  // ?q=图标 —— 直接进筛选态。截图与给别人看某个搜索词都用它。
+  var qs = new URLSearchParams(location.search).get('q');
+  if (qs) { q.value = qs; filter(); }
+
+  // ------------------------------------------------------------------
+  // 下拉：把原生 <select> 换成自绘浮层
+  //
+  // 为什么不直接美化 select：原生控件的下拉列表是操作系统画的，圆角、阴影、
+  // 悬停高亮一概改不了，展开后立刻回到"系统对话框"的样子，跟这套语言冲突。
+  // 这里保留 select 本身（读值方便），只在它旁边放一个按钮 + 浮层。
+  // ------------------------------------------------------------------
+  var openDd = null;
+  // 截图模式（?open=N）：headless 会在首帧之后补发一次 resize，把刚展开的
+  // 浮层关掉。这里屏蔽"窗口变化就关"的自动收起，只为出图。
+  var shotMode = new URLSearchParams(location.search).get('open') !== null;
+
+  function closeDd() {
+    if (!openDd) { return; }
+    openDd.menu.classList.remove('open');
+    openDd.wrap.classList.remove('open');
+    openDd.wrap.dataset.open = '';
+    if (openDd.card) { delete openDd.card.dataset.frozen; }
+    openDd = null;
+  }
+
+  function placeMenu(menu, btn) {
+    var r = btn.getBoundingClientRect();
+    var mw = menu.offsetWidth;
+    var mh = menu.offsetHeight;
+    // 右对齐到按钮；下方放不下就翻到上方
+    var left = Math.min(Math.max(8, r.right - mw), window.innerWidth - mw - 8);
+    var below = r.bottom + 8;
+    var top = below;
+    if (below + mh > window.innerHeight - 8 && r.top - 8 - mh > 8) {
+      top = r.top - 8 - mh;
+      menu.style.transformOrigin = 'bottom right';
+    } else {
+      menu.style.transformOrigin = 'top right';
+    }
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+    menu.style.minWidth = r.width + 'px';
+  }
+
+  function enhanceSelect(sel) {
+    var wrap = document.createElement('div');
+    wrap.className = 'dd';
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(sel);
+    sel.classList.add('dd-ready');
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dd-btn';
+    btn.setAttribute('aria-haspopup', 'listbox');
+    btn.innerHTML =
+      '<span class="txt"></span>' +
+      '<svg viewBox="0 0 12 12"><path d="M3 4.6l3 3 3-3"/></svg>';
+    wrap.appendChild(btn);
+
+    var menu = document.createElement('div');
+    menu.className = 'dd-menu';
+    menu.setAttribute('role', 'listbox');
+    document.body.appendChild(menu);
+
+    var txt = btn.querySelector('.txt');
+
+    function syncLabel() {
+      txt.textContent = sel.options[sel.selectedIndex]
+        ? sel.options[sel.selectedIndex].text : '';
+    }
+
+    function build() {
+      menu.innerHTML = '';
+      Array.prototype.forEach.call(sel.options, function (opt, i) {
+        var item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'dd-item';
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', i === sel.selectedIndex ? 'true' : 'false');
+        item.innerHTML = '<span>' + opt.text + '</span>' +
+          '<svg class="tick" viewBox="0 0 12 12"><path d="M2.5 6.4l2.2 2.2 4.8-5"/></svg>';
+        item.addEventListener('click', function () {
+          sel.selectedIndex = i;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          syncLabel();
+          closeDd();
+          btn.focus();
+        });
+        menu.appendChild(item);
+      });
+    }
+
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (openDd && openDd.wrap === wrap) { closeDd(); return; }
+      closeDd();
+      syncLabel();
+      build();
+      var card = wrap.closest('.card');
+      if (card) { card.dataset.frozen = '1'; card.style.transform = ''; }
+      openDd = { wrap: wrap, menu: menu, card: card };
+      wrap.dataset.open = '1';
+      wrap.classList.add('open');
+      // 先让它参与布局拿到尺寸，再定位与展开
+      menu.style.left = '-9999px';
+      menu.style.top = '-9999px';
+      menu.classList.add('open');
+      placeMenu(menu, btn);
+    });
+
+    syncLabel();
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('select.select'), enhanceSelect);
+
+  // ------------------------------------------------------------------
+  // 说明气泡：行标题后面的「圆形感叹号」
+  //
+  // 原来描述占一整行（标题下方的小字），行与行被撑得很松。现在收进一个
+  // 15px 的圆点：**点击**或**悬停 3 秒**才展开成浮层 —— 扫读时不再被
+  // 次要信息干扰，需要时又随手可得。
+  // ------------------------------------------------------------------
+  var tipEl = document.createElement('div');
+  tipEl.className = 'tip';
+  document.body.appendChild(tipEl);
+  var tipOwner = null;
+  var tipPinned = false;
+
+  function hideTip() {
+    if (!tipOwner) { return; }
+    tipEl.classList.remove('open');
+    tipOwner = null;
+    tipPinned = false;
+  }
+
+  function showTip(hint, text, pinned) {
+    if (tipOwner === hint && tipEl.classList.contains('open')) {
+      tipPinned = tipPinned || pinned;
+      return;
+    }
+    tipOwner = hint;
+    tipPinned = pinned;
+    tipEl.textContent = text;
+    // 先放到屏幕外再展开：display:none 的元素量不到尺寸
+    tipEl.style.left = '-9999px';
+    tipEl.style.top = '-9999px';
+    tipEl.classList.add('open');
+
+    var r = hint.getBoundingClientRect();
+    var w = tipEl.offsetWidth;
+    var h = tipEl.offsetHeight;
+    var left = Math.min(Math.max(8, r.left - 6), window.innerWidth - w - 8);
+    var top = r.bottom + 8;
+    if (top + h > window.innerHeight - 8 && r.top - 8 - h > 8) {
+      top = r.top - 8 - h;
+      tipEl.style.transformOrigin = 'bottom left';
+    } else {
+      tipEl.style.transformOrigin = 'top left';
+    }
+    tipEl.style.left = left + 'px';
+    tipEl.style.top = top + 'px';
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.row .label'), function (label) {
+    var desc = label.querySelector('.desc');
+    if (!desc) { return; }
+    var text = desc.textContent.trim();
+    if (!text) { return; }
+    // 描述本身不再显示，只作为气泡内容存在
+    desc.style.display = 'none';
+
+    var hint = document.createElement('span');
+    hint.className = 'hint';
+    hint.textContent = '!';
+    hint.setAttribute('role', 'button');
+    hint.setAttribute('tabindex', '0');
+    hint.setAttribute('aria-label', '说明：' + text);
+    label.appendChild(hint);
+
+    var timer = null;
+    hint.addEventListener('mouseenter', function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () { showTip(hint, text, false); }, 3000);
+    });
+    hint.addEventListener('mouseleave', function () {
+      clearTimeout(timer);
+      if (!tipPinned) { hideTip(); }
+    });
+    hint.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (tipOwner === hint && tipPinned) { hideTip(); }
+      else { showTip(hint, text, true); }
+    });
+    hint.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        hint.click();
+      }
+    });
+  });
+
+  document.addEventListener('click', function () { hideTip(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { hideTip(); }
+  });
+  document.querySelector('.content').addEventListener('scroll', function () { hideTip(); });
+  window.addEventListener('resize', function () { hideTip(); });
+
+  document.addEventListener('click', function () { closeDd(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { closeDd(); }
+  });
+  window.addEventListener('resize', function () { if (!shotMode) { closeDd(); } });
+  document.querySelector('.content').addEventListener('scroll', function () {
+    if (!shotMode) { closeDd(); }
+  });
+
+  // ------------------------------------------------------------------
+  // 磁吸：光标靠近时元素朝它轻微偏移。
+  //
+  // 位移量按"到元素矩形边缘的距离"衰减：光标在元素内 → 满偏；离开后迅速归零。
+  // 幅度分档 —— 越小的控件偏移越小，否则 30 px 的开关挪 3 px 看起来像在抖：
+  //
+  //   卡片 3.5 · 导航项 2.5 · 搜索框 2.0 · 按钮/下拉 1.6 · 开关/色块 1.2
+  //
+  // 只做"轻微"：超过 3.5 px 就从"吸附"变成"漂移"，静态截图里都能看出歪。
+  // ------------------------------------------------------------------
+  var MAG = [
+    { sel: '.card',      max: 3.5, radius: 90 },
+    { sel: '.nav-item',  max: 2.5, radius: 56 },
+    { sel: '.search',    max: 2.0, radius: 64 },
+    { sel: '.btn',       max: 1.6, radius: 40 },
+    { sel: '.dd-btn',    max: 1.6, radius: 40 },
+    { sel: '.switch',    max: 1.2, radius: 30 },
+    { sel: '.swatch',    max: 1.2, radius: 30 }
+  ];
+  // 一张"类名 → 幅度"的表。子控件与它所在的卡片各自独立计算，位移会叠加
+  // （卡片 3.5 + 开关 1.2），方向一致所以看起来是一起被拉过去。
+  var mags = [];
+  Array.prototype.forEach.call(document.querySelectorAll('.window *'), function (el) {
+    var hit = null;
+    for (var i = 0; i < MAG.length; i++) {
+      if (el.matches(MAG[i].sel)) { hit = MAG[i]; }
+    }
+    if (hit) { mags.push({ el: el, max: hit.max, radius: hit.radius }); }
+  });
+
+  // 说明气泡是动态挂在 body 上的，不在 `.window` 里，单独加一条。
+  mags.push({ el: tipEl, max: 1.2, radius: 30 });
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var stage = document.querySelector('.window');
+  var pending = false;
+  var px = 0, py = 0;
+
+  function applyMag() {
+    pending = false;
+    // 下拉展开时整体静止：浮层是按按钮当时的矩形定位的，底下的东西再动
+    // 就会错位。
+    if (openDd) { return; }
+    mags.forEach(function (m) {
+      var el = m.el;
+      if (el.dataset.frozen) { return; }
+      var r = el.getBoundingClientRect();
+      var nx = Math.max(r.left, Math.min(px, r.right));
+      var ny = Math.max(r.top, Math.min(py, r.bottom));
+      var dist = Math.hypot(px - nx, py - ny);
+      if (dist > m.radius) {
+        if (el.style.transform) { el.style.transform = ''; }
+        return;
+      }
+      var pull = 1 - dist / m.radius;
+      var cx = r.left + r.width / 2;
+      var cy = r.top + r.height / 2;
+      var dx = px - cx;
+      var dy = py - cy;
+      var len = Math.hypot(dx, dy) || 1;
+      el.style.transform =
+        'translate3d(' + (dx / len * m.max * pull).toFixed(2) + 'px,' +
+        (dy / len * m.max * pull).toFixed(2) + 'px,0)';
+    });
+  }
+
+  if (!reduce && stage) {
+    stage.addEventListener('pointermove', function (e) {
+      px = e.clientX;
+      py = e.clientY;
+      if (!pending) { pending = true; requestAnimationFrame(applyMag); }
+    });
+    stage.addEventListener('pointerleave', function () {
+      mags.forEach(function (m) { m.el.style.transform = ''; });
+    });
+  }
+
+  // 首屏不淡入：打开/截图时不该先看到一页半透明的东西。
+  // 只在**首次**关掉；恢复由 `show()` 负责 —— 在这里用 rAF 撤掉的话，
+  // 动画会从 0 重新开始，截图正好又拍到一半。
+  var firstPage = document.querySelector('.page.active');
+  if (firstPage) { firstPage.style.animation = 'none'; }
+
+  // ?tip=N —— 展开第 N 个**可见**行的说明气泡（截图用）。
+  // 必须同步执行：headless 的首帧之后才加的东西不会进截图。
+  var tipIdx = new URLSearchParams(location.search).get('tip');
+  if (tipIdx !== null) {
+    var hints = Array.prototype.filter.call(
+      document.querySelectorAll('.hint'),
+      function (h) { return h.offsetParent !== null; }
+    );
+    var hint = hints[parseInt(tipIdx, 10)];
+    if (hint) { hint.click(); }
+  }
+
+  // ?open=N —— 自动展开第 N 个下拉（截图用；浏览器里点一下就行）。
+  var openIdx = new URLSearchParams(location.search).get('open');
+  if (openIdx !== null) {
+    // 只算**当前可见**页里的按钮：隐藏页里的元素 rect 全是 0，展开会跑到左上角。
+    var btns = Array.prototype.filter.call(
+      document.querySelectorAll('.dd-btn'),
+      function (x) { return x.offsetParent !== null; }
+    );
+    var b = btns[parseInt(openIdx, 10)];
+    if (b) {
+      // 同步执行、不排定时器：headless 截图在首帧就落盘，定时器来不及跑。
+      // 关掉页面淡入 —— 否则会拍到动画的一半（整页发灰）。注意只改内联样式，
+      // 不要给 <html> 加类：那会连带触发一次重排 + scroll 事件，把刚展开的
+      // 浮层立刻关掉。
+      Array.prototype.forEach.call(document.querySelectorAll('.page'), function (p) {
+        p.style.animation = 'none';
+      });
+      b.click();
+    }
+  }
+})();
+</script>
+</body>
+</html>

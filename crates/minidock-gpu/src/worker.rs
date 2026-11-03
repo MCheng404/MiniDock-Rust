@@ -207,7 +207,7 @@ fn icon_thread(rx: Receiver<IconRequest>, tx: Sender<ReadyIcon>, waker: Waker) {
 /// 一批最多攒多少个。8 足够填满常见核心数，又不会让第一批等太久。
 const BATCH: usize = 8;
 
-/// 走 shell 取图标。顺序照抄原版 `LoadItemIcon()` 的主干。
+/// 走 shell 取图标。
 fn fetch_icon(req: &IconRequest) -> Option<IconBitmap> {
     match req.kind {
         // 分割线不画图标；网址要联网抓 favicon，还没做。
@@ -242,10 +242,17 @@ fn process(req: &IconRequest, bmp: IconBitmap) -> ReadyIcon {
 // ============================ 扫描 ============================
 
 /// 扫描线程的输入。只在参数变化时发一次，避免每轮灌队列。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScanInput {
     /// 需要检测遮挡的屏幕矩形；`None` = 不检测（非智能隐藏模式）。
     pub cover: Option<Rect>,
+    /// 是否需要扫描"哪些应用在运行"。
+    ///
+    /// 指示点与"正在运行"气泡都关掉时它是 false —— 那时每 1.2 秒枚举一遍
+    /// 全部顶层窗口纯属白烧：忙一点的桌面上是 50 个窗口 × 六七次查询，
+    /// 外加每个进程一次 `OpenProcess`。开着 Dock 什么也不显示，CPU 却
+    /// 掉不下来，用户只会觉得"这软件很重"。
+    pub want_running: bool,
 }
 
 /// 扫描线程的输出。
@@ -257,7 +264,7 @@ pub struct ScanOutput {
     pub covered: Option<bool>,
 }
 
-/// 运行状态扫描周期。与 C 版 `T_SCAN` 的 1200 ms 一致。
+/// 运行状态扫描周期。
 ///
 /// 更短没有意义：用户点开一个程序的感知延迟远大于这个量级，而每轮要
 /// `EnumWindows` + 为每个窗口 `OpenProcess`。
@@ -328,9 +335,14 @@ fn scan_thread(rx: Receiver<ScanInput>, tx: Sender<ScanOutput>, exclude: isize, 
         let mut out = ScanOutput::default();
         if now >= next_running {
             next_running = now + RUNNING_EVERY;
-            // `running_apps()` 返回 `HashMap<String, HWND>`，`HWND` 不是
-            // `Send`，所以必须在这里就转成集合再回传。
-            out.running = Some(app_window::running_apps().into_keys().collect());
+            if !input.want_running {
+                // 不需要就跳过，但**保留节拍**：重新打开时最多等 1.2 秒
+                // 就有第一份结果，不必额外记一个"刚被打开"的状态。
+            } else {
+                // `running_apps()` 返回 `HashMap<String, HWND>`，`HWND` 不是
+                // `Send`，所以必须在这里就转成集合再回传。
+                out.running = Some(app_window::running_apps().into_keys().collect());
+            }
         }
         if now >= next_cover {
             next_cover = now + COVER_EVERY;
@@ -492,17 +504,79 @@ impl Drop for Opener {
 fn open_thread(rx: Receiver<OpenJob>) {
     while let Ok(job) = rx.recv() {
         let item = &job.item;
+        let key = running::running_key(item);
         // 与左键点击同一条路径：已运行则激活，否则启动。`force` 跳过激活，
         // 否则"想开第二个实例"永远开不出来。
-        let switched = !job.force
-            && running::running_key(item).is_some_and(|exe| app_window::activate(&exe, job.toggle));
-        if switched {
-            continue;
+        //
+        // 注意这里**分两步**而不是 `is_some_and(activate)`：`activate` 现在
+        // 会区分"切过去了 / 找到了但系统拒绝置前"。后者如果按"没切成"处理
+        // 去启动新实例，用户会看到两个窗口 —— 那是比"没反应"更糟的结果。
+        if !job.force {
+            if let Some(exe) = &key {
+                let r = app_window::activate(exe, job.toggle);
+                if trace() {
+                    eprintln!("[launch] 激活 {} → {r:?}", item.name);
+                }
+                if r.is_running() {
+                    continue;
+                }
+            }
         }
         if let Err(e) = launch::launch(item) {
             eprintln!("启动「{}」失败：{e}", item.name);
+            continue;
+        }
+        if trace() {
+            eprintln!("[launch] 启动 {}（force={}）", item.name, job.force);
+        }
+        // 启动后把窗口带到前台。`ShellExecuteW` 是异步的：进程刚起来时窗口
+        // 还不存在，而且新进程自己置前常常被前台锁拦住（Dock 窗口是
+        // `WS_EX_NOACTIVATE`，点击不让它拿到前台权）。
+        //
+        // 用独立线程等而不是在本线程里 sleep：这是**串行**队列，用户连点
+        // 三个图标时，一次 3 秒的等待会把后两个拖住。`force` 时不等 ——
+        // "再开一个实例"本来就不该抢焦点。
+        if !job.force {
+            if let Some(exe) = key {
+                let name = item.name.clone();
+                std::thread::spawn(move || follow_launch(&name, &exe));
+            }
         }
     }
+}
+
+/// 启动后等窗口出现，然后置前。最多等 [`FOLLOW_MS`]。
+///
+/// 只在新启动的情况下调用：应用自己会置前的情况占多数，这里兜的是
+/// "窗口起来了但被前台锁挡在后面"那部分。
+fn follow_launch(name: &str, exe: &str) {
+    let start = Instant::now();
+    while start.elapsed() < FOLLOW_MS {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        if app_window::find_window_of(exe).is_none() {
+            continue;
+        }
+        let r = app_window::activate(exe, false);
+        if trace() {
+            eprintln!("[launch] {name} 的窗口已出现 → {r:?}");
+        }
+        return;
+    }
+    if trace() {
+        eprintln!("[launch] {name} 在 {:?} 内没等到窗口", FOLLOW_MS);
+    }
+}
+
+/// 启动后等窗口的上限。
+///
+/// 2.4 秒：冷启动的应用（Electron / Office）常见 1–2 秒；再长就是在替
+/// 一个"根本不会开窗口"的程序白等（后台服务、命令行工具）。
+const FOLLOW_MS: Duration = Duration::from_millis(2400);
+
+/// `MINIDOCK_LAUNCH_TRACE=1`：打印点击落点（激活还是启动、有没有切成）。
+fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MINIDOCK_LAUNCH_TRACE").is_ok_and(|v| v.trim() != "0"))
 }
 
 #[cfg(test)]

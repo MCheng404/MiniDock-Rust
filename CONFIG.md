@@ -1,6 +1,6 @@
 # 配置文件规范
 
-`MiniDock.ini` 的格式以这份文档为唯一权威；改动前先读第五节。
+`MiniDock.ini` 的格式以这份文档为唯一权威；改动前先读第六节。
 
 **格式版本 2**（`[meta] version=2`）起，配置按语义分段、键名改为小写下划线，
 不再照抄上游。上游格式（单 `[Settings]` 段 + 驼峰名）**仍能直接读**，
@@ -36,6 +36,7 @@
 | `[widgets.clock]` | 时钟显示与格式 |
 | `[menu]` | 右键菜单项开关 |
 | `[advanced]` | 浏览器路径、全局热键 |
+| `[effect.smoke]` | 栏体周围的环境烟雾（Rust 版独有） |
 | `[Items]` | 条目列表 |
 | `[Graphics]` | 显卡适配器名（Rust 版独有） |
 
@@ -126,7 +127,52 @@ cargo run -q -p minidock-core --example config_table
 | `MnNotes` | 1 | 0/1 | 右键菜单显示速记开关 |
 | `MnAdd` | 1 | 0/1 | 空白处右键显示新建项 |
 
-## 三、`[Graphics]` 段（Rust 版独有，C 版不认识）
+## 三、`[effect.smoke]` 段（Rust 版独有）
+
+```ini
+[effect.smoke]
+Smoke=1
+SmokeColor=0
+SmokeColor2=-1
+SmokeOpacity=3
+SmokeDensity=1
+SmokeSpeed=1
+SmokeTone=0
+SmokeThick=1
+SmokeMouse=1
+SmokeReach=1
+SmokeClouds=1
+```
+
+栏体周围那层会上升、卷曲、随鼠标让开的烟（移植自 Windhawk 的 *Taskbar
+Smoke*，算法说明见 `crates/minidock-core/src/smoke.rs` 与 ADR-048）。
+
+| 键 | 默认 | 取值 | 说明 |
+|---|---|---|---|
+| `Smoke` | 1 | 0/1 | 总开关。**仅在底部停靠时生效**（原版按底部任务栏调参） |
+| `SmokeColor` | 0 | 0–9 | 0 紫 / 1 橙 / 2 红 / 3 粉 / 4 浅蓝 / 5 冰蓝 / 6 绿 / 7 金 / 8 跟随强调色 / 9 彩虹 |
+| `SmokeColor2` | -1 | -1 或 0–7 | 第二色，沿栏体从左到右过渡；-1 = 关闭 |
+| `SmokeOpacity` | 3 | 0–6 | 17% / 30% / 50% / 70% / 100% / 125% / 150% |
+| `SmokeDensity` | 1 | 0–2 | 稀疏 / 正常 / 浓密 |
+| `SmokeSpeed` | 1 | 0–2 | 平缓 / 正常 / 活泼 |
+| `SmokeTone` | 0 | 0/1 | 0 烟（暗）/ 1 辉光（亮） |
+| `SmokeThick` | 1 | 0–3 | 光晕厚度：细 / 正常 / 厚 / 极厚（同时决定模拟外边距） |
+| `SmokeMouse` | 1 | 0–2 | 鼠标推力：关 / 柔和 / 明显 |
+| `SmokeReach` | 1 | 0–2 | 鼠标作用半径：小 / 正常 / 大 |
+| `SmokeClouds` | 1 | 0/1 | 上升的小烟团 |
+
+三条约定：
+
+1. **`SmokeColor` 的下标对应 `core::smoke::PALETTE` 的顺序**，而那个顺序
+   是上游 `kRauchRgb` 的数组顺序（紫、橙、红、粉…），不是上游设置项下拉框
+   的顺序（紫、粉、浅蓝…）。以数组为准：下标一旦写进 ini 就是契约。
+2. **关掉烟雾时不做任何事**：噪声表（约 40 ms）与模拟都在第一次出烟时才建，
+   不吃常驻内存，也不影响"空闲不重绘"。开启后按 30 fps 出帧。
+3. **只在底部停靠生效。** 顶端停靠时浮力方向与上缘衰减都不成立（烟会往屏幕
+   外冒），左右停靠的胶囊是竖的，原版的圆形距离场算不对。判断在
+   `Tuning::from_config` 里做，配置本身不会被改写。
+
+## 四、`[Graphics]` 段（Rust 版独有，C 版不认识）
 
 ```ini
 [Graphics]
@@ -149,7 +195,7 @@ Adapter=NVIDIA GeForce RTX 5070 Laptop GPU
 
 改动**需要重启**：图形设备在进程启动时创建（ADR-012）。
 
-## 四、`[Items]` / `[Groups]` 段
+## 五、`[Items]` / `[Groups]` 段
 
 ```ini
 [Items]
@@ -195,7 +241,7 @@ G1_1=2|1|GitHub|https://github.com||0|
 3. **写入不是原子的**（C 版）。Rust 版改为写 `.tmp` 再 `rename` 覆盖，
    避免进程被杀时留下半截文件。
 
-## 五、兼容性约束（改格式前必读）
+## 六、兼容性约束（改格式前必读）
 
 - 键名、段名、字段顺序、编号规则**都是对外契约**。
 - **读取永远兼容两代格式**：`from_ini` 先按新段 + 新键名找，找不到再回退到
@@ -208,7 +254,7 @@ G1_1=2|1|GitHub|https://github.com||0|
 - 删除或改名键会让老配置永久丢失该设置，必须同时改 `legacy_name()`
   并补一条"新旧格式等价"的测试（见 `legacy_and_new_formats_agree_on_every_key`）。
 
-## 六、自检
+## 七、自检
 
 ```bash
 cargo test -p minidock-core        # 编解码、夹紧、往返、旧键迁移

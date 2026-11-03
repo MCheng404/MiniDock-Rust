@@ -1,7 +1,6 @@
 //! 系统资源采样：CPU 占用率、内存占用、磁盘占用。
 //!
-//! 对应上游 v1.6.0 的 `ResCpuPercent()` 与 `ResSample()`
-//! （minidock.c:6505、6533）。上游的三个数据源：
+//! 三个数据源：
 //!
 //! - **CPU**：`GetSystemTimes` 的 idle / kernel / user 三个 FILETIME，
 //!   取两次采样之间的差值算占比。idle 计入分母，占比 = 1 - idle/total。
@@ -38,7 +37,7 @@ pub struct SysInfo {
 /// CPU 占用率的计算器。
 ///
 /// `GetSystemTimes` 给的是**累计值**，必须拿两次采样的差值才能算出占用率。
-/// 所以这个类型要留着自己上次的值 —— 上游用三个 `static` 变量做同样的事，
+/// 所以这个类型要留着自己上次的值 —— 用三个 `static` 变量做同样的事，
 /// 这里做成显式的状态，避免全局可变状态。
 #[derive(Copy, Clone, Debug, Default)]
 pub struct CpuSampler {
@@ -55,7 +54,7 @@ impl CpuSampler {
     /// 采样一次，返回 CPU 占用率（百分比）。
     ///
     /// 第一次调用返回 0 —— 没有上一次的基线，算不出差值。
-    /// 这与上游一致（上游首次 `pi == 0` 时返回 0）。
+    /// 这。
     pub fn sample(&mut self) -> u8 {
         let Some((idle, kernel, user)) = system_times() else {
             return 0;
@@ -78,8 +77,8 @@ impl CpuSampler {
             return 0;
         };
         // 分母是 kernel + user（idle 已包含在 kernel 里）。
-        // 上游写的是 `tot = dk + du`，其中 dk 是 kernel 的**全量**
-        // （含 idle），这个口径照抄 —— 差一个 idle 会让占用率偏高。
+        // 写的是 `tot = dk + du`，其中 dk 是 kernel 的**全量**
+        // （含 idle），这个口径沿用 —— 差一个 idle 会让占用率偏高。
         let total = d_kernel + d_user;
         if total == 0 {
             return 0;
@@ -124,7 +123,7 @@ pub fn sample_memory_disk() -> SysInfo {
         out.mem_used_mb = ms.ullTotalPhys.saturating_sub(ms.ullAvailPhys) / (1024 * 1024);
     }
 
-    // 上游取的是 C 盘。
+    // 取的是 C 盘。
     let mut free_to_caller = 0_u64;
     let mut total = 0_u64;
     let mut total_free = 0_u64;

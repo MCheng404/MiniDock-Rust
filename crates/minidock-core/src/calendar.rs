@@ -1,11 +1,10 @@
-//! 农历 / 节气 / 干支历。对应上游 v1.6.0 的 `g_lunarInfo` / `SolarToLunar` /
-//! `TermDate` / `CalSub` / `GanzhiText`（minidock.c:5613-5745）。
+//! 农历 / 节气 / 干支历。
 //!
 //! 这一块**全部是纯算法**，一个 Win32 调用都没有。于是可以用穷举的方式验证
 //! 而不是"跑起来看着像对的"：1901..=2099 共七万多天，逐日做
 //! 公历 → 农历 → 公历 的往返，任何一天的月长或闰月算错都会当场暴露。
 //!
-//! 表在 [`calendar_tables`] 里，由脚本从上游源码提取生成 —— 201 个十六进制
+//! 表在 [`calendar_tables`] 里，由脚本从源码提取生成 —— 201 个十六进制
 //! 数手抄会错位，而且错了不报错，只会让某几年的农历静默算错。
 
 mod calendar_tables;
@@ -15,7 +14,7 @@ use calendar_tables::{
 };
 
 // ============================================================================
-// 公历 ↔ 天数（Howard Hinnant 的 civil-from-days，上游用的也是这套）
+// 公历 ↔ 天数
 // ============================================================================
 
 /// 公历日期转"1970-01-01 起的天数"。
@@ -50,7 +49,7 @@ pub fn civil_from_days(days: i32) -> (i32, u32, u32) {
     (y + i32::from(m <= 2), m, d)
 }
 
-/// 星期几，0 = 周日。上游写法是 `((days % 7) + 11) % 7`。
+/// 星期几，0 = 周日写法是 `((days % 7) + 11) % 7`。
 #[must_use]
 pub fn weekday_of(year: i32, month: u32, day: u32) -> u32 {
     (((days_from_civil(year, month, day) % 7) + 11) % 7) as u32
@@ -83,7 +82,7 @@ pub struct Lunar {
 const LUNAR_MIN: i32 = 1900;
 const LUNAR_MAX: i32 = 2100;
 
-/// 支持换算的公历年份范围。上游是 1901..=2099
+/// 支持换算的公历年份范围是 1901..=2099
 /// （1900 年初的农历数据不全，2100 年之后表里没有）。
 pub const MIN_YEAR: i32 = 1901;
 pub const MAX_YEAR: i32 = 2099;
@@ -118,8 +117,8 @@ fn year_days(year: i32) -> i32 {
     // 348 = 12 × 29：先当每个月都是小月，再按位补大月。
     //
     // 位是 `0x8000 >> (m - 1)`，m = 1..=12，也就是 0x8000 一路右移到 0x10。
-    // （上游写成 `for (i = 0x8000; i > 0x8; i >>= 1)`，条件 `i > 0x8` 让循环
-    // 停在 0x10，正好 12 次。第一版照抄成 `(0x8000..=0x8)` 是个空区间，
+    // （写成 `for (i = 0x8000; i > 0x8; i >>= 1)`，条件 `i > 0x8` 让循环
+    // 停在 0x10，正好 12 次。第一版沿用成 `(0x8000..=0x8)` 是个空区间，
     // 一年只有 348 天，整个农历往后错位了两年多。）
     let mut sum = 348;
     let info = LUNAR_INFO[(year - LUNAR_MIN) as usize];
@@ -131,7 +130,7 @@ fn year_days(year: i32) -> i32 {
     sum + leap_days(year) as i32
 }
 
-/// 公历转农历。超出 1901..=2099 返回 `None`（上游也是这个范围）。
+/// 公历转农历。超出 1901..=2099 返回 `None`。
 #[must_use]
 pub fn solar_to_lunar(year: i32, month: u32, day: u32) -> Option<Lunar> {
     if !(MIN_YEAR..=MAX_YEAR).contains(&year) {
@@ -266,8 +265,8 @@ pub fn lunar_text(l: Lunar) -> String {
 
 /// 第 `n` 个节气（0 = 小寒，23 = 冬至）在 `year` 年的日期。
 ///
-/// 上游用的是**平气**公式（把回归年当常数 365.2422 天），不是现代的定气。
-/// 于是与本世纪的真实节气最多差一天。照抄是因为要跟上游的日历**对得上**；
+/// 用的是**平气**公式（把回归年当常数 365.2422 天），不是现代的定气。
+/// 于是与本世纪的真实节气最多差一天。沿用是为了让日历对得上；
 /// 真要精确到分钟得换成 VSOP87，那不是一个 Dock 该背的重量。
 #[must_use]
 pub fn term_date(year: i32, n: usize) -> (u32, u32) {
@@ -317,7 +316,7 @@ const SOLAR_FESTIVALS: [(u32, u32, &str); 6] = [
 
 /// 日历格子下方的副标签与"是否高亮"。
 ///
-/// 优先级照上游 `CalSub`：公历节日 > 农历节日 > 节气 > 初一显示月名 > 农历日名。
+/// 优先级：公历节日 > 农历节日 > 节气 > 初一显示月名 > 农历日名。
 /// 高亮表示"这是个值得用红色标出来的日子"（节日与节气）。
 #[must_use]
 pub fn sub_label(year: i32, month: u32, day: u32) -> (String, bool) {
@@ -399,7 +398,7 @@ pub fn ganzhi_text(year: i32, month: u32, day: u32) -> String {
     let offset = (branch - 2 + 12) % 12;
     let ms = ((ys % 5) * 2 + 2 + offset) % 10;
 
-    // 干支日：60 天一循环，1970-01-01 是辛巳日（偏移 17 是上游的对齐值）。
+    // 干支日：60 天一循环，1970-01-01 是辛巳日。
     let di = ((days_from_civil(year, month, day) + 17) % 60 + 60) % 60;
 
     format!(
@@ -467,8 +466,7 @@ impl CalendarState {
         s
     }
 
-    /// 翻页。`dy` / `dm` 为年 / 月的增量，月份会进位；年份夹在 1901..=2098
-    /// （上游同样夹这个范围 —— 再往后农历表就没有数据了）。
+    /// 翻页。`dy` / `dm` 为年 / 月的增量，月份会进位；年份夹在 1901..=2098。
     pub fn step(&mut self, dy: i32, dm: i32) {
         let mut y = self.year + dy;
         let mut m = self.month as i32 + dm;

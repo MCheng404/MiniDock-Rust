@@ -1,6 +1,6 @@
 //! Dock 条目模型与 `[Items]` / `[Groups]` 的序列化。
 //!
-//! 存储格式（与原版 1:1 兼容，**不要**轻易改）：
+//! 存储格式：
 //!
 //! ```text
 //! [Items]
@@ -15,9 +15,9 @@
 //!
 //! `type`：0 文件 / 1 文件夹 / 2 网址 / 3 分割线 / 4 应用组 / 5 回收站 / 6 速记。
 //!
-//! 字段上限来自原版的 `lstrcpynW` 调用（`sizeof` 含结尾 NUL，故可用字符数少 1）。
+//! 字段上限来自`lstrcpynW` 调用（`sizeof` 含结尾 NUL，故可用字符数少 1）。
 //! 这里用 [`truncate_units`] 按 **UTF-16 单元**截断，而不是按 `char` ——
-//! 一个 emoji 占 2 个单元，按 `char` 截会得到比 C 版更长的字符串，
+//! 一个 emoji 占 2 个单元，按 `char` 截会得到比 更长的字符串，
 //! 进而让 `I0` 行的总长度越过 profile API 的缓冲区边界。
 
 use crate::MAX_KIDS;
@@ -146,7 +146,7 @@ impl Item {
 
     /// 解析一行 `type|appmode|name|path|icon_src|fit|args`。
     ///
-    /// 失败条件与原版 `ParseItemLine` 一致：字段少于 4 个，或 `type` 不在 0..=6。
+    /// 失败条件与`ParseItemLine` 一致：字段少于 4 个，或 `type` 不在 0..=6。
     /// 注意 `icon_src` 为空串时视作"无自定义图标"。
     #[must_use]
     pub fn parse_line(line: &str) -> Option<Self> {
@@ -187,13 +187,13 @@ impl Item {
     }
 
     /// 是否应写入 ini。临时条目与"回收站/速记"这类内置条目例外：
-    /// 原版只跳过 `temp`，内置条目仍会持久化（它们的 path 是 `shell:` 协议）。
+    /// 只跳过 `temp`，内置条目仍会持久化（它们的 path 是 `shell:` 协议）。
     #[must_use]
     pub fn is_persistable(&self) -> bool {
         !self.temp
     }
 
-    /// 加入子项。超过 [`MAX_KIDS`] 返回 `false`（原版是静默丢弃）。
+    /// 加入子项。超过 [`MAX_KIDS`] 返回 `false`。
     pub fn add_kid(&mut self, kid: Item) -> bool {
         if self.kids.len() >= MAX_KIDS {
             return false;
@@ -205,7 +205,7 @@ impl Item {
     /// 清洗一个字段，使它不会破坏 ini 的行/字段结构。
     ///
     /// - `\r` `\n` `\0` → 空格：profile API 的值区不能换行，否则整段作废。
-    /// - `|` → 全角 `｜`：它是字段分隔符。原版不做处理，名字里带 `|` 的条目
+    /// - `|` → 全角 `｜`：它是字段分隔符。不做处理，名字里带 `|` 的条目
     ///   会在下一次保存后**整体错位**（type/path 全部左移一格），属于静默数据损坏。
     #[must_use]
     pub fn sanitize_for_ini(s: &str) -> String {

@@ -1,7 +1,7 @@
 //! 系统深浅色 / 强调色 / 开机自启动（注册表）。
 //!
-//! 全部是"读一次、失败就用默认值"的语义：Dock 不能在注册表被策略锁死时
-//! 起不来。原版也是这么写的（`RegGetValueW != ERROR_SUCCESS` 就按浅色）。
+//! 全部是"读一次、失败就用默认值"的语义：注册表被策略锁死时 Dock 也要能
+//! 起得来。
 
 use windows::core::w;
 use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
@@ -36,9 +36,40 @@ pub fn is_dark() -> bool {
     value == 0
 }
 
+/// Windows 强调色（DWM 的着色色），`None` = 取不到（远程会话、组策略禁用等）。
+///
+/// 归一化到**最大分量 170**：DWM 给的是用户自己调的颜色，明度差异很大 ——
+/// 冰蓝的 (200,230,255) 与深蓝的 (0,60,120) 直接拿去当烟雾色，前者会亮到
+/// 糊成白团、后者几乎看不见。压到同一上限之后只有色相在起作用，这正是
+/// "跟随强调色"想要的语义。
+#[must_use]
+pub fn accent() -> Option<[f32; 3]> {
+    use windows::core::BOOL;
+    use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
+
+    let mut color: u32 = 0;
+    let mut opaque = BOOL(0);
+    // SAFETY: 两个参数都是本栈帧上的有效指针，调用期间不会被移动。
+    unsafe { DwmGetColorizationColor(&mut color, &mut opaque) }.ok()?;
+    let rgb = [
+        ((color >> 16) & 0xFF) as f32,
+        ((color >> 8) & 0xFF) as f32,
+        (color & 0xFF) as f32,
+    ];
+    let max = rgb[0].max(rgb[1]).max(rgb[2]);
+    if max < 1.0 {
+        return None;
+    }
+    Some([
+        rgb[0] * 170.0 / max,
+        rgb[1] * 170.0 / max,
+        rgb[2] * 170.0 / max,
+    ])
+}
+
 /// 开机自启动是否已注册。
 ///
-/// 注意判定方式是"值存在"，不是"值等于当前路径" —— 原版如此。
+/// 判定方式是"值存在"，不是"值等于当前路径"。
 /// 用户挪动过 exe 之后旧路径仍在，这里会如实返回 true；`set_autostart(true)`
 /// 会把它改写成当前路径。
 #[must_use]

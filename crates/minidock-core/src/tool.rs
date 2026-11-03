@@ -1,9 +1,6 @@
 //! 计时器 / 秒表 / 待办：纯逻辑与 `[Tool]` 段的读写。
 //!
-//! 对应上游 v1.6.0 的 `ToolU` / `ToolLoad()` / `ToolSave()` / `ToolRemain()`
-//! （minidock.c:6322-6370）。
-//!
-//! **时间基准由调用方传入**（毫秒整数），不在这里调 `Instant::now()`：
+//! **时间基准由调用方传入**（毫秒整数），不在这里调 `Instant::now`：
 //! 这样所有时间相关行为都能用固定数字写单测，不必 sleep 等真实时间流逝。
 //! 与 `core::layout` 的纯函数风格一致。
 
@@ -12,13 +9,13 @@ use crate::ini::Ini;
 /// `[Tool]` 段名。
 pub const SECTION: &str = "Tool";
 
-/// 待办上限。上游写死 `todo[16]`（v1.6.0:6327）。
+/// 待办上限。写死 `todo[16]`（v1.6.0:6327）。
 pub const MAX_TODOS: usize = 16;
 
-/// 单条待办的文本上限。上游是 `WCHAR todo[16][96]`。
+/// 单条待办的文本上限。是 `WCHAR todo[16][96]`。
 pub const MAX_TODO_LEN: usize = 96;
 
-/// 倒计时默认总时长（毫秒）。上游 `TOOL_TOTAL_DEF = 5 * 60 * 1000`。
+/// 倒计时默认总时长（毫秒）。`TOOL_TOTAL_DEF = 5 * 60 * 1000`。
 pub const DEFAULT_TOTAL_MS: i64 = 5 * 60 * 1000;
 
 /// 计时器的两种模式。
@@ -85,16 +82,16 @@ impl Todo {
 
     /// 解析一行。
     ///
-    /// **修掉上游的 bug**：v1.6.0:6345 只在 `v[0] == '1'` 时跳过 `1|`
+    /// **修掉bug**：v1.6.0:6345 只在 `v[0] == '1'` 时跳过 `1|`
     /// 前缀，`0|` 时把前缀留在文本里。于是"存 → 读 → 存"每轮都会多叠
-    /// 一层前缀（`0|买菜` → `0|0|买菜` → …），而上游每次打勾都会触发
+    /// 一层前缀（`0|买菜` → `0|0|买菜` → …），而每次打勾都会触发
     /// 一次存盘。
     ///
     /// 这里**只剥一层** `d|` 前缀，不循环剥。理由：
     ///
     /// - 循环剥会误伤合法文本 —— 用户写 "1|foo" 存盘后是 `0|1|foo`，
     ///   循环下去就变成 `foo`，把用户的内容吃掉了；
-    /// - 只剥一层已经**根治累积**：被上游写坏的文件会残留一层 `0|`，
+    /// - 只剥一层已经**根治累积**：被写坏的文件会残留一层 `0|`，
     ///   但从此不再继续恶化。
     #[must_use]
     pub fn parse_line(line: &str) -> Self {
@@ -156,7 +153,7 @@ impl ToolState {
 
     /// 当前该显示的毫秒数。
     ///
-    /// 对应上游 `ToolRemain()`：跑着的时候减去/加上已跑时间。
+    /// 跑着的时候减去/加上已跑时间。
     /// 倒计时不会返回负数。
     #[must_use]
     pub fn display_ms(&self, now_ms: i64) -> i64 {
@@ -179,7 +176,7 @@ impl ToolState {
 
     /// 推进一帧：倒计时归零时停表。
     ///
-    /// 上游是在绘制里顺手停表（`ToolDraw` 里 `if (u->mode == 0 && u->running
+    /// 是在绘制里顺手停表（`ToolDraw` 里 `if (u->mode == 0 && u->running
     /// && t == 0) { running = 0; remainMs = 0; }`）。做成显式方法，
     /// 免得"画面没画就不停表"这种隐式依赖。
     pub fn tick(&mut self, now_ms: i64) {
@@ -233,7 +230,7 @@ impl ToolState {
         }
     }
 
-    /// 切换模式。停表但**保留**各自的数值 —— 与上游一致
+    /// 切换模式。停表但**保留**各自的数值 。
     /// （`mode` 与 `remainMs` / `stopMs` 是分开的字段，切回来值还在）。
     pub fn set_mode(&mut self, mode: ToolMode) {
         if self.mode == mode {
@@ -294,7 +291,7 @@ impl ToolState {
             }
             out.todos.push(Todo::parse_line(line));
         }
-        // 上游把秒写进 ini（`Total` / `Remain`），读出来再乘回毫秒。
+        // 把秒写进 ini（`Total` / `Remain`），读出来再乘回毫秒。
         if let Some(secs) = ini.get_i32(SECTION, "Total") {
             out.total_ms = i64::from(secs.max(1)) * 1000;
         }
@@ -326,7 +323,7 @@ impl ToolState {
 
 /// 把毫秒格式化成面板中央的大字。
 ///
-/// 秒表带两位小数（上游 `%02d:%02d.%02d`），倒计时只到秒。
+/// 秒表带两位小数，倒计时只到秒。
 #[must_use]
 pub fn format_ms(ms: i64, mode: ToolMode) -> String {
     let ms = ms.max(0);
@@ -362,12 +359,12 @@ mod tests {
         assert_eq!(Todo::parse_line("0|写代码"), t);
     }
 
-    /// 上游 bug 的回归测试：`0|` 前缀必须被剥掉，否则每轮存读都多叠一层。
+    /// bug 的回归测试：`0|` 前缀必须被剥掉，否则每轮存读都多叠一层。
     #[test]
     fn todo_parse_strips_zero_prefix() {
         assert!(!Todo::parse_line("0|买菜").done);
         assert_eq!(Todo::parse_line("0|买菜").text, "买菜");
-        // 被上游写坏的文件（双重前缀）：剥一层后残留一层，但不再累积。
+        // 被写坏的文件（双重前缀）：剥一层后残留一层，但不再累积。
         assert!(!Todo::parse_line("0|0|买菜").done);
         assert_eq!(Todo::parse_line("0|0|买菜").text, "0|买菜");
         // 关键：再存一次不会再叠。

@@ -36,6 +36,7 @@ pub mod offscreen;
 pub mod present;
 pub mod resmon_win;
 pub mod settings_win;
+pub mod smoke;
 pub mod tool_win;
 pub mod worker;
 

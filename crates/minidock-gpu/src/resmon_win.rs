@@ -1,7 +1,6 @@
 //! 资源监视器详情面板：点条带上的「CPU xx%」卡片弹出来。
 //!
-//! 对应上游 v1.6.0 的 `ShowResMon()` / `ResDraw()`（minidock.c:6533-6590）。
-//! 上游画三条进度条：处理器 / 内存 / 磁盘（C:）。
+//! 画三条进度条：处理器 / 内存 / 磁盘（C:）。
 //!
 //! 与设置窗口（ADR-036）同一套做法：进程内第二个分层窗口，共用 GPU 设备，
 //! 自己的 `FrameRenderer`。但这个面板是**即时刷新**的 —— 数据每秒变一次，
@@ -28,7 +27,7 @@ use crate::gpu::{Gpu, GpuError};
 /// 窗口类名。
 pub const CLASS_NAME: &str = "MiniDockResMon";
 
-/// 面板逻辑尺寸（本地坐标）。上游是 340 宽，这里放宽一点让进度条有地方画。
+/// 面板逻辑尺寸（本地坐标）。是 340 宽，这里放宽一点让进度条有地方画。
 const LOGICAL_SIZE: (f32, f32) = (340.0, 210.0);
 
 /// 资源监视器详情面板。
@@ -211,7 +210,7 @@ impl ResMonWindow {
 
 /// 画面板：标题 + 三条进度条（处理器 / 内存 / 磁盘）。
 ///
-/// 对应上游的 `ResDraw()`。上游是显式定位（`DrawTextBox` 传矩形），
+/// `ResDraw`。是显式定位（`DrawTextBox` 传矩形），
 /// 这里也用 painter 显式画 —— 用 egui 的布局做左右对齐时，
 /// 右边的数值会被挤没（实测过：`with_layout(right_to_left)` 在
 /// `horizontal` 里拿不到剩余宽度）。

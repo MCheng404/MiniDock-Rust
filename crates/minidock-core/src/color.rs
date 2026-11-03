@@ -2,7 +2,7 @@
 //!
 //! 约定与 GDI+ 完全一致：`0xAARRGGBB`，**非预乘** alpha。
 //! DIB section 用 `PixelFormat32bppPARGB`，预乘由 GDI+ 在写入时完成，
-//! 调用方始终传非预乘值 —— 这一点与 C 版 `ARGBC()` 宏相同。
+//! 调用方始终传非预乘值 —— 这一点与 `ARGBC` 宏相同。
 
 /// `0xAARRGGBB`。
 pub type Argb = u32;
@@ -13,7 +13,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> Argb {
     argb(255, r, g, b)
 }
 
-/// 构造带 alpha 的颜色。对应 C 版 `ARGBC(a, r, g, b)`。
+/// 构造带 alpha 的颜色。对应 `ARGBC(a, r, g, b)`。
 #[must_use]
 pub const fn argb(a: u8, r: u8, g: u8, b: u8) -> Argb {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
@@ -44,7 +44,7 @@ pub const fn with_alpha(c: Argb, a: u8) -> Argb {
 
 /// 按 alpha 比例缩放（用于"整体变淡"，例如隐藏动画中的淡出）。
 ///
-/// `scale` 取 `0.0..=1.0`；越界会夹紧而不是回绕 —— 原版 `ARGBC` 直接
+/// `scale` 取 `0.0..=1.0`；越界会夹紧而不是回绕 —— `ARGBC` 直接
 /// 把 `op * 255` 塞进 `int`，`Opacity=1000` 时 alpha 溢出进颜色通道，
 /// 是 issue 里记录过的真实缺陷。
 #[must_use]
@@ -69,7 +69,7 @@ pub fn mix(a: Argb, b: Argb, t: f32) -> Argb {
 
 /// HSV → RGB，`h` 单位为度（任意实数，内部取模），`s`/`v` 取 `0.0..=1.0`。
 ///
-/// 对应 C 版 `HsvRgb()`：`AccentTone` 开启时用系统强调色的**色相**生成
+/// 对应 `HsvRgb`：`AccentTone` 开启时用系统强调色的**色相**生成
 /// Material You 风格的两种色调，饱和度/明度由深/浅色主题决定。
 #[must_use]
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
@@ -93,9 +93,9 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     (to(r), to(g), to(b))
 }
 
-/// RGB → 色相（度，`0.0..360.0`）。对应 `RefreshAccent()` 里的那段反算。
+/// RGB → 色相（度，`0.0..360.0`）。对应 `RefreshAccent` 里的那段反算。
 ///
-/// 灰阶（`d <= 0.001`）返回 0.0，与原版一致。
+/// 灰阶（`d <= 0.001`）返回 0.0，。
 #[must_use]
 pub fn hue_of(c: Argb) -> f32 {
     let r = red(c) as f32 / 255.0;
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn scale_alpha_clamps_instead_of_overflowing() {
-        // 原版缺陷复现点：alpha 溢出绝不能污染颜色通道。
+        // 缺陷复现点：alpha 溢出绝不能污染颜色通道。
         let c = argb(200, 10, 20, 30);
         assert_eq!(scale_alpha(c, 1.5), c);
         assert_eq!(red(scale_alpha(c, 1.5)), 10);

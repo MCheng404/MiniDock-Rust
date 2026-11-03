@@ -1,4 +1,4 @@
-//! 启动条目。对应原版 `LaunchPtr()` / `OpenUrlItem()`。
+//! 启动条目。
 //!
 //! 这里只负责"把东西跑起来"，不做任何 UI 反馈 —— 弹跳动画、运行状态扫描
 //! 都在调用方。分成两层的原因是：启动是唯一会**产生外部副作用**的动作，
@@ -26,7 +26,7 @@ impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unsupported(what) => write!(f, "{what} 尚未实现"),
-            // 原版同样以 32 为界；把原始码打出来比"失败"两个字有用得多。
+            // 同样以 32 为界；把原始码打出来比"失败"两个字有用得多。
             Self::EmptyTarget => write!(f, "路径为空"),
             Self::NotFound(p) => write!(f, "路径不存在：{p}"),
             Self::Shell(0) => write!(f, "系统内存不足"),
@@ -76,7 +76,7 @@ fn shell_open(file: &str, params: Option<&str>, dir: Option<&str>) -> Result<(),
 
 /// 网页应用：`app_mode == 1` 时优先用 Edge / Chrome 的 `--app` 窗口。
 ///
-/// 顺序照抄原版：Edge 优先于 Chrome（Windows 上 Edge 一定存在），
+/// 顺序沿用：Edge 优先于 Chrome（Windows 上 Edge 一定存在），
 /// 两者都失败才退回默认浏览器 —— 不带 `--app` 的普通标签页。
 fn open_url(url: &str, app_mode: i32) -> Result<(), LaunchError> {
     if app_mode == 1 {
@@ -104,7 +104,7 @@ fn open_url(url: &str, app_mode: i32) -> Result<(), LaunchError> {
 /// | 文件夹 | 直接打开，不设工作目录 |
 /// | 组 / 速记 | 未实现（要等弹窗层） |
 ///
-/// 文件与文件夹的差别是原版就有的：给文件设工作目录，是为了让那些
+/// 文件与文件夹的差别是就有的：给文件设工作目录，是为了让那些
 /// "在当前目录找资源"的老程序能找到旁边的 dll/配置。
 pub fn launch(item: &Item) -> Result<(), LaunchError> {
     let params = if item.args.is_empty() {

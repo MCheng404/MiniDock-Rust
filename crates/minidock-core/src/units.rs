@@ -1,6 +1,6 @@
 //! DPI 与像素换算。
 //!
-//! 原版到处是 `Sc(v)` = `MulDiv(v, g_dpi, 96)`。这里保留同样的语义
+//! 到处是 `Sc(v)` = `MulDiv(v, g_dpi, 96)`。这里保留同样的语义
 //! （四舍五入、远离零），但把它集中成一个函数，避免"某处忘了缩放"
 //! 这类只有在 150% 缩放下才暴露的缺陷。
 
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn no_overflow_on_extremes() {
-        // C 版 MulDiv 在 32 位中间值上会溢出；这里必须是饱和而不是回绕。
+        // MulDiv 在 32 位中间值上会溢出；这里必须是饱和而不是回绕。
         assert_eq!(scale(i32::MAX, 480), i32::MAX);
         assert_eq!(scale(i32::MIN, 480), i32::MIN);
     }

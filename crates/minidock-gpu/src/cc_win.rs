@@ -1,7 +1,6 @@
 //! 控制中心：点条带上的控制中心卡片弹出来。
 //!
-//! 对应上游 v1.6.0 的 `ShowCtrlCenter()` / `CcDraw()` / `CcMove()` / `CcUp()`
-//! （minidock.c:6237-6310、6716-6735）：360 宽的面板，3 列磁贴，底部一条
+//! 360 宽的面板，3 列磁贴，底部一条
 //! 主音量滑块与电量文案。
 //!
 //! 与资源监视器面板的两点差别：
@@ -277,7 +276,7 @@ impl CcWindow {
             return;
         };
         match tile {
-            // 这三个没有稳定的公开接口，拉系统自己的面板（上游也是这么做的）。
+            // 这三个没有稳定的公开接口，拉系统自己的面板。
             Tile::Wifi | Tile::Bluetooth | Tile::Hotspot => {
                 sysact::open_quick_settings();
                 self.hide();
@@ -517,7 +516,7 @@ fn draw_panel(
         );
     }
 
-    // 音量滑块（与上游同一套几何：左边 22 的图标，右边是轨道）。
+    // 音量滑块。
     let rows = control::rows(tiles.len());
     let sy = rect.top() + ty0 + rows as f32 * (TILE_H + TILE_GAP) + 6.0;
     let slider = EguiRect::from_min_size(
@@ -781,7 +780,7 @@ fn physical_size(ppp: f32, tiles: usize) -> (i32, i32) {
     )
 }
 
-/// 摆在卡片旁边，规则同日历弹层（复刻上游 `PopRun`），再夹进显示器。
+/// 摆在卡片旁边，规则同日历弹层，再夹进显示器。
 fn place(
     pw: i32,
     ph: i32,

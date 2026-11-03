@@ -1,6 +1,6 @@
 //! 时钟卡片要显示的文字。
 //!
-//! 逐条对应原版 `ClockLines()`（`minidock.c` 2433 行）。这里只产出文字，
+//! 逐条这里只产出文字，
 //! 排版与绘制在 UI 层 —— 字符串拼接是纯逻辑，放到 core 才能秒级验证。
 //!
 //! ## 两套日期写法（容易搞混）
@@ -14,7 +14,7 @@
 //! | 竖 | 1 | `10/30`，周几单独一行 |
 //!
 //! 横排不显示年份是不够的：横排卡片宽、放得下；竖排卡片只有 21 px 一行，
-//! 塞年份会挤成一团。原版就是按这个理由分成两套的。
+//! 塞年份会挤成一团。就是按这个理由分成两套的。
 
 use crate::config::{Config, Key};
 
@@ -48,7 +48,7 @@ fn weekday_name(w: u8) -> &'static str {
 /// 生成卡片要显示的各行，顺序即绘制顺序。
 #[must_use]
 pub fn clock_lines(cfg: &Config, t: &ClockParts) -> Vec<ClockLine> {
-    // 语义（上游选项数组是权威）：0 = 都显示，1 = 仅时间，2 = 仅日期。
+    // 语义：0 = 都显示，1 = 仅时间，2 = 仅日期。
     let has_time = cfg.get_i32(Key::CLOCK_SHOW) != 2;
     let has_date = cfg.get_i32(Key::CLOCK_SHOW) != 1;
     let vertical = !cfg.edge.is_horizontal();
@@ -87,7 +87,7 @@ pub fn clock_lines(cfg: &Config, t: &ClockParts) -> Vec<ClockLine> {
     }
 
     let mut out = Vec::with_capacity(dates.len() + 1);
-    // `ClockOrder`：1 = 日期在上、时间在下。竖排时原版也照样支持。
+    // `ClockOrder`：1 = 日期在上、时间在下。竖排时也照样支持。
     if has_time && has_date && cfg.get_i32(Key::CLOCK_ORDER) != 0 {
         out.extend(dates.into_iter().map(|text| ClockLine {
             text,

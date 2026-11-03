@@ -1,7 +1,7 @@
 //! 控制中心里那几个"一按就调系统"的动作。
 //!
-//! 都放在 platform 层，`cc_win` 只管画和判命中。上游把这些散在 `CcUp` 的
-//! `switch` 里（minidock.c:6284-6310），移植时按动作拆成函数更好测也更安全。
+//! 都放在 platform 层，`cc_win` 只管画和判命中。按动作拆成函数，
+//! 比塞进一个 `switch` 更好测也更安全。
 
 use windows::core::HSTRING;
 use windows::Win32::System::Registry::{
@@ -35,7 +35,7 @@ pub fn run_hidden(exe: &str, args: &str) {
 
 /// 打开 Windows 的快速设置面板（Win + A）。
 ///
-/// 上游对 Wi‑Fi / 蓝牙 / 热点三个磁贴都是这么做的（minidock.c:6290-6295）：
+/// 对 Wi‑Fi / 蓝牙 / 热点三个磁贴都是这么做的：
 /// 这几个开关没有稳定的公开接口，与其去调未文档化的 WinRT 私有 API，
 /// 不如把系统自己的面板拉出来。
 pub fn open_quick_settings() {
@@ -52,7 +52,7 @@ pub fn open_quick_settings() {
 
 /// 打开 Windows 的通知区域（托盘溢出面板）。
 ///
-/// 上游 1.6.5 的 `TrayOpen()` 是两段式：先跨进程点 Explorer 的溢出按钮
+/// 1.6.5 的 `TrayOpen` 是两段式：先跨进程点 Explorer 的溢出按钮
 /// （`TB_BUTTONCOUNT` / `TB_GETITEMRECT` 取坐标再 `mouse_event`），失败才
 /// 退回热键。我们**只做热键那一段**：
 ///
@@ -74,7 +74,7 @@ pub fn open_tray() {
         keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
     }
     // 必须等焦点真的落到通知区域再回车，否则 Enter 会打到原来的前台窗口上
-    // （上游也是 `Sleep(120)`）。
+    // （也是 `Sleep(120)`）。
     std::thread::sleep(std::time::Duration::from_millis(120));
     unsafe {
         keybd_event(VK_RETURN.0 as u8, 0, Default::default(), 0);

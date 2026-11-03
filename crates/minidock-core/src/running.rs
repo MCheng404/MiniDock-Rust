@@ -1,6 +1,5 @@
 //! 判断条目对应的应用是否在运行。
 //!
-//! 对应 C 版 `ScanProc` 里 `items[i].running = c.seen[i]` 那一段。
 //!
 //! # 为什么放在 core 而不是 platform
 //!
@@ -54,6 +53,43 @@ pub fn refresh_running(items: &mut [Item], running: &HashSet<String>) -> bool {
         }
     }
     changed
+}
+
+/// 计算"未固定的运行中应用"应该显示哪些。
+///
+/// * `running` —— 当前在运行的全部 exe（小写）。
+/// * `pinned` —— 已经固定在 Dock 上的 exe，不再重复出现。
+/// * `prev` —— 上一轮的临时条目。**保持它们的相对顺序**，只把还活着的留下。
+/// * `limit` —— 上限（栏体会按条目数缩放，太多会把 Dock 压扁）。
+/// * `skip` —— 要忽略的 exe（Dock 自己），空串表示不忽略。
+///
+/// 顺序是"老的在前、新的按名字排在后面"：`EnumWindows` 给的是 Z 序，每轮
+/// 都变，按它重排会让图标互相穿插，每个位置还要重传图标纹理。
+#[must_use]
+pub fn temp_keys(
+    running: &HashSet<String>,
+    pinned: &HashSet<String>,
+    prev: &[String],
+    limit: usize,
+    skip: &str,
+) -> Vec<String> {
+    let keep =
+        |e: &str| running.contains(e) && !pinned.contains(e) && !e.eq_ignore_ascii_case(skip);
+    let mut out: Vec<String> = prev.iter().filter(|e| keep(e)).cloned().collect();
+    let mut fresh: Vec<String> = running
+        .iter()
+        .filter(|e| {
+            !pinned.contains(*e)
+                && !prev.contains(*e)
+                && !e.eq_ignore_ascii_case(skip)
+                && !e.is_empty()
+        })
+        .cloned()
+        .collect();
+    fresh.sort();
+    out.extend(fresh);
+    out.truncate(limit);
+    out
 }
 
 #[cfg(test)]
@@ -155,5 +191,53 @@ mod tests {
         assert!(changed);
         assert!(items[0].running);
         assert!(!items[1].running, "分割线的 running 必须保持 false");
+    }
+
+    /// 临时条目：老的保持原位，新的排在后面。
+    ///
+    /// 顺序稳定性是有代价换来的：`EnumWindows` 的 Z 序每轮都在变，照它
+    /// 重排会让图标在两次扫描之间换位置，用户根本点不准。
+    #[test]
+    fn temp_keeps_existing_order_and_appends_new() {
+        let running = set(&[r"c:.exe", r"c:.exe", r"c:\c.exe"]);
+        let prev = vec![r"c:\c.exe".to_owned(), r"c:.exe".to_owned()];
+        let got = temp_keys(&running, &HashSet::new(), &prev, 8, "");
+        assert_eq!(got, vec![r"c:\c.exe", r"c:.exe", r"c:.exe"]);
+    }
+
+    /// 退出的应用要从列表里消失。
+    #[test]
+    fn temp_drops_vanished_apps() {
+        let running = set(&[r"c:.exe"]);
+        let prev = vec![r"c:.exe".to_owned(), r"c:.exe".to_owned()];
+        let got = temp_keys(&running, &HashSet::new(), &prev, 8, "");
+        assert_eq!(got, vec![r"c:.exe"]);
+    }
+
+    /// 已固定的应用不重复出现，哪怕它也在 prev 里。
+    #[test]
+    fn temp_excludes_pinned() {
+        let running = set(&[r"c:.exe", r"c:.exe"]);
+        let pinned = set(&[r"c:.exe"]);
+        let prev = vec![r"c:.exe".to_owned()];
+        let got = temp_keys(&running, &pinned, &prev, 8, "");
+        assert_eq!(got, vec![r"c:.exe"]);
+    }
+
+    /// 上限必须生效，且截断发生在末尾（老的不被挤掉）。
+    #[test]
+    fn temp_honours_limit() {
+        let running = set(&[r"c:.exe", r"c:.exe", r"c:\c.exe"]);
+        let prev = vec![r"c:.exe".to_owned()];
+        let got = temp_keys(&running, &HashSet::new(), &prev, 2, "");
+        assert_eq!(got, vec![r"c:.exe", r"c:.exe"]);
+    }
+
+    /// Dock 自己不该出现在列表里：否则它scan到自己的窗口，凭空多一个图标。
+    #[test]
+    fn temp_skips_self() {
+        let running = set(&[r"c:\minidock-dock.exe", r"c:.exe"]);
+        let got = temp_keys(&running, &HashSet::new(), &[], 8, r"c:\minidock-dock.exe");
+        assert_eq!(got, vec![r"c:.exe"]);
     }
 }

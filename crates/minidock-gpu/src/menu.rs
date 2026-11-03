@@ -12,8 +12,7 @@
 //! 建窗、模态消息循环、命令执行放在 `bin/dock.rs` —— 那些必须碰 Win32，
 //! 而这里的每一条都能用单元测试钉住。
 //!
-//! 上游对应 `ShowMenuAt()` + `ShowMenu()`：C 版是阻塞式自绘菜单窗口，
-//! 这里保持同样的模型（打开 → 选一项或取消 → 返回命令）。
+//! 模型是阻塞式自绘菜单：打开 → 选一项或取消 → 返回命令。
 
 use minidock_core::item::{Item, ItemKind};
 
@@ -99,7 +98,10 @@ impl Menu {
     /// 返回 `None` 表示**不该弹菜单**（例如点在分割线上而没有可用命令）。
     /// 让菜单为空窗口是对用户的欺骗：弹出一个小方框却什么都不能点。
     #[must_use]
-    pub fn build(item: Option<&Item>, running: bool) -> Option<Self> {
+    /// `temp` = 这个条目是"未固定的运行中应用"（临时条目）。它们不改配置，
+    /// 所以不给"加分割线""从 Dock 移除"—— 那两条按配置下标改数据，
+    /// 用临时条目的下标去打会改到别的条目上。
+    pub fn build(item: Option<&Item>, running: bool, temp: bool) -> Option<Self> {
         let mut entries = Vec::new();
         match item.map(|i| i.kind) {
             None => {
@@ -114,8 +116,7 @@ impl Menu {
                 ));
             }
             Some(kind) => {
-                // 运行中的普通应用给"显示 / 最小化"，
-                // 与上游 `it->running && it->type == T_FILE ? ...` 一致。
+                // 运行中的文件条目给"显示 / 最小化"，其余给"打开"。
                 let label = if running && kind == ItemKind::File {
                     "显示 / 最小化"
                 } else {
@@ -133,18 +134,20 @@ impl Menu {
                 if running && matches!(kind, ItemKind::File | ItemKind::Url) {
                     entries.push(MenuEntry::new("退出应用", MenuCmd::QuitApp, false, false));
                 }
-                entries.push(MenuEntry::new(
-                    "在右侧添加分割线",
-                    MenuCmd::AddSepAfter,
-                    false,
-                    true,
-                ));
-                entries.push(MenuEntry::new(
-                    "从 Dock 移除",
-                    MenuCmd::RemoveItem,
-                    true,
-                    false,
-                ));
+                if !temp {
+                    entries.push(MenuEntry::new(
+                        "在右侧添加分割线",
+                        MenuCmd::AddSepAfter,
+                        false,
+                        true,
+                    ));
+                    entries.push(MenuEntry::new(
+                        "从 Dock 移除",
+                        MenuCmd::RemoveItem,
+                        true,
+                        false,
+                    ));
+                }
             }
         }
         if entries.is_empty() {
@@ -352,7 +355,7 @@ mod tests {
     #[test]
     fn file_menu_has_open_and_remove() {
         let it = item(ItemKind::File, "记事本");
-        let m = Menu::build(Some(&it), false).expect("应当有菜单");
+        let m = Menu::build(Some(&it), false, false).expect("应当有菜单");
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
@@ -373,7 +376,7 @@ mod tests {
     #[test]
     fn running_file_menu_offers_toggle_and_quit() {
         let it = item(ItemKind::File, "记事本");
-        let m = Menu::build(Some(&it), true).expect("应当有菜单");
+        let m = Menu::build(Some(&it), true, false).expect("应当有菜单");
         assert_eq!(m.entries[0].label, "显示 / 最小化");
         assert!(m.entries.iter().any(|e| e.cmd == MenuCmd::QuitApp));
     }
@@ -384,7 +387,7 @@ mod tests {
     #[test]
     fn idle_file_menu_has_no_quit() {
         let it = item(ItemKind::File, "记事本");
-        let m = Menu::build(Some(&it), false).expect("应当有菜单");
+        let m = Menu::build(Some(&it), false, false).expect("应当有菜单");
         assert!(!m.entries.iter().any(|e| e.cmd == MenuCmd::QuitApp));
     }
 
@@ -392,13 +395,13 @@ mod tests {
     #[test]
     fn only_folders_open_in_explorer() {
         let folder = item(ItemKind::Folder, "下载");
-        assert!(Menu::build(Some(&folder), false)
+        assert!(Menu::build(Some(&folder), false, false)
             .expect("应当有菜单")
             .entries
             .iter()
             .any(|e| e.cmd == MenuCmd::OpenInExplorer));
         let file = item(ItemKind::File, "记事本");
-        assert!(!Menu::build(Some(&file), false)
+        assert!(!Menu::build(Some(&file), false, false)
             .expect("应当有菜单")
             .entries
             .iter()
@@ -408,7 +411,7 @@ mod tests {
     /// 空白处 = 对 Dock 本身说话：退出 + 起动台 + 设置。
     #[test]
     fn blank_area_offers_settings_and_exit() {
-        let m = Menu::build(None, false).expect("应当有菜单");
+        let m = Menu::build(None, false, false).expect("应当有菜单");
         let cmds: Vec<MenuCmd> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
@@ -419,11 +422,27 @@ mod tests {
         assert!(m.entries[0].sep_after);
     }
 
+    /// 临时条目（运行中但没固定的应用）只给"显示 / 最小化"和"退出应用"。
+    ///
+    /// 结构性命令（加分割线 / 从 Dock 移除）是按**配置下标**改数据的，
+    /// 而临时条目根本不在配置里 —— 放出来就会改到别人头上。
+    #[test]
+    fn temp_item_has_no_structural_commands() {
+        let mut it = Item::new(ItemKind::File, "Chrome", r"C:\x\chrome.exe");
+        it.running = true;
+        let m = Menu::build(Some(&it), true, true).expect("应当有菜单");
+        let has = |c: MenuCmd| m.entries.iter().any(|e| e.cmd == c);
+        assert!(has(MenuCmd::Open), "临时条目必须能点击打开");
+        assert!(has(MenuCmd::QuitApp), "运行中的条目要能退出");
+        assert!(!has(MenuCmd::RemoveItem), "临时条目不在配置里，不能移除");
+        assert!(!has(MenuCmd::AddSepAfter), "临时条目不能插分割线");
+    }
+
     /// 分割线只给"删除"，外加总在最后的一项"Dock 设置"。
     #[test]
     fn separator_offers_delete_and_settings() {
         let sep = item(ItemKind::Separator, "");
-        let m = Menu::build(Some(&sep), false).expect("应当有菜单");
+        let m = Menu::build(Some(&sep), false, false).expect("应当有菜单");
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
@@ -528,7 +547,7 @@ mod tests {
     #[test]
     fn chinese_labels_are_wider_than_latin() {
         assert!(estimate_width("在资源管理器中打开") > estimate_width("open in explorer"));
-        let m = Menu::build(None, false).expect("应当有菜单");
+        let m = Menu::build(None, false, false).expect("应当有菜单");
         let (w, _) = m.logical_size();
         assert!(w >= MIN_W, "宽度不小于最小值，实际 {w}");
     }
@@ -536,7 +555,7 @@ mod tests {
     /// 高亮变化要能报告出来（主循环靠它决定重绘）。
     #[test]
     fn set_hover_reports_change() {
-        let mut m = Menu::build(None, false).expect("应当有菜单");
+        let mut m = Menu::build(None, false, false).expect("应当有菜单");
         assert!(m.set_hover(Some(0)));
         assert!(!m.set_hover(Some(0)), "同一个下标不算变化");
         assert!(m.set_hover(None));
@@ -545,7 +564,7 @@ mod tests {
     /// 命令查询越界返回 `None`，不能 panic。
     #[test]
     fn cmd_at_is_bounds_checked() {
-        let m = Menu::build(None, false).expect("应当有菜单");
+        let m = Menu::build(None, false, false).expect("应当有菜单");
         assert_eq!(m.cmd_at(0), Some(MenuCmd::ExitDock));
         assert_eq!(m.cmd_at(9), None);
     }

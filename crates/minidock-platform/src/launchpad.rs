@@ -1,6 +1,6 @@
 //! 起动台的扫描：开始菜单里的 `.lnk`。
 //!
-//! 对应上游 v1.6.0 的 `LpScan`（minidock.c:6816-6845）：递归两个「程序」目录
+//! 递归两个「程序」目录
 //! （全局 + 当前用户），收集快捷方式，按名字排序去重。
 //!
 //! 只读文件系统，不起 COM，也不加载图标 —— 图标由 `gpu` 层按需取。
@@ -13,23 +13,22 @@ pub use minidock_core::launchpad::AppEntry;
 
 /// 名字里带这些词的是卸载器 / 说明文档，不该出现在起动台里。
 ///
-/// 上游用 `StrStrIW` 做子串匹配（minidock.c:6834），大小写不敏感。
+/// 用 `StrStrIW` 做子串匹配，大小写不敏感。
 const BLOCK_WORDS: [&str; 5] = ["uninstall", "卸载", "readme", "帮助", "help"];
 
-/// 递归深度上限。上游是 4（`depth < 4`）。
+/// 递归深度上限。是 4（`depth < 4`）。
 const MAX_DEPTH: usize = 4;
 
 /// 扫开始菜单。
 ///
-/// 顺序：先全局目录、再用户目录，各自递归；最后按名字排序并去重
-/// （同名只留第一个 —— 与上游一致，全局的排在前面）。
+/// 顺序：先全局目录、再用户目录，各自递归；最后按名字排序并去重。
 #[must_use]
 pub fn scan() -> Vec<AppEntry> {
     let mut out = Vec::new();
     for dir in start_menu_dirs() {
         walk(&dir, 0, &mut out);
     }
-    // 上游是先 qsort 再逐个 `lstrcmpiW` 去重。
+    // 是先 qsort 再逐个 `lstrcmpiW` 去重。
     out.sort_by(|a, b| cmp_ci(&a.name, &b.name));
     out.dedup_by(|a, b| cmp_ci(&a.name, &b.name) == std::cmp::Ordering::Equal);
     out
@@ -65,7 +64,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<AppEntry>) {
             }
             continue;
         }
-        // 只要 .lnk（上游 `PathMatchSpecW(fd.cFileName, L"*.lnk")`）。
+        // 只要 .lnk（`PathMatchSpecW(fd.cFileName, L"*.lnk")`）。
         if !name.to_lowercase().ends_with(".lnk") {
             continue;
         }
@@ -105,7 +104,7 @@ mod tests {
         assert!(is_blocked("帮助文档"));
         assert!(!is_blocked("微信"));
         assert!(!is_blocked("Visual Studio Code"));
-        // "helped" 里没有 "help" 吗？有 —— 上游也是子串匹配，这里保持一致。
+        // "helped" 里没有 "help" 吗？有 —— 也是子串匹配，这里保持一致。
         assert!(is_blocked("Helper"));
     }
 

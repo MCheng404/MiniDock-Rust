@@ -1,8 +1,8 @@
 //! 图标适配：决定一块位图里**哪一部分**该画、占多大、要不要圆角。
 //!
-//! 逐条对应原版 `FitBitmap()`（`minidock.c` 578 行）的三档语义：
+//! 逐条
 //!
-//! | `fit` | 原版文案 | 做法 |
+//! | `fit` | 文案 | 做法 |
 //! |---|---|---|
 //! | 0 | 自动（去除透明 / 纯色边，推荐） | 先按 alpha 求内容边界；若是整块不透明，再按"与左上角同色即背景"二次收紧，并加圆角 |
 //! | 1 | 完整保留（不裁切，可能有留白） | 整图不动，按 94% 缩放 |
@@ -13,7 +13,7 @@
 //!
 //! 为什么要二次收紧（`solid_bbox`）：Win11 的计算器图标是**整块不透明的深色
 //! 方块**，alpha 全 255。只按 alpha 求边界会得到整图，于是 Dock 上会出现一个
-//! 深色大方块；原版会把同色的底板当背景裁掉，只剩下中间的图形。
+//! 深色大方块；会把同色的底板当背景裁掉，只剩下中间的图形。
 
 /// 一块矩形区域，`x1` / `y1` 为**独占**上界。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub enum FitMode {
 }
 
 impl FitMode {
-    /// 越界按 [`FitMode::Auto`] 处理 —— 原版用 `_wtoi` 直接吃进 int，
+    /// 越界按 [`FitMode::Auto`] 处理 —— 用 `_wtoi` 直接吃进 int，
     /// 未知值在 `FitBitmap` 里走到"不裁切"分支；对我们来说按自动更合理。
     #[must_use]
     pub const fn from_code(v: i32) -> Self {
@@ -83,15 +83,15 @@ pub struct IconFit {
     pub bbox: BBox,
     /// `Some(半径)` = 内容是不透明整块，需要按圆角遮罩。半径以**源像素**计。
     pub rounded: Option<f32>,
-    /// 内容在目标尺寸上的填充比例（原版是 0.94 或 1.0）。
+    /// 内容在目标尺寸上的填充比例。
     pub fill: f32,
 }
 
-/// 原版 `FitBitmap` 的 fill 参数，三档都是 0.94，只有居中裁切用 1.0。
+/// `FitBitmap` 的 fill 参数，三档都是 0.94，只有居中裁切用 1.0。
 const FILL: f32 = 0.94;
-/// 圆角半径占短边的比例（原版 `* 0.22f`）。
+/// 圆角半径占短边的比例。
 const CORNER: f32 = 0.22;
-/// alpha 边界阈值（原版 `AlphaBBox(..., 40)`）。
+/// alpha 边界阈值（`AlphaBBox(..., 40)`）。
 const ALPHA_THR: u8 = 40;
 
 /// 计算适配区域。
@@ -112,7 +112,7 @@ pub fn fit_icon(rgba: &[u8], w: u32, h: u32, mode: FitMode) -> IconFit {
             fill: FILL,
         },
         FitMode::Square => {
-            // 原版：取短边做中心正方形，fill = 1.0。
+            // 取短边做中心正方形，fill = 1.0。
             let side = w.min(h);
             let bbox = BBox {
                 x0: (w - side) / 2,
@@ -154,7 +154,7 @@ pub fn fit_icon(rgba: &[u8], w: u32, h: u32, mode: FitMode) -> IconFit {
 }
 
 /// alpha 大于阈值的最小包围盒。整图全透明时返回全图（不是空盒 ——
-/// 原版也这样，否则后面会算出 0 尺寸）。
+/// 也这样，否则后面会算出 0 尺寸）。
 #[must_use]
 pub fn alpha_bbox(rgba: &[u8], w: u32, h: u32, thr: u8) -> BBox {
     let (mut minx, mut miny) = (w, h);
@@ -184,7 +184,7 @@ pub fn alpha_bbox(rgba: &[u8], w: u32, h: u32, thr: u8) -> BBox {
 
 /// 把"与左上角同色"的底板当背景裁掉。整图就是底板本身（没有前景）时返回 `None`。
 ///
-/// 判定规则照抄原版：alpha > 200 且与参考色三通道绝对差之和 < 70 视为背景；
+/// 判定规则沿用：alpha > 200 且与参考色三通道绝对差之和 < 70 视为背景；
 /// 某一行/列里背景像素占比 > 98% 就继续向内收。
 #[must_use]
 pub fn solid_bbox(rgba: &[u8], w: u32, h: u32) -> Option<BBox> {
@@ -253,7 +253,7 @@ pub fn solid_bbox(rgba: &[u8], w: u32, h: u32) -> Option<BBox> {
     }
 }
 
-/// 在 `bbox` 内按圆角遮罩清零 alpha（模拟原版的 `GdipSetClipPath`）。
+/// 在 `bbox` 内按圆角遮罩清零 alpha。
 ///
 /// 只在准备纹理时做一次。半径按源像素给，缩放后自然等比 —— 所以 Dock 图标
 /// 在放大动画的任意尺寸下圆角比例都一致。
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn alpha_bbox_returns_full_when_fully_transparent() {
-        // 全透明时返回全图：原版也这样，返回空盒会让后续算 0 尺寸。
+        // 全透明时返回全图：也这样，返回空盒会让后续算 0 尺寸。
         let img = make(8, 8, |_, _| [0, 0, 0, 0]);
         assert_eq!(alpha_bbox(&img, 8, 8, 40), BBox::full(8, 8));
     }
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn solid_bbox_gives_up_on_uniform_image() {
-        // 整块同色 = 底板即全部，裁完什么都不剩 —— 原版靠"太薄就放弃"兜住。
+        // 整块同色 = 底板即全部，裁完什么都不剩 —— 靠"太薄就放弃"兜住。
         let img = make(64, 64, |_, _| [70, 70, 70, 255]);
         assert_eq!(solid_bbox(&img, 64, 64), None);
     }

@@ -1,16 +1,15 @@
 //! 从路径取图标（HICON → RGBA）。
 //!
-//! 原版走 GDI+（`HiconToGp`）：`GdipCreateBitmapFromHICON` 会给很多图标留下
-//! 一块黑底，所以它先手工 `GetIconInfo` + `GetDIBits` 取像素，取不到才回退。
-//! 这里保留同样的**三层顺序**，只是不再经 GDI+ 中转 —— 我们只需要一块 RGBA：
+//! 三条取像素的路径，从优到劣：
 //!
-//! 1. `GetIconInfo` + `GetDIBits(hbmColor)`：32 位图标自带 alpha，首选；
+//! 1. `GetIconInfo` + `GetDIBits(hbmColor)`：32 位图标自带 alpha；
 //! 2. 全透明（老式 24 位图标，alpha 全 0）→ 用 `hbmMask` 造 alpha；
-//! 3. 仍拿不到 → `DrawIconEx` 画进 32 位 DIB（等价原版的
-//!    `GdipCreateBitmapFromHICON` 兜底）。
+//! 3. 仍拿不到 → `DrawIconEx` 画进 32 位 DIB。
 //!
-//! 尺寸选择照抄原版：先 JUMBO（256），再 EXTRALARGE（48）。Dock 图标在
-//! 150% DPI 下最大要 88 逻辑点 ≈ 132 像素，48 像素放大后会糊。
+//! 不经 GDI+ 中转：`GdipCreateBitmapFromHICON` 会给不少图标留一块黑底。
+//!
+//! 尺寸先 JUMBO（256）再 EXTRALARGE（48）。Dock 图标在 150% DPI 下最大
+//! 88 逻辑点 ≈ 132 像素，48 像素放大后会糊。
 
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
@@ -19,7 +18,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_SYSICONINDEX, SHIL_EXTRALARGE, SHIL_JUMBO,
+    SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_DISPLAYNAME, SHGFI_SYSICONINDEX,
+    SHIL_EXTRALARGE, SHIL_JUMBO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, DrawIconEx, GetIconInfo, DI_NORMAL, HICON, ICONINFO,
@@ -50,7 +50,42 @@ impl IconBitmap {
     }
 }
 
-/// 按原版顺序取 shell 图标：JUMBO（256 px）→ EXTRALARGE（48 px）。
+/// 文件在资源管理器里显示的名字（`SHGFI_DISPLAYNAME`）。
+///
+/// 用来给"未固定的运行中应用"起名：`chrome.exe` 的显示名是
+/// "Google Chrome"，`code.exe` 是 "Visual Studio Code" —— 比去掉扩展名的
+/// 文件名好读得多，而且这份描述本来就随程序一起装好了，不用解析版本资源。
+///
+/// 取不到就返回 `None`，调用方退回文件名。
+#[must_use]
+pub fn display_name(path: &str) -> Option<String> {
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sfi = SHFILEINFOW::default();
+    // SAFETY: 输出结构是本栈帧上的 `SHFILEINFOW`，尺寸取自它自己。
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            Default::default(),
+            Some(&raw mut sfi),
+            u32::try_from(std::mem::size_of::<SHFILEINFOW>()).ok()?,
+            SHGFI_DISPLAYNAME,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = sfi
+        .szDisplayName
+        .iter()
+        .position(|c| *c == 0)
+        .unwrap_or(sfi.szDisplayName.len());
+    if len == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&sfi.szDisplayName[..len]))
+}
+
+/// 取 shell 图标：先 JUMBO（256 px），失败再 EXTRALARGE（48 px）。
 ///
 /// `path` 可以是 exe、文件夹、`.lnk`、网址 —— 只要是 Explorer 能给图标的都行。
 #[must_use]
@@ -129,8 +164,8 @@ pub fn shell_icon(path: &str) -> Option<IconBitmap> {
 
 /// 从可执行文件 / DLL / `.ico` 的资源里取第 `index` 个图标。
 ///
-/// 对应原版 `LnkIconBitmap` 的 `PrivateExtractIconsW` 路径：快捷方式里存的
-/// `iconLoc` + `iconIdx` 指向的常是 exe 内的资源，shell 的图像列表覆盖不到。
+/// 快捷方式里存的 `iconLoc` + `iconIdx` 常指向 exe 内的资源，shell 的图像
+/// 列表覆盖不到这类位置。
 #[must_use]
 pub fn resource_icon(file: &str, index: i32) -> Option<IconBitmap> {
     use windows::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW;
@@ -192,7 +227,7 @@ pub fn hicon_to_bitmap(hicon: HICON) -> Option<IconBitmap> {
         None
     };
 
-    // 释放 GetIconInfo 复制出来的两个位图（原版同样在这里 DeleteObject）。
+    // 释放 GetIconInfo 复制出来的两个位图。
     unsafe {
         if !ii.hbmColor.is_invalid() {
             let _ = DeleteObject(HGDIOBJ(ii.hbmColor.0));

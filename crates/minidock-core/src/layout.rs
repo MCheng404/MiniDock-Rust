@@ -1,10 +1,9 @@
 //! 布局数学：度量、四边停靠的坐标映射、放大曲线、命中测试。
 //!
-//! 这一层是**纯函数**，不持有任何状态。原版把这些散在 `CalcMetrics` /
-//! `MapR` / `ToLogical` / `HitIndex` 里，与全局 `cfg`、`winW/winH` 耦合，
-//! 导致只能在真机上"看着像不像"来验证。拆出来后可以直接断言坐标。
+//! 这一层是**纯函数**，不持有任何状态：同样的输入永远得到同样的输出，
+//! 可以直接断言坐标，不需要建窗口看效果。
 //!
-//! 所有魔数都标注了 C 版出处，改动前请先读 `PORTING.md` 的"像素级对齐"一节。
+//! 魔数都标了来源，改动前请先读 `PORTING.md` 的"像素级对齐"一节。
 
 use crate::config::{Config, Edge, Key};
 use crate::units;
@@ -40,12 +39,12 @@ impl Rect {
     }
 }
 
-/// 启动弹跳的持续时间（毫秒），对应 C 版 `BounceOff` 里的 `1100`。
+/// 启动弹跳的持续时间（毫秒）。
 pub const BOUNCE_MS: u64 = 1100;
 
 /// 启动弹跳的偏移量（逻辑像素，向栏体外侧为正）。
 ///
-/// 曲线照抄 C 版 `BounceOff()`：
+/// 曲线：
 ///
 /// ```text
 /// x = t / 1100
@@ -74,7 +73,6 @@ pub fn bounce_active(elapsed_ms: u64) -> bool {
 
 /// Dock 窗口左上角的屏幕坐标（物理像素）。
 ///
-/// 对应 C 版 `UpdateGeometry()` 末尾那段 `switch (cfg.edge)`。
 ///
 /// `reserved` 是 AppBar 实际拿到的那块矩形（`None` = 没预留桌面空间）。
 /// 预留成功后窗口要**贴在预留区边上**，否则栏体会和"被让出来的桌面"
@@ -104,7 +102,7 @@ pub fn window_origin(
 
 /// 窗口的物理尺寸：横排是 `(lw, lh)`，竖排要转置成 `(lh, lw)`。
 ///
-/// C 版是 `int ww = Horiz() ? LW : LH, hh = Horiz() ? LH : LW;`，
+/// 横排取 `(lw, lh)`，竖排交换两者。
 /// 这里独立成函数是因为它被"建窗口"和"AppBar 厚度"两处共用，
 /// 抄错一次就会出现竖排 Dock 只有一条细缝的情况。
 #[must_use]
@@ -118,17 +116,17 @@ pub fn physical_size(edge: Edge, lw: i32, lh: i32) -> (i32, i32) {
 
 /// AppBar 需要预留的厚度（物理像素）。
 ///
-/// C 版是 `(int)(M.barH + M.margin + 4)`：栏体 + 下方留白 + 4 px 余量。
+/// 栏体 + 下方留白 + 4 px 余量。
 /// 多出的 4 px 是为了让"最大化窗口的下沿"不贴住栏体边缘。
 #[must_use]
 pub fn reserve_thickness(bar_h: f32, margin: f32) -> i32 {
     (bar_h + margin + 4.0) as i32
 }
 
-/// 小组件类型。对应上游 v1.6.0 的 `enum { W_CLOCK, W_NOTIFY, W_CC, W_RES, W_TOOL, W_MODE }`。
+/// 小组件类型。
 ///
-/// **下标必须与上游一致**：`WideMask` 的位掩码是按这个序号取位的
-/// （上游 `cfg.wideMask & (1 << W_RES)`），换序会让老配置的双倍宽设置错位。
+/// **下标即配置语义**：`WideMask` 的位掩码按这个序号取位
+/// 换序会让老配置的双倍宽设置错位。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WidgetKind {
     /// 时钟卡片（v1.4.0 就有的那个）。
@@ -148,7 +146,7 @@ pub enum WidgetKind {
 }
 
 impl WidgetKind {
-    /// 上游枚举里的序号。`WideMask` 按它取位。
+    /// 枚举序号。`WideMask` 按它取位。
     #[must_use]
     pub const fn index(self) -> u32 {
         match self {
@@ -158,7 +156,7 @@ impl WidgetKind {
             Self::Resource => 3,
             Self::Tool => 4,
             Self::Focus => 5,
-            // 与上游 `enum { ..., W_TRAY, W_N }` 同序：`WideMask` 按序号取位。
+            // 顺序固定，`WideMask` 按序号取位。
             Self::Tray => 6,
         }
     }
@@ -170,7 +168,7 @@ impl WidgetKind {
     ///
     /// 已实现：时钟（v1.4.0 就有）、资源监视器（ADR-039）、
     /// 计时器 / 待办（ADR-040）。
-    /// 其余三个（通知 / 控制中心 / 专注模式）尚未移植。
+    /// 其余三个（通知 / 控制中心 / 专注模式）尚未实现。
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         matches!(
@@ -199,7 +197,7 @@ impl WidgetKind {
         cfg.get_i32(Key::WIDE_MASK) & (1 << self.index()) != 0
     }
 
-    /// 该小组件的宽度（上游 `g_wWid[]`）。
+    /// 该小组件的宽度。
     ///
     /// 时钟卡片不走这个公式 —— 它的宽度由内容决定（时间 / 日期的排版），
     /// 见 [`clock_width`]。
@@ -212,7 +210,7 @@ impl WidgetKind {
             Self::Resource => (bar_h * if self.is_wide(cfg) { 2.2 } else { 1.16 }) as i32,
             Self::Tool => (bar_h * if self.is_wide(cfg) { 1.6 } else { 0.72 }) as i32,
             Self::Focus => (bar_h * 0.72) as i32,
-            // 托盘卡片固定宽度，上游不支持双倍宽（`g_wWid[W_TRAY]` 写死 0.72）。
+            // 托盘卡片固定宽度，不支持双倍宽。
             Self::Tray => (bar_h * 0.72) as i32,
         }
     }
@@ -220,37 +218,36 @@ impl WidgetKind {
 
 /// 小组件条带：栏体外侧的那一排卡片。
 ///
-/// 对应上游 v1.6.0 的 `g_wk[]` / `g_wWid[]` / `g_ce`。
 ///
 /// **只有时钟一个成员时，它与 v1.4.0 的行为逐像素一致** ——
-/// 这条等价是本重构的硬约束：v1.4.0 的几何已经逐项对拍通过，
-/// 不能因为上游换了模型就把它弄坏。
+/// 这条等价是本重构的硬约束：v1.4.0 的几何已经逐项比对通过，
+/// 换成条带模型后也不能弄坏。
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct WidgetStrip {
-    /// 条带里的 widget（按上游的 `ord[]` 顺序：时钟与通知的先后由
+    /// 条带里的 widget（固定顺序：时钟与通知的先后由
     /// `WOrder` 决定，其余固定在后面）。
     pub items: [Option<(WidgetKind, i32)>; 7],
     /// 条带成员数。
     pub len: usize,
-    /// 条带整体占位（上游 `g_ce`）：各成员宽度 + 间距。
+    /// 条带整体占位：各成员宽度 + 间距。
     ///
     /// v1.4.0 只有时钟时等于 `clock_w + gap + 6`。
     pub extra: f32,
-    /// 条带在栏体的哪一侧：右（false）/ 左（true）。上游 `WSide`。
+    /// 条带在栏体的哪一侧：右（false）/ 左（true）。
     pub on_left: bool,
 }
 
 impl WidgetStrip {
-    /// 按上游规则构建条带（上游 v1.6.0 `CalcMetrics()` 的条带段）。
+    /// 构建条带：成员宽度 + 间距累加。
     ///
-    /// 顺序来自上游的 `ord[]`：
+    /// 顺序：
     /// `ord[6] = { wOrder ? NOTIFY : CLOCK, wOrder ? CLOCK : NOTIFY, CC, RES, TOOL, MODE }`
     /// —— `WOrder` 只决定时钟与通知谁在前，其余四个位置固定。
     ///
     /// `clock_w` 是时钟卡片自己的宽度（由内容决定，不走 `width()` 公式）。
     #[must_use]
     pub fn build(cfg: &Config, bar_h: f32, gap: f32, clock_w: i32) -> Self {
-        // 上游 `ord[7]`：`WOrder` 只交换前两位，其余固定，
+        // `WOrder` 只交换前两位，其余固定，
         // 托盘永远排在最后一个。
         let order = if cfg.get_i32(Key::W_ORDER) != 0 {
             [
@@ -288,7 +285,7 @@ impl WidgetStrip {
             };
             items[len] = Some((kind, w));
             len += 1;
-            // 上游：`g_ce += g_wWid[wid] + M.g + 6`。
+            // 占位累加：成员宽度 + 间距 + 6。
             extra += w as f32 + gap + 6.0;
         }
         Self {
@@ -316,14 +313,14 @@ impl WidgetStrip {
 
     /// 条带里第 `i` 个 widget 的左边界（逻辑像素）。
     ///
-    /// 对应上游的 `g_wU[]`：右侧时从栏体右缘往外排，左侧时从栏体左缘往左排。
+    /// 右侧时从栏体右缘往外排，左侧时从栏体左缘往左排。
     /// `bar_l` / `bar_w` 是栏体的位置与宽度。
     #[must_use]
     pub fn left_of(&self, i: usize, bar_l: f32, bar_w: f32, gap: f32) -> Option<f32> {
         self.items.get(i)?.as_ref()?;
         let gap_w = gap + 6.0;
         if self.on_left {
-            // 上游左侧：从栏体左缘往左倒着排。
+            // 左侧：从栏体左缘往左倒着排。
             // `u` 从 `bar_l - gap_w` 起，每个成员先减去自己的宽度。
             let mut u = bar_l - gap_w;
             for j in (0..self.len).rev() {
@@ -336,7 +333,7 @@ impl WidgetStrip {
             }
             None
         } else {
-            // 上游右侧：从栏体右缘往外排。
+            // 右侧：从栏体右缘往外排。
             let mut u = bar_l + bar_w + gap_w;
             for j in 0..self.len {
                 if j == i {
@@ -349,7 +346,7 @@ impl WidgetStrip {
     }
 }
 
-/// 时钟卡片宽度（上游 `g_clockW`）。
+/// 时钟卡片宽度。
 ///
 /// 显示内容 `ClockShow`：0 = 都显示，1 = 只日期，2 = 只时间。
 /// 日期格式 `DateFmt`：0 = 中文（月日），1 = 短格式。
@@ -406,7 +403,7 @@ pub fn clock_width(cfg: &Config, dpi: i32) -> i32 {
     }
 }
 
-/// 一帧的度量结果。对应 C 版全局 `Metrics M` + `g_ce` / `g_clockW` / `g_reflH`。
+/// 一帧的度量结果。
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Metrics {
     /// 图标基准边长（`M.S`）。
@@ -430,13 +427,13 @@ pub struct Metrics {
     pub overhang: f32,
     /// 距屏幕边缘 + 倒影预留（`M.margin`）。
     pub margin: f32,
-    /// 小组件条带（上游 v1.6.0 的 `g_wk[]` / `g_wWid[]` / `g_ce`）。
+    /// 小组件条带。
     ///
     /// v1.4.0 只有一个时钟卡片，v1.6.0 把它泛化成"一排卡片"。
     pub widgets: WidgetStrip,
     /// 条带整体占位：栏体要让出这么宽的地方给卡片们。
     ///
-    /// 等于上游的 `g_ce`。v1.4.0 只有时钟时 = `clock_w + gap + 6`。
+    /// 只有时钟时 = `clock_w + gap + 6`。
     pub widget_extra: f32,
     /// 时钟卡片宽度（绘制时钟卡片时要用；条带里 Clock 成员的宽度）。
     pub clock_w: i32,
@@ -448,7 +445,7 @@ pub struct Metrics {
     pub lh: i32,
 }
 
-/// `f32` 夹紧。C 版 `Clampf`。
+/// `f32` 夹紧。
 #[must_use]
 pub fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
     if v < lo {
@@ -474,7 +471,7 @@ fn span(pad_x: f32, s: f32, gap: f32, sep_w: f32, n_icon: usize, n_sep: usize) -
     w
 }
 
-/// 计算一帧的度量。对应 C 版 `CalcMetrics()`（minidock.c:1511）。
+/// 计算一帧的度量。
 ///
 /// `n_items` 是**全部**条目数（含分割线），`n_sep` 是其中分割线的数量；
 /// `work` 是目标显示器的**工作区**（已排除任务栏）。
@@ -489,12 +486,12 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     };
     let g0 = cfg.spacing as f32;
     let pad0 = cfg.pad as f32;
-    // 分割线宽度：上游 v1.4.0 起由 `SepGap` 决定
+    // 分割线宽度由 `SepGap` 决定
     // （旧版是写死的 `16 + spacing/2`）。
     let sep0 = cfg.get_i32(Key::SEP_GAP) as f32;
-    // 横向内边距自 v1.6.5 起独立成 `HPad`（上游 `M.padX = cfg.hPad`），
+    // 横向内边距自 v1.6.5 起独立成 `HPad`，
     // 不再是 `pad + 2`。默认值因此从 10 变成 12 —— 栏体两侧各宽 2 px，
-    // 这是上游 1.6.5 的对外可见变化，不是我们擅自改的。
+    // 这是 1.6.5 起对外可见的变化。
     let pad_x0 = cfg.get_i32(Key::HPAD).max(0) as f32;
 
     let n_icon = n_items.saturating_sub(n_sep);
@@ -519,7 +516,7 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     let pad = pad0;
     let pad_x = pad_x0;
 
-    // 倒影高度：上游 v1.4.0 改成可调（`ReflSize` 百分比 + `ReflGap` 间距）。
+    // 倒影高度可调：`ReflSize` 百分比 + `ReflGap` 间距。
     let refl_h = if cfg.reflect && cfg.edge == Edge::Bottom {
         s * (cfg.get_i32(Key::REFL_SIZE) as f32 / 100.0) + cfg.get_i32(Key::REFL_GAP) as f32 + 2.0
     } else {
@@ -528,7 +525,7 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     let margin = cfg.margin as f32 + refl_h;
     let bar_h = s + 2.0 * pad + 4.0;
 
-    // 小组件条带（上游 v1.6.0）。v1.4.0 只有时钟一个成员，
+    // 小组件条带。v1.4.0 只有时钟一个成员，
     // 这里的 `extra` 恰好等于旧版的 `clock_extra`。
     let clock_w = clock_width(cfg, dpi);
     let widgets = WidgetStrip::build(cfg, bar_h, gap, clock_w);
@@ -568,7 +565,7 @@ pub fn calc_metrics(cfg: &Config, dpi: i32, n_items: usize, n_sep: usize, work: 
     }
 }
 
-/// 逻辑坐标 → 窗口坐标。对应 C 版 `MapR()`（minidock.c:331）。
+/// 逻辑坐标 → 窗口坐标。
 ///
 /// 关键点：`lh` 只用于顶部/左侧的翻转；调用方必须传**当前逻辑高度**。
 #[must_use]
@@ -581,7 +578,7 @@ pub fn map_rect(edge: Edge, u: f32, v: f32, w: f32, h: f32, lh: f32) -> (f32, f3
     }
 }
 
-/// 窗口坐标 → 逻辑坐标。对应 C 版 `ToLogical()`（minidock.c:339）。
+/// 窗口坐标 → 逻辑坐标。
 #[must_use]
 pub fn to_logical(edge: Edge, px: f32, py: f32, lh: f32) -> (f32, f32) {
     match edge {
@@ -594,7 +591,7 @@ pub fn to_logical(edge: Edge, px: f32, py: f32, lh: f32) -> (f32, f32) {
 
 /// 鼠标放大的权重曲线：中心 1.0，半径外 0.0，中间为余弦过渡。
 ///
-/// 对应 C 版 `0.5 * (1 + cos(PI * d / R))`。用余弦而不是线性，
+/// 权重 = `0.5 * (1 + cos(PI * d / R))`。用余弦而不是线性，
 /// 是因为线性在边界处一阶不连续，视觉上会有"折角"。
 #[must_use]
 pub fn magnify_weight(distance: f32, radius: f32) -> f32 {
@@ -607,11 +604,11 @@ pub fn magnify_weight(distance: f32, radius: f32) -> f32 {
 
 /// 命中测试：给定逻辑横坐标，返回条目下标。
 ///
-/// 原版 `HitIndex()` 用的是"最近的槽位中心 + 当前尺寸的一半"，这里保持
+/// 判据是"最近的槽位中心 + 当前尺寸的一半"，而不是矩形包含：
 /// 同样的判定（用槽位中心距离，而不是矩形包含），因为放大动画期间
 /// 图标的实际矩形与槽位并不重合 —— 用矩形判定会导致悬停抖动。
 #[must_use]
-#[allow(clippy::too_many_arguments)] // C 版就是这一串全局量，拆开反而更难对照
+#[allow(clippy::too_many_arguments)] // 参数就是这一组几何量，拆开反而更难对照
 pub fn hit_index(
     u: f32,
     v: f32,
@@ -635,7 +632,7 @@ pub fn hit_index(
             continue;
         }
         // 取**从左到右第一个**命中，不是"最近的那个"：
-        // 放大后相邻图标会重叠，两个都覆盖鼠标点时 C 版选的是左边那个。
+        // 放大后相邻图标会重叠，两个都覆盖鼠标点时取左边那个。
         if u >= slot_l[i] - half && u < slot_r[i] + half {
             return Some(i);
         }
@@ -643,7 +640,7 @@ pub fn hit_index(
     None
 }
 
-/// C 版 `MapActualToBase()`：把鼠标的**实际**位置（此时槽位已被放大挪动）
+/// 把鼠标的**实际**位置（此时槽位已被放大挪动）
 /// 映射回**基准**位置（未放大时的槽位）。
 ///
 /// 放大曲线必须用基准位置算权重：图标一放大，槽位就跟着移动，
@@ -652,7 +649,7 @@ pub fn hit_index(
 /// `base_c` / `act_c` 分别是基准中心与实际中心。
 #[must_use]
 pub fn map_actual_to_base(mx: f32, base_c: &[f32], act_c: &[f32]) -> f32 {
-    // 数量对不上（条目变了）就放弃映射 —— 对应 C 版 `prevN != nItems` 的保护。
+    // 数量对不上（条目变了）就放弃映射。
     if base_c.len() != act_c.len() {
         return mx;
     }
@@ -690,11 +687,11 @@ pub fn map_actual_to_base(mx: f32, base_c: &[f32], act_c: &[f32]) -> f32 {
 // GPU 版用固定的 `s`，是对的）。收进 core 后只有一份实现，且能单测覆盖。
 // GDI+ 那一路已随 `minidock-ui` / `minidock-gfx` 一并删除（ADR-035）。
 
-/// 放大动画的每帧收敛系数（C 版 `it->cur += d * 0.38f`）。
+/// 放大动画的每帧收敛系数。
 pub const SIZE_LERP: f32 = 0.38;
-/// 动画收敛阈值：差值小于它就直接吸附（C 版 `fabsf(d) > 0.3f`）。
+/// 动画收敛阈值：差值小于它就直接吸附。
 pub const SNAP: f32 = 0.3;
-/// 放大影响的半径系数（C 版 `R = (S + g) * 2.6f`）。
+/// 放大影响的半径系数。
 pub const MAG_RADIUS: f32 = 2.6;
 
 /// 槽位类型。分割线的槽宽由 `SepGap` 决定，与图标不同。
@@ -732,7 +729,7 @@ pub struct Bars {
     pub icon_bottom: f32,
 }
 
-/// 由度量推出纵向基线。对应 C 版 `Paint()` 开头那三行赋值。
+/// 由度量推出纵向基线。
 #[must_use]
 pub fn bars(m: &Metrics) -> Bars {
     let bottom = m.lh as f32 - m.margin - 2.0;
@@ -783,7 +780,7 @@ pub struct View {
 /// 本帧每个槽位的目标边长。
 ///
 /// 权重必须用**基准**位置算：图标一放大槽位就移动，直接用实际位置会让
-/// "鼠标属于哪个图标"随放大程度漂移（C 版 `MapActualToBase`）。
+/// "鼠标属于哪个图标"随放大程度漂移。
 #[must_use]
 pub fn magnify_targets(
     m: &Metrics,
@@ -843,7 +840,7 @@ pub struct Slots {
 /// 由当前边长推出实际槽位。`cur` 的顺序与条目一致。
 ///
 /// 栏宽超过可用宽度时整体截断（`max_w`），此时右端图标会被裁掉 ——
-/// 与 C 版一致：宁可裁边，也不要让栏体溢出屏幕。
+/// 宁可裁边，也不要让栏体溢出屏幕。
 #[must_use]
 pub fn place_slots(m: &Metrics, cur: &[f32], widget_extra: f32) -> Slots {
     let n = cur.len();
@@ -946,19 +943,19 @@ mod tests {
         c.clock = true;
         let with = calc_metrics(&c, 96, 3, 0, work());
         assert!(with.widget_extra > 0.0);
-        // 上游 v1.4.0：默认同时显示时间与日期、带周几、中文日期格式
+        // 默认同时显示时间与日期、带周几、中文日期格式
         // → 宽度取日期那一项（Sc(166)）。
         assert_eq!(with.clock_w, 166);
         assert!(with.lw > without.lw);
     }
 
-    /// 时钟卡片宽度按"显示什么 / 什么格式"变化（上游 v1.4.0 的新算法）。
+    /// 时钟卡片宽度按"显示什么 / 什么格式"变化。
     #[test]
     fn clock_width_follows_upstream_rules() {
         let mut c = cfg96();
         c.clock = true;
 
-        // 上游选项：0 = 时间+日期，1 = 仅时间，2 = 仅日期。
+        // 选项：0 = 时间+日期，1 = 仅时间，2 = 仅日期。
 
         // 仅显示时间（ClockShow=1），不带秒 → Sc(74)。
         c.apply_i32(Key::CLOCK_SHOW, 1);
@@ -982,15 +979,15 @@ mod tests {
         assert_eq!(calc_metrics(&c, 96, 3, 0, work()).clock_w, 110);
     }
 
-    /// 小组件条带（上游 v1.6.0）—— 只开时钟时必须与 v1.4.0 等价。
+    /// 小组件条带 —— 只开时钟时必须与 v1.4.0 等价。
     ///
-    /// 这是本次重构的硬约束：v1.4.0 的几何已经逐项对拍通过，
+    /// 这是本次重构的硬约束：v1.4.0 的几何已经逐项比对通过，
     /// 换成条带模型后不能有一像素的差别。
     #[test]
     fn widget_strip_matches_v140_when_only_clock() {
         let mut c = cfg96();
         c.clock = true;
-        // 必须显式关掉另外三个已实现的卡片：上游 v1.6.0 默认
+        // 必须显式关掉另外三个已实现的卡片：默认
         // `ResMon=1` / `ToolW=1` / `CtrlCenter=1`，而 v1.4.0 压根没有它们
         // —— 带着就不可能与 v1.4.0 等价了。
         c.apply_i32(Key::RES_MON, 0);
@@ -1032,13 +1029,13 @@ mod tests {
 
     /// 未实现的小组件不进条带 —— 否则栏体上会留出一段空白。
     ///
-    /// 上游 v1.6.0 默认把控制中心 / 资源监视器 / 计时器 / 专注模式全打开，
-    /// 我们还没移植的（通知 / 专注模式）即使键是 1 也不该占位。
+    /// 默认配置把控制中心 / 资源监视器 / 计时器 / 专注模式全打开，
+    /// 我们还没实现的（通知 / 专注模式）即使键是 1 也不该占位。
     #[test]
     fn unimplemented_widgets_do_not_take_space() {
         let mut c = cfg96();
         c.clock = true;
-        // 上游 v1.6.0 的默认值就是这些全开。
+        // 默认值就是这些全开。
         assert_eq!(c.get_i32(Key::CTRL_CENTER), 1);
         assert_eq!(c.get_i32(Key::TOOL_W), 1);
         assert_eq!(c.get_i32(Key::MODE_W), 1);
@@ -1053,12 +1050,12 @@ mod tests {
         assert!(m.widgets.width_of(WidgetKind::Resource).is_some());
         assert!(m.widgets.width_of(WidgetKind::Tool).is_some());
         assert!(m.widgets.width_of(WidgetKind::Tray).is_some());
-        // 这两个还没移植，不能占位。
+        // 这两个还没实现，不能占位。
         assert!(m.widgets.width_of(WidgetKind::Notify).is_none());
         assert!(m.widgets.width_of(WidgetKind::Focus).is_none());
     }
 
-    /// 资源监视器卡片进条带（上游 v1.6.0 的第一个新小组件）。
+    /// 资源监视器卡片进条带（1.6.0 新增的第一个小组件）。
     #[test]
     fn resource_widget_enters_the_strip() {
         let mut c = cfg96();
@@ -1071,7 +1068,7 @@ mod tests {
 
         assert_eq!(m.widgets.len, 2, "时钟 + 资源监视器");
         assert!(m.widgets.width_of(WidgetKind::Resource).is_some());
-        // 上游顺序：时钟在前，资源监视器在控制中心之后（已关掉）。
+        // 顺序：时钟在前，资源监视器在控制中心之后（已关掉）。
         let kinds: Vec<WidgetKind> = m.widgets.iter().map(|(k, _)| k).collect();
         assert_eq!(kinds[0], WidgetKind::Clock);
         assert_eq!(kinds[1], WidgetKind::Resource);
@@ -1081,7 +1078,7 @@ mod tests {
     #[test]
     fn tray_widget_is_last_and_fixed_width() {
         let c = cfg96();
-        assert_eq!(c.get_i32(Key::TRAY_W), 1, "上游 1.6.5 默认开");
+        assert_eq!(c.get_i32(Key::TRAY_W), 1, "1.6.5 起默认开");
 
         let m = calc_metrics(&c, 96, 3, 0, work());
         let kinds: Vec<WidgetKind> = m.widgets.iter().map(|(k, _)| k).collect();
@@ -1104,7 +1101,7 @@ mod tests {
         assert_eq!(kinds2.last().copied(), Some(WidgetKind::Tray));
     }
 
-    /// 计时器卡片进条带，宽度 = 栏高 × 0.72（双倍宽 1.6，上游 v1.6.0）。
+    /// 计时器卡片进条带，宽度 = 栏高 × 0.72（双倍宽系数 1.6）。
     #[test]
     fn tool_widget_enters_the_strip() {
         let mut c = cfg96();
@@ -1187,7 +1184,7 @@ mod tests {
             .widgets
             .left_of(0, bar_l, bar_w, m.gap)
             .expect("应当有位置");
-        // 上游左侧：`u = barL - gapW` 再减去自身宽度。
+        // 左侧：`u = barL - gapW` 再减去自身宽度。
         let want = bar_l - (m.gap + 6.0) - m.clock_w as f32;
         assert!(
             (left - want).abs() < 0.01,
@@ -1195,7 +1192,7 @@ mod tests {
         );
     }
 
-    /// 左侧条带里，靠栏体的是**最后一个**成员（上游倒着排）。
+    /// 左侧条带里，靠栏体的是**最后一个**成员（倒着排）。
     #[test]
     fn widget_strip_left_side_order_is_reversed() {
         let mut c = cfg96();
@@ -1237,14 +1234,14 @@ mod tests {
         assert_ne!(right.widgets.on_left, left.widgets.on_left);
     }
 
-    /// 小组件宽度公式（上游 v1.6.0 `g_wWid[]`）。
+    /// 小组件宽度公式。
     ///
     /// 只测已实现的时钟（宽度由内容定），其余的按公式核对，
-    /// 等移植时直接可用。
+    /// 等实现时直接可用。
     #[test]
     fn widget_widths_follow_upstream_formulas() {
         let c = cfg96();
-        let bar_h = 76.0_f32; // 上游默认栏高（48 + 2*8 + 4）
+        let bar_h = 76.0_f32; // 默认栏高（48 + 2*8 + 4）
         assert_eq!(WidgetKind::Notify.width(&c, bar_h), (bar_h * 0.92) as i32);
         assert_eq!(
             WidgetKind::CtrlCenter.width(&c, bar_h),
@@ -1255,13 +1252,13 @@ mod tests {
         assert_eq!(WidgetKind::Focus.width(&c, bar_h), (bar_h * 0.72) as i32);
     }
 
-    /// 双倍宽由 `WideMask` 的对应位决定（位序 = 上游枚举序号）。
+    /// 双倍宽由 `WideMask` 的对应位决定（位序 = 枚举序号）。
     #[test]
     fn wide_mask_doubles_widget_width() {
         let mut c = cfg96();
         let bar_h = 76.0_f32;
         assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 1.16) as i32);
-        // 第 3 位 = W_RES（上游枚举：CLOCK=0 NOTIFY=1 CC=2 RES=3）。
+        // 第 3 位 = W_RES（枚举：CLOCK=0 NOTIFY=1 CC=2 RES=3）。
         c.apply_i32(Key::WIDE_MASK, 1 << 3);
         assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 2.2) as i32);
         // 别的位不影响它。
@@ -1269,7 +1266,7 @@ mod tests {
         assert_eq!(WidgetKind::Resource.width(&c, bar_h), (bar_h * 1.16) as i32);
     }
 
-    /// 分割线宽度改由 `SepGap` 决定（上游 v1.4.0）。
+    /// 分割线宽度由 `SepGap` 决定。
     #[test]
     fn separator_width_follows_sep_gap() {
         let mut c = cfg96();
@@ -1280,7 +1277,7 @@ mod tests {
         assert_eq!(after.sep_w, 20.0);
     }
 
-    /// 倒影高度由 `ReflSize` / `ReflGap` 决定（上游 v1.4.0）。
+    /// 倒影高度由 `ReflSize` / `ReflGap` 决定。
     #[test]
     fn reflection_height_follows_config() {
         let mut c = cfg96();
@@ -1351,10 +1348,10 @@ mod tests {
         }
     }
 
-    /// C 版 `HitIndex()` 的语义：**从左到右第一个**命中，不是"最近的那个"。
+    /// **从左到右第一个**命中，不是"最近的那个"。
     ///
-    /// 放大后相邻图标会重叠，两个都覆盖鼠标点时 C 版选左边那个。
-    /// 我们早期实现取最近，与 C 版不一致，命中会差一个图标。
+    /// 放大后相邻图标会重叠，两个都覆盖鼠标点时取左边那个。
+    /// 取"最近"会差一个图标。
     /// 弹跳曲线：起止为 0、中途有峰、幅度单调衰减。
     ///
     /// 这是"点击启动后图标弹一下"的观感基础。把公式抄错（比如漏掉
@@ -1388,7 +1385,7 @@ mod tests {
         }
     }
 
-    /// 四条边的定位规则（对应 C 版 `UpdateGeometry` 末尾那个 switch）。
+    /// 四条边的定位规则。
     ///
     /// 底边是最常走的路径，但其余三条写错了不会崩、只会把 Dock 送到屏幕上
     /// 某个奇怪的位置，所以四条一起测。
@@ -1459,12 +1456,12 @@ mod tests {
         assert_eq!(physical_size(Edge::Right, 1181, 186), (186, 1181));
     }
 
-    /// 预留厚度 = 栏高 + 留白 + 4（C 版 `(int)(M.barH + M.margin + 4)`）。
+    /// 预留厚度 = 栏高 + 留白 + 4。
     #[test]
     fn reserve_thickness_matches_upstream() {
-        // 与 C 版对拍得到的实测值：barH=76, margin=12 → 92
+        // 实测值：barH=76, margin=12 → 92
         assert_eq!(reserve_thickness(76.0, 12.0), 92);
-        // 截断而不是四舍五入：上游是 C 的 (int) 强转。
+        // 截断而不是四舍五入，与 (int) 强转一致。
         assert_eq!(reserve_thickness(76.9, 12.9), 93);
     }
 
@@ -1474,7 +1471,7 @@ mod tests {
         let slot_r = [130.0, 190.0, 250.0];
         let visible = [true, true, true];
         // gap=40 → 余量 20：145 同时落在图标 0（借了 gap/2）与图标 1 的范围内
-        // → 取左边那个（C 版语义）。
+        // → 取左边那个。
         assert_eq!(
             hit_index(145.0, 0.0, &slot_l, &slot_r, &visible, 40.0, 0.0, 88.0, 200.0),
             Some(0)

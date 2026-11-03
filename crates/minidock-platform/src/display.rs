@@ -1,6 +1,6 @@
 //! 显示器枚举与工作区。
 //!
-//! 原版 `GetMon()` 的两个细节必须保留：
+//! `GetMon` 的两个细节必须保留：
 //! 1. **主显示器排第一**，`Monitor` 配置项的下标才有稳定含义；
 //! 2. 枚举失败时回落到"包含 (0,0) 的显示器"，而不是报错 ——
 //!    Dock 是常驻程序，宁可退化到默认屏也不能起不来。
@@ -32,7 +32,7 @@ unsafe extern "system" fn enum_proc(
     _rect: *mut RECT,
     data: LPARAM,
 ) -> BOOL {
-    // SAFETY: `data` 由 `monitors()` 传入，指向一个存活的 Vec<HMONITOR>，
+    // SAFETY: `data` 由 `monitors` 传入，指向一个存活的 Vec<HMONITOR>，
     // 且回调在 `EnumDisplayMonitors` 返回前同步执行。
     let list = unsafe { &mut *(data.0 as *mut Vec<HMONITOR>) };
     list.push(monitor);

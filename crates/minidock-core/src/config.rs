@@ -1,25 +1,23 @@
 //! `[Settings]` 段：76 个键的类型化模型、默认值、夹紧规则、读写。
 //!
-//! 键数与顺序**照抄上游 `g_tab[]`**（v1.4.0，2026-10-28 同步）。
-//! 上游一次加了 41 个键，其中绝大多数是"裸 int 数值"（没有枚举语义），
+//! 键数与顺序是一份**固定的表**：绝大多数键是裸 `int`（没有枚举语义），
 //! 所以它们走 [`NUMERIC_KEYS`] 表而不是变成枚举变体 ——
-//! **加一个上游键的代价是一行数据**，不是八处 match。
+//! 加一个键的代价是一行数据，不是八处 match。
 //!
-//! 设计要点（与 C 版的差异，全部是被 issue 追出来的）：
+//! 设计要点：
 //!
-//! 1. **每个键都有明确的取值域**，加载时一律夹紧。原版 `LoadConfig()` 只
-//!    夹了 5 个键，`Opacity=1000` 会让 alpha 溢出进颜色通道，
-//!    负数会索引越界到选项数组之外（见 `pr_en.md`）。
+//! 1. **每个键都有明确的取值域**，加载时一律夹紧。`Opacity=1000` 会让
+//!    alpha 溢出进颜色通道，负数会索引越界到选项数组之外（见 `pr_en.md`）。
 //! 2. **索引型字段用枚举而不是 `int`**。`theme` / `bg_mode` / `edge` /
-//!    `dot_style` / `plate_*` 在 C 里是裸 `int`，直接拿去索引选项数组；
-//!    这里 `from_code()` 对任何越界值都回落到默认值，越界在类型层面消失。
-//! 3. **键名与顺序照抄 C 的 `g_tab`**。保存时按同一顺序写回，这样同一个
-//!    配置在 C 版与 Rust 版之间来回读写不会产生无意义的行序 diff。
+//!    `dot_style` / `plate_*` 是裸 `int`，直接拿去索引选项数组；
+//!    这里 `from_code` 对任何越界值都回落到默认值，越界在类型层面消失。
+//! 3. **键名与顺序固定**。保存时按同一顺序写回，同一份配置来回读写不会
+//!    产生无意义的行序 diff。
 
 use crate::ini::Ini;
 use crate::units;
 
-/// `[Settings]` 段的键。顺序 = C 版 `g_tab[]` 的顺序 = 保存顺序。
+/// `[Settings]` 段的键。顺序即保存顺序。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     IconSize,
@@ -59,9 +57,8 @@ pub enum Key {
     UiTheme,
     /// 裸数值键，下标指向 [`NUMERIC_KEYS`]。
     ///
-    /// 之所以不是普通变体：上游 v1.4.0 新增的 41 个键里绝大多数
-    /// 在 C 版里就是裸 `int`（`&cfg.xxx` 直接读写），没有枚举语义。
-    /// 用表驱动才能让"跟上游同步"变成加一行。
+    /// 之所以不是普通变体：这些键绝大多数是裸 `int`（直接读写），
+    /// 没有枚举语义。用表驱动才能让"加一个键"变成加一行数据。
     Numeric(u16),
 }
 
@@ -71,7 +68,7 @@ pub const CONFIG_VERSION: i32 = 2;
 /// 新版存放元信息的段。
 pub const META_SECTION: &str = "meta";
 
-/// 上游格式里所有配置挤在这一个段里。**只**用于读旧文件。
+/// 旧格式里所有配置挤在这一个段里。**只**用于读旧文件。
 pub const LEGACY_SECTION: &str = "Settings";
 
 /// 数值键的段归属，按名字前缀判断。
@@ -79,7 +76,7 @@ pub const LEGACY_SECTION: &str = "Settings";
 /// 用前缀而不是给表加两列：表已有 41 行，加列要动全部数据；
 /// 而前缀规则本身就把"这是什么功能"表达清楚了。
 fn section_of_numeric(name: &str) -> &'static str {
-    // 上游 v1.6.0 的 23 个新键分属好几个语义段，前缀规则已经不够用，
+    // 后来加的键分属好几个语义段，前缀规则已经不够用，
     // 先按名字精确匹配，剩下的再走前缀。
     match name {
         // 小组件条带：位置 / 顺序 / 开关 / 双倍宽掩码。
@@ -114,6 +111,10 @@ fn section_of_numeric(name: &str) -> &'static str {
     }
     if name.starts_with("Plate") {
         "appearance.plate"
+    } else if name.starts_with("Smoke") {
+        // 环境烟雾（Rust 版自有）。独立成段而不是塞进 `appearance`：
+        // 它有 11 个键，混在外观段里会把"栏体尺寸"和"装饰效果"搅在一起。
+        "effect.smoke"
     } else if name.starts_with("Grad") || name.starts_with("BgColor") {
         "appearance.background"
     } else if name.starts_with("Refl") {
@@ -138,13 +139,13 @@ fn section_of_numeric(name: &str) -> &'static str {
 
 /// 裸数值键的表：`(ini 键名, 最小值, 最大值, 默认值, 是否布尔, 默认值随 DPI 缩放)`。
 ///
-/// 来源：上游 v1.4.0 的 `g_tab[]` 与 `DefaultCfg()`，值域取自上游设置行
-/// （`RSl` 的上下限、`RCmb` 的选项数、`RTog` = 布尔、`RCol` = 颜色）。
+/// 来源：键表与默认值，值域按设置行的控件类型给：
+/// `RSl` = 滑杆（上下限）、`RCmb` = 下拉（选项数）、`RTog` = 布尔、`RCol` = 颜色。
 ///
-/// 上游对这些 int **不做夹紧**（只夹了一个 float），越界会直接进绘制代码。
-/// 这里照旧给出安全范围 —— 这是 Rust 版相对 C 版的加固，不是偏离。
+/// 对 int **不做夹紧**（只夹了一个 float），越界会直接进绘制代码。
+/// 这里给每个键一个安全范围。
 ///
-/// 顺序即上游 `g_tab[]` 里的顺序：写回 ini 时行序必须与 C 版一致。
+/// 顺序即写回 ini 时的行序，不能调整。
 pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("PlateMode", 0, 2, 0, false, false),
     ("PlateTheme", 0, 2, 2, false, false),
@@ -187,10 +188,10 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("MnAuto", 0, 1, 1, true, false),
     ("MnNotes", 0, 1, 1, true, false),
     ("MnAdd", 0, 1, 1, true, false),
-    // ---- 上游 v1.6.0 新增的 23 个键 ----
-    // 顺序照抄上游 `g_tab[]`：新键全部追加在 `MnAdd` 之后。
+    // ---- 第二批追加的 23 个键 ----
+    // 全部追加在 `MnAdd` 之后。
     //
-    // 值域与默认值取自上游 `DefaultCfg()`（v1.6.0 minidock.c:335-345）。
+    // 值域与默认值取自。
     // 颜色键沿用 `-1 = 跟随主题` 的约定（与 `BgColor1` / `GrpBg` 一致）。
     ("Launchpad", 0, 1, 0, true, false),
     // WSide：小组件条带在栏体右侧（0）/ 左侧（1）。
@@ -212,7 +213,7 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("UpdChk", 0, 1, 1, true, false),
     ("UpdLast", 0, 100000, 0, false, false),
     // LpCols / LpRows：起动台每页列数 / 行数。
-    // 上游在用的时候才夹（`3..12` / `2..8`，v1.6.0:6930），这里提前夹。
+    // 是使用时才夹，这里提前夹。
     ("LpCols", 3, 12, 7, false, false),
     ("LpRows", 2, 8, 4, false, false),
     // FanDrag：允许从弧形展开里把文件拖出来。
@@ -228,12 +229,12 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     // ToolW：计时器 / 待办小组件。
     ("ToolW", 0, 1, 1, true, false),
     // WideMask：位掩码，第 k 位 = 第 k 个小组件双倍宽。
-    // 上游只有 6 个小组件，位宽取 6。
+    // 小组件有 6 个，位宽取 6。
     ("WideMask", 0, 63, 0, false, false),
     // ModeW：专注模式小组件。
     ("ModeW", 0, 1, 1, true, false),
-    // ---- 上游 v1.6.5 新增的 19 个键 ----
-    // 顺序照抄上游 `g_tab[]` 的追加次序；`HPad` 在 `g_tab` 里插在
+    // ---- 第三批追加的 19 个键 ----
+    // 追加次序固定；`HPad` 在行序里插在
     // `Margin` 之后，但那张表是 ini 的行序（`Key::ALL`），这里的表是
     // 常量下标，追加在末尾才不会让已有常量整体错位。
     ("HPad", 0, 40, 12, false, true),
@@ -255,6 +256,22 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("SbAutoHide", 0, 1, 0, true, false),
     ("SepScale", 0, 1, 0, true, false),
     ("MenuFrost", 0, 1, 0, true, false),
+    // ---- 以下是自有键，见 `Key::EXTRA` ----
+    //
+    // 环境烟雾（见 ADR-048）。取值域等于**选项个数**：运行时按数组下标取
+    // 下标，所以这里存下标，不存比例 —— 存比例会让 ini 里出现 0.7 这种
+    // 非整数，而 `Ini` 只认 i32。
+    ("Smoke", 0, 1, 1, true, false),
+    ("SmokeColor", 0, 9, 0, false, false),
+    ("SmokeColor2", -1, 7, -1, false, false),
+    ("SmokeOpacity", 0, 6, 3, false, false),
+    ("SmokeDensity", 0, 2, 1, false, false),
+    ("SmokeSpeed", 0, 2, 1, false, false),
+    ("SmokeTone", 0, 1, 0, true, false),
+    ("SmokeThick", 0, 3, 1, false, false),
+    ("SmokeMouse", 0, 2, 1, false, false),
+    ("SmokeReach", 0, 2, 1, false, false),
+    ("SmokeClouds", 0, 1, 1, true, false),
 ];
 
 impl Key {
@@ -428,10 +445,38 @@ impl Key {
     pub const SEP_SCALE: Key = Key::Numeric(81);
     /// `MenuFrost`
     pub const MENU_FROST: Key = Key::Numeric(82);
+
+    // ---- 以下是自有键 ----
+    //
+    // 单独一串常量，不插进上面的序列：那些下标是按行序排的，中间插一个
+    // 就会让后面 60 多个常量整体错位，
+    // 而且是静默错位（编译通过、行为全错）。新键一律追加在末尾。
+    /// `Smoke`
+    pub const SMOKE: Key = Key::Numeric(83);
+    /// `SmokeColor`
+    pub const SMOKE_COLOR: Key = Key::Numeric(84);
+    /// `SmokeColor2`
+    pub const SMOKE_COLOR2: Key = Key::Numeric(85);
+    /// `SmokeOpacity`
+    pub const SMOKE_OPACITY: Key = Key::Numeric(86);
+    /// `SmokeDensity`
+    pub const SMOKE_DENSITY: Key = Key::Numeric(87);
+    /// `SmokeSpeed`
+    pub const SMOKE_SPEED: Key = Key::Numeric(88);
+    /// `SmokeTone`
+    pub const SMOKE_TONE: Key = Key::Numeric(89);
+    /// `SmokeThick`
+    pub const SMOKE_THICK: Key = Key::Numeric(90);
+    /// `SmokeMouse`
+    pub const SMOKE_MOUSE: Key = Key::Numeric(91);
+    /// `SmokeReach`
+    pub const SMOKE_REACH: Key = Key::Numeric(92);
+    /// `SmokeClouds`
+    pub const SMOKE_CLOUDS: Key = Key::Numeric(93);
 }
 
 impl Key {
-    /// 与上游 `g_tab[]` 逐项对应，**顺序必须一致**：
+    /// 逐项对应 ini 的行序，**顺序必须一致**：
     /// 保存时按同一顺序写回，两个实现之间来回读写才不会产生行序 diff。
     ///
     /// 76 个键 = 35 个有类型的 + 41 个表驱动的（`Numeric`）。
@@ -513,7 +558,7 @@ impl Key {
         Key::MN_AUTO,
         Key::MN_NOTES,
         Key::MN_ADD,
-        // 上游 v1.6.0 新增（顺序 = 上游 `g_tab[]` 的追加顺序）。
+        // 第二批（追加顺序）。
         Key::LAUNCHPAD,
         Key::W_SIDE,
         Key::W_ORDER,
@@ -557,12 +602,42 @@ impl Key {
         Key::MENU_FROST,
     ];
 
+    /// **自有键**，不在行序表里，所以不能进 [`Key::ALL`]。
+    ///
+    /// `Key::ALL` 有一条硬约束：与 ini 行序逐项对应、长度相等
+    /// （`ALL.len == UPSTREAM.len` 的回归测试就是钉这个）。那是"两个
+    /// 实现之间来回读写不产生行序 diff"的基础，加自己的键进去就废了。
+    ///
+    /// 读、写、夹紧三处都遍历 `ALL` 再跟一遍 `EXTRA`；新键因此天然具备
+    /// "缺失即默认值"和"越界即夹紧"两个性质，不必各自手写。
+    pub const EXTRA: &'static [Key] = &[
+        Key::SMOKE,
+        Key::SMOKE_COLOR,
+        Key::SMOKE_COLOR2,
+        Key::SMOKE_OPACITY,
+        Key::SMOKE_DENSITY,
+        Key::SMOKE_SPEED,
+        Key::SMOKE_TONE,
+        Key::SMOKE_THICK,
+        Key::SMOKE_MOUSE,
+        Key::SMOKE_REACH,
+        Key::SMOKE_CLOUDS,
+    ];
+
+    /// 需要读写的全部键：行序表在前，自有键在后。
+    ///
+    /// 迭代器而不是拼接后的数组：`const` 里没法拼切片，而两段都是
+    /// `'static`，链起来零成本。
+    pub fn all_keys() -> impl Iterator<Item = Key> {
+        Self::ALL.iter().chain(Self::EXTRA).copied()
+    }
+
     /// 新配置格式里该键所属的段。
     ///
-    /// 按**语义**分组，而不是照抄上游把所有东西塞进 `[Settings]`。
+    /// 按**语义**分组，而不是把所有东西塞进 `[Settings]`。
     /// 实际收益：以后加功能时能一眼看出新键该放哪，不用在一张平表里找位置。
     ///
-    /// 数值键（`Key::Numeric`，对应上游的裸 `int`）按名字前缀归类，
+    /// 数值键（`Key::Numeric`）按名字前缀归类，
     /// 这样表本身不用改结构 —— 加一条数据仍然只需一行。
     #[must_use]
     pub fn section(self) -> &'static str {
@@ -609,7 +684,7 @@ impl Key {
 
     /// 新配置格式里的键名（小写下划线）。
     ///
-    /// 与上游的驼峰名**故意不同**。改名不是洁癖，有两处是真的会误导：
+    /// 与旧的驼峰名**不同**。改名不是洁癖，有两处是真的会误导：
     ///
     /// - `Mode` → `hide_mode`：原名 `Mode` 实际是"隐藏方式"
     ///   （常显 / 自动隐藏 / 智能隐藏），和 `BgMode` 摆在一起时
@@ -617,7 +692,7 @@ impl Key {
     /// - `BgMode` → `fill`：它控制的是背景**填充方式**（纯色 / 渐变 / 磨砂），
     ///   叫 `BgMode` 会被读成"背景开关"。
     ///
-    /// 数值键沿用上游名：它们大多对应**尚未实现**的功能（扇面、应用组、
+    /// 数值键沿用旧名：它们大多对应**尚未实现**的功能（扇面、应用组、
     /// 磨砂），等做那些功能时再连同语义一起定名，比现在拍脑袋强。
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -661,7 +736,7 @@ impl Key {
         }
     }
 
-    /// 上游（C 版）的键名。**只**用于读旧配置文件。
+    /// 旧格式的键名。**只**用于读旧配置文件。
     ///
     /// 保留它的唯一目的是让老配置能原地升级：`from_ini` 在新名下找不到
     /// 就回退到 `[Settings]` 段里的这个名字。新代码不该再用它。
@@ -712,7 +787,7 @@ impl Key {
     #[must_use]
     pub fn from_name(s: &str) -> Option<Self> {
         let s = s.trim();
-        // 新名优先，再回退到上游的驼峰名：手写配置、从 C 版抄过来的
+        // 新名优先，再回退到旧的驼峰名：手写配置、旧版本留下的
         // 片段、以及我们自己生成的两种格式都要认。
         Self::ALL
             .iter()
@@ -745,7 +820,7 @@ impl Key {
             Key::Spacing => (0, 64),
             Key::Padding => (0, 64),
             Key::Radius => (0, 120),
-            // Margin 原版只夹了下界；这里给上界是因为它直接参与窗口尺寸计算，
+            // Margin 只夹了下界；这里给上界是因为它直接参与窗口尺寸计算，
             // 过大的值会让窗口远超屏幕。
             Key::Margin => (0, 400),
             Key::Opacity => (0, 100),
@@ -779,9 +854,9 @@ impl Key {
         }
     }
 
-    /// 设置界面里滑杆的**提示范围**（照抄 C 版 `BuildRows()` 的参数）。
-    /// 与 `range()` 的区别：这里更窄，因为它是"推荐可调范围"，
-    /// 而 `range()` 是"不把程序搞坏"的边界。没有对应滑杆的键返回 `None`。
+    /// 设置界面里滑杆的**提示范围**。
+    /// 与 `range` 的区别：这里更窄，因为它是"推荐可调范围"，
+    /// 而 `range` 是"不把程序搞坏"的边界。没有对应滑杆的键返回 `None`。
     #[must_use]
     pub const fn slider_range(self) -> Option<(i32, i32)> {
         Some(match self {
@@ -800,8 +875,8 @@ impl Key {
 
     /// 该键是否映射到枚举（决定取值走 `from_code` 还是数值夹紧）。
     ///
-    /// 表驱动的数值键**不算枚举**：它们在 C 版里就是裸 int，
-    /// 越界时按范围夹紧比"回落到默认变体"更接近上游行为。
+    /// 表驱动的数值键**不算枚举**：它们是裸 int，越界时按范围夹紧，
+    /// 而不是回落到某个默认变体。
     #[must_use]
     pub const fn is_enum(self) -> bool {
         matches!(
@@ -889,7 +964,7 @@ pub enum Edge {
 }
 
 impl Edge {
-    /// 是否为水平布局（底部/顶部）。原版 `Horiz()`。
+    /// 是否为水平布局（底部/顶部）。
     #[must_use]
     pub const fn is_horizontal(self) -> bool {
         matches!(self, Edge::Bottom | Edge::Top)
@@ -979,7 +1054,7 @@ pub struct Config {
     /// 表驱动键的值，按 [`NUMERIC_KEYS`] 的顺序存放。
     ///
     /// 用 `Vec` 而不是 41 个字段：这些键绝大多数是裸数值，
-    /// 单独开字段只会让"加一个上游键"变成改五个地方。
+    /// 单独开字段只会让"加一个键"变成改五个地方。
     pub numeric: Vec<i32>,
 
     /// 显卡选择。空串 = **自动**（交给后端按功耗偏好挑，通常落到核显）。
@@ -989,13 +1064,13 @@ pub struct Config {
     /// 不会因为换机器就起不来。
     ///
     /// 放在独立的 `[Graphics]` 段，不塞进 `[Settings]`：
-    /// 那 37 个键与 C 版 `g_tab[]` 一一对应，是刻意保留的对照关系，
+    /// 那些键与 ini 行序一一对应，是刻意保留的对应关系，
     /// 这个键是 Rust 版独有的，混进去会破坏这条不变式。
     pub adapter: String,
 }
 
 impl Config {
-    /// 原版 `DefaultCfg()`。几何量按 DPI 缩放，其余为固定值。
+    /// 默认配置。几何量按 DPI 缩放，其余为固定值。
     ///
     /// **必须**用当前 DPI 构造：ini 里存的是**物理像素**，首次运行时
     /// 由这里的缩放决定默认值；之后 ini 有值就以 ini 为准，不再二次缩放。
@@ -1076,13 +1151,13 @@ impl Config {
 
     /// 把所有字段夹到合法域。幂等。
     pub fn clamp(&mut self) {
-        for key in Key::ALL.iter().copied() {
+        for key in Key::all_keys() {
             let v = self.get_i32(key);
             self.apply_i32(key, v);
         }
     }
 
-    /// 读取单个键（枚举返回 `code()`，布尔返回 0/1，颜色返回原值）。
+    /// 读取单个键（枚举返回 `code`，布尔返回 0/1，颜色返回原值）。
     #[must_use]
     pub fn get_i32(&self, key: Key) -> i32 {
         if let Key::Numeric(i) = key {
@@ -1197,7 +1272,7 @@ impl Config {
     /// 从 `[Settings]` 读取。缺失的键保留默认值。
     ///
     /// 兼容 1.x 的 `Frost` 键：`BgMode` 不存在但有 `Frost` 时，
-    /// `Frost=1` → 磨砂，`Frost=0` → 纯色。原版逻辑在 `LoadConfig()`。
+    /// `Frost=1` → 磨砂，`Frost=0` → 纯色。
     #[must_use]
     pub fn from_ini(ini: &Ini, dpi: i32) -> Self {
         let mut cfg = Self::defaults(dpi);
@@ -1215,11 +1290,11 @@ impl Config {
                 };
             }
         }
-        // 读的时候**两种格式都认**：新格式优先，找不到再回退到上游的
+        // 读的时候**两种格式都认**：新格式优先，找不到再回退到旧的
         // `[Settings]` + 驼峰名。于是老配置拿过来就能直接用，
         // 下一次保存时自动变成新格式 —— 不需要单独的迁移步骤，
         // 也就不会出现"迁移失败但旧文件已被覆盖"这种事。
-        for key in Key::ALL.iter().copied() {
+        for key in Key::all_keys() {
             let found = ini
                 .get(key.section(), key.name())
                 .or_else(|| ini.get(LEGACY_SECTION, key.legacy_name()));
@@ -1240,7 +1315,7 @@ impl Config {
         // 版本号让人一眼看出这是第几代格式。读取其实不依赖它（靠键名回退
         // 判断），但排查配置时省事。
         ini.set_i32(META_SECTION, "version", CONFIG_VERSION);
-        for key in Key::ALL.iter().copied() {
+        for key in Key::all_keys() {
             ini.set_i32(key.section(), key.name(), self.get_i32(key));
         }
         // 自动时写空串而不是删键：删掉会让"手动改成自动"在文件里看不出痕迹，
@@ -1248,7 +1323,7 @@ impl Config {
         ini.set("Graphics", "Adapter", &self.adapter);
     }
 
-    /// 把上游格式就地升级为当前格式，返回是否发生了升级。
+    /// 把旧格式就地升级为当前格式，返回是否发生了升级。
     ///
     /// 做法是"读 → 删旧段 → 按新格式重写"。不用单独的迁移工具：
     /// 用户不需要知道有这回事，打开一次就升级完了。
@@ -1346,7 +1421,7 @@ mod tests {
 
     #[test]
     fn hostile_values_are_clamped() {
-        // pr_en.md 第 3 条的原样复现：这些值在原版里直接进几何/alpha 计算。
+        // 这些值会直接进几何/alpha 计算，越界必须挡住。
         let mut c = Config::defaults(96);
         for (key, evil) in [
             (Key::Opacity, 1000),
@@ -1368,7 +1443,7 @@ mod tests {
             (Key::Edge, 4),
             (Key::DotStyle, -1),
             (Key::Monitor, -1),
-            // 表驱动的键也要夹紧：上游对这些 int 根本不夹，
+            // 表驱动的键也要夹紧：对 int 不夹，
             // 越界会直接进绘制代码。
             (Key::PLATE_OPACITY, 999),
             (Key::SEP_GAP, -5),
@@ -1394,7 +1469,7 @@ mod tests {
         assert_eq!(c.blur, 1);
         assert_eq!(c.theme, DockTheme::Dark);
         assert_eq!(c.edge, Edge::Bottom);
-        // 底盘三键（上游 v1.4.0 用 PlateMode/PlateTheme/PlateOpacity
+        // 底盘三键（旧格式用 PlateMode/PlateTheme/PlateOpacity
         // 取代了旧的 PlateDark/PlateLight）。
         assert_eq!(c.get_i32(Key::PLATE_MODE), 0);
         assert_eq!(c.get_i32(Key::PLATE_THEME), 2);
@@ -1407,7 +1482,9 @@ mod tests {
     /// 任何一次调整 [`NUMERIC_KEYS`] 的顺序，都必须先更新常量再改这里。
     #[test]
     fn numeric_constants_match_table_rows() {
-        let pairs: [(Key, &str); 83] = [
+        // 用切片而不是定长数组：数组长度写死之后，每加一个键都要改这个
+        // 数字，而改数字这件事恰恰是本测试要防的"手工同步"。
+        let pairs: &[(Key, &str)] = &[
             (Key::PLATE_MODE, "PlateMode"),
             (Key::PLATE_THEME, "PlateTheme"),
             (Key::PLATE_OPACITY, "PlateOpacity"),
@@ -1472,7 +1549,7 @@ mod tests {
             (Key::TOOL_W, "ToolW"),
             (Key::WIDE_MASK, "WideMask"),
             (Key::MODE_W, "ModeW"),
-            // 上游 v1.6.5 追加的 19 个键（`HPad` 在 `g_tab` 里插在第 4 位，
+            // 第三批追加的 19 个键（`HPad` 在行序里插在第 4 位，
             // 但本表是常量下标，顺序无所谓，一行不能少）。
             (Key::HPAD, "HPad"),
             (Key::UI_FROST, "UiFrost"),
@@ -1493,23 +1570,35 @@ mod tests {
             (Key::SB_AUTO_HIDE, "SbAutoHide"),
             (Key::SEP_SCALE, "SepScale"),
             (Key::MENU_FROST, "MenuFrost"),
+            // [effect.smoke] —— 环境烟雾（ADR 之后新增的 11 行）。
+            (Key::SMOKE, "Smoke"),
+            (Key::SMOKE_COLOR, "SmokeColor"),
+            (Key::SMOKE_COLOR2, "SmokeColor2"),
+            (Key::SMOKE_OPACITY, "SmokeOpacity"),
+            (Key::SMOKE_DENSITY, "SmokeDensity"),
+            (Key::SMOKE_SPEED, "SmokeSpeed"),
+            (Key::SMOKE_TONE, "SmokeTone"),
+            (Key::SMOKE_THICK, "SmokeThick"),
+            (Key::SMOKE_MOUSE, "SmokeMouse"),
+            (Key::SMOKE_REACH, "SmokeReach"),
+            (Key::SMOKE_CLOUDS, "SmokeClouds"),
         ];
-        for (key, name) in pairs {
+        for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");
         }
         assert_eq!(NUMERIC_KEYS.len(), pairs.len());
     }
 
-    /// 键的总数与顺序必须与上游 `g_tab[]` 一致。
+    /// 键的总数与顺序必须与 ini 行序一致。
     ///
     /// 顺序决定写回 ini 的行序：两个实现之间来回读写，
     /// 行序不一致会产生无意义的 diff。
     #[test]
     fn key_list_matches_upstream_order() {
-        // 用**上游名**比对：顺序仍要与 C 版一致，这样两边来回读写时
+        // 用**旧名**比对：顺序必须稳定，这样来回读写时
         // 行序稳定、diff 干净。新名是否唯一由下一个测试保证。
         let names: Vec<&str> = Key::ALL.iter().map(|k| k.legacy_name()).collect();
-        assert_eq!(names.len(), 118, "上游 v1.6.5 是 118 个键");
+        assert_eq!(names.len(), 118, "行序表是 118 个键");
         // 抽查几个位置：顺序错了这里就会红。
         assert_eq!(names[0], "IconSize");
         // v1.6.5 把 `HPad` 插在 `Margin` 之后，后面的键整体后移一位。
@@ -1533,7 +1622,7 @@ mod tests {
         }
     }
 
-    /// 数值键的默认值与上游 `DefaultCfg()` 一致。
+    /// 数值键的默认值。
     #[test]
     fn numeric_defaults_match_upstream() {
         let c = Config::defaults(96);
@@ -1554,7 +1643,7 @@ mod tests {
         assert_eq!(c.get_i32(Key::MN_AUTO), 1);
         assert_eq!(c.get_i32(Key::MN_NOTES), 1);
         assert_eq!(c.get_i32(Key::MN_ADD), 1);
-        // 上游 v1.6.0 新键的默认值（DefaultCfg，v1.6.0 minidock.c:335-345）。
+        // 第二批键的默认值。
         assert_eq!(c.get_i32(Key::LAUNCHPAD), 0);
         assert_eq!(c.get_i32(Key::W_SIDE), 0);
         assert_eq!(c.get_i32(Key::W_ORDER), 0);
@@ -1576,8 +1665,8 @@ mod tests {
         assert_eq!(c.get_i32(Key::TOOL_W), 1);
         assert_eq!(c.get_i32(Key::WIDE_MASK), 0);
         assert_eq!(c.get_i32(Key::MODE_W), 1);
-        // 上游 v1.6.5 新键的默认值（DefaultCfg，1.6.5:332-360）。
-        // 注意两个例外：`SepScale` 与 `MenuFrost` 上游**没写**进 DefaultCfg，
+        // 第三批键的默认值。
+        // 两个例外：`SepScale` 与 `MenuFrost` 在默认配置里**没有**赋值，
         // 静态零初始化 = 默认关闭，所以这里是 0 而不是 1。
         assert_eq!(c.get_i32(Key::HPAD), 12);
         assert_eq!(c.get_i32(Key::UI_FROST), 1);
@@ -1598,9 +1687,9 @@ mod tests {
         assert_eq!(c.get_i32(Key::SB_AUTO_HIDE), 0);
         assert_eq!(c.get_i32(Key::SEP_SCALE), 0);
         assert_eq!(c.get_i32(Key::MENU_FROST), 0);
-        // HPad 与 SepGap 一样随 DPI 缩放（上游是 Sc(12)）。
+        // HPad 与 SepGap 一样随 DPI 缩放。
         assert_eq!(Config::defaults(144).get_i32(Key::HPAD), 18);
-        // SepGap 的默认值随 DPI 缩放（上游是 Sc(4)）。
+        // SepGap 的默认值随 DPI 缩放。
         assert_eq!(c.get_i32(Key::SEP_GAP), 4);
         assert_eq!(Config::defaults(144).get_i32(Key::SEP_GAP), 6);
     }
@@ -1626,8 +1715,8 @@ mod tests {
 
     #[test]
     fn key_table_matches_c_g_tab() {
-        // 76 个键（上游 v1.4.0），顺序即保存顺序；顺序错了会造成 ini diff 噪音。
-        // 这里直接把上游的键名列出来，顺序错一个字符都会红。
+        // 76 个键，顺序即保存顺序；顺序错了会造成 ini diff 噪音。
+        // 这里把键名逐条列出来，错一个字符都会红。
         const UPSTREAM: [&str; 118] = [
             "IconSize",
             "ZoomSize",
@@ -1706,7 +1795,7 @@ mod tests {
             "MnAuto",
             "MnNotes",
             "MnAdd",
-            // 上游 v1.6.0 追加的 23 个键。
+            // 第二批追加的 23 个键。
             "Launchpad",
             "WSide",
             "WOrder",
@@ -1730,7 +1819,7 @@ mod tests {
             "ToolW",
             "WideMask",
             "ModeW",
-            // 上游 v1.6.5 追加的 18 个键（`HPad` 已在上面）。
+            // 第三批追加的 18 个键（`HPad` 已在上面）。
             "UiFrost",
             "LpFrost",
             "TrayW",
@@ -1759,14 +1848,14 @@ mod tests {
         for (i, k) in Key::ALL.iter().enumerate() {
             for other in &Key::ALL[i + 1..] {
                 assert_ne!(k.name(), other.name(), "新名重复");
-                assert_ne!(k.legacy_name(), other.legacy_name(), "上游名重复");
+                assert_ne!(k.legacy_name(), other.legacy_name(), "旧名重复");
             }
         }
     }
 
-    /// 上游格式（单 `[Settings]` + 驼峰名）必须能直接读。
+    /// 旧格式（单 `[Settings]` + 驼峰名）必须能直接读。
     ///
-    /// 这是"老用户把 C 版的 ini 拿过来就能用"的保证。
+    /// 老配置拿过来就能用。
     #[test]
     fn legacy_settings_section_still_loads() {
         let mut ini = Ini::new();
@@ -1816,7 +1905,7 @@ mod tests {
         }
         want.clamp();
 
-        // 用旧格式写一份（手工拼，模拟上游文件）。
+        // 用旧格式写一份（手工拼）。
         let mut legacy = Ini::new();
         for key in Key::ALL.iter().copied() {
             legacy.set_i32(LEGACY_SECTION, key.legacy_name(), want.get_i32(key));
@@ -1920,7 +2009,7 @@ mod tests {
         }
         want.clamp();
 
-        // 造一份上游格式的文件。
+        // 造一份旧格式的文件。
         let mut ini = Ini::new();
         for key in Key::ALL.iter().copied() {
             ini.set_i32(LEGACY_SECTION, key.legacy_name(), want.get_i32(key));
@@ -1950,16 +2039,16 @@ mod tests {
         assert!(!Config::upgrade_legacy(&mut ini, dpi), "已经是新格式了");
     }
 
-    /// 上游 v1.6.0 的配置升级到我们的格式时，那 23 个新键**不能丢**。
+    /// 旧配置升级到新格式时，第二批那 23 个键**不能丢**。
     ///
     /// 这条测试对应一个真实缺陷：`upgrade_legacy` 的做法是"读 → 删掉
     /// `[Settings]` 整段 → 按新格式重写"。凡是 `Key::ALL` 里没有的键，
-    /// 删段时就一起没了 —— 上游 v1.6.0 加的 23 个键正好撞在这个缺口上。
+    /// 删段时就一起没了 —— 后来加的 23 个键正好撞在这个缺口上。
     /// 症状是"用户从 1.4 升到 1.6，配置被清空一半"。
     #[test]
     fn upgrade_legacy_keeps_upstream_v160_keys() {
         let mut ini = Ini::new();
-        // 上游 v1.6.0 风格的一整段配置。
+        // 旧格式的一整段配置。
         ini.set_i32(LEGACY_SECTION, "IconSize", 64);
         ini.set_i32(LEGACY_SECTION, "MnAdd", 1);
         ini.set_i32(LEGACY_SECTION, "Launchpad", 1);
@@ -2014,9 +2103,9 @@ mod tests {
         assert_eq!(after.get_i32(Key::MODE_W), 0);
     }
 
-    /// 上游 v1.6.5 的 19 个新键同样不能丢（同一个缺口的第二次复发）。
+    /// 第三批的 19 个新键同样不能丢（同一个缺口的第二次复发）。
     ///
-    /// 上一轮（ADR-038）修过一次 1.6.0 的 23 个键；上游 1.6.5 又加了 19 个，
+    /// ADR-038 修过一次 23 个键；之后又加了 19 个，
     /// 而 `upgrade_legacy` 的"删段重写"逻辑依旧：表里没有 = 一起删掉。
     /// 这条测试守着"用户从 1.6.5 升级，状态栏/毛玻璃设置不能凭空消失"。
     #[test]
@@ -2178,7 +2267,7 @@ mod tests {
         let mut ini = Ini::new();
         c.write_ini(&mut ini);
 
-        // 必须落在独立段里，不能污染与 C 版对照的 [Settings]。
+        // 必须落在独立段里，不能污染按行序写回的 [Settings]。
         assert_eq!(
             ini.get("Graphics", "Adapter"),
             Some("NVIDIA GeForce RTX 5070 Laptop GPU")

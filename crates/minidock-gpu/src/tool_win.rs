@@ -1,9 +1,7 @@
 //! 计时器 / 待办面板：点条带上的钟表卡片弹出来。
 //!
-//! 对应上游 v1.6.0 的 `ShowTool()` / `ToolDraw()` / `ToolMove()` / `ToolUp()`
-//! （minidock.c:6455-6510）。
 //!
-//! 与资源监视器面板（ADR-039）的差别：**这个要交互**。上游用 `RECT` 数组
+//! 与资源监视器面板（ADR-039）的差别：**这个要交互**。用 `RECT` 数组
 //! 记每个按钮/待办行的命中区，`ToolMove` 里逐个数。这里照同样的做法 ——
 //! 面板用 painter 显式定位，命中区在绘制时一并算出来存进 `Hits`。
 //!
@@ -33,12 +31,12 @@ use crate::ime::Ime;
 /// 窗口类名。
 pub const CLASS_NAME: &str = "MiniDockTool";
 
-/// 面板宽度。上游是 `Sc(360)`（v1.6.0:6487）。
+/// 面板宽度。是 `Sc(360)`（v1.6.0:6487）。
 const PANEL_W: f32 = 360.0;
 
 /// 没有待办时的面板高度。
 ///
-/// 上游固定 `Sc(470)`，但那条高是按 16 条待办算的 —— 少于 16 条时
+/// 固定 `Sc(470)`，但那条高是按 16 条待办算的 —— 少于 16 条时
 /// 下面是一大片空白。这里按实际条数算，见 [`panel_h`]。
 const PANEL_H_BASE: f32 = 330.0;
 
@@ -58,7 +56,7 @@ const TICK: Duration = Duration::from_millis(50);
 
 /// 面板上的可点区域。绘制时算出来，鼠标事件里用。
 ///
-/// 对应上游 `ToolU.rb[5]` + `tr[17]`。
+///
 #[derive(Clone, Debug)]
 struct Hits {
     /// 0 = 计时，1 = 秒表。
@@ -442,7 +440,7 @@ impl ToolWindow {
         }
     }
 
-    /// 执行一次点击。对应上游 `ToolUp()`。
+    /// 执行一次点击。
     fn click(&mut self, hit: Hit) {
         let now = now_ms();
         match hit {
@@ -458,7 +456,7 @@ impl ToolWindow {
                 self.state.reset();
                 self.dirty = true;
             }
-            // 减 / 加一分钟：上游没有这个功能，但倒计时默认写死 5 分钟、
+            // 减 / 加一分钟：没有这个功能，但倒计时默认写死 5 分钟、
             // 界面上改不了，等于这个小组件只有一种时长可用。
             // 这里补上两个按钮，改动写在 ADR-040。
             Hit::Action(Action::MinusMinute) => {

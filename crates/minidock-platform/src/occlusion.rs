@@ -1,6 +1,6 @@
 //! 遮挡检测：判断有没有普通窗口盖住指定区域。
 //!
-//! 对应 C 版 `OvProc()` + `EnumWindows` 那段，用于 `Mode=2`（智能隐藏）：
+//! 对应 `OvProc` + `EnumWindows` 那段，用于 `Mode=2`（智能隐藏）：
 //! 只有当 Dock 那块屏幕区域**真的被挡住**时才收起，否则一直显示。
 //!
 //! # 为什么不能只看 `WindowFromPoint`
@@ -15,7 +15,7 @@
 //! 以及 `Progman` / `WorkerW` 这类铺满全屏的桌面宿主。少过滤一类，
 //! 结果就是"什么都没开，Dock 却一直躲着"。
 //!
-//! 过滤清单与上游一致，逐条在注释里写明理由。
+//! 过滤清单，逐条在注释里写明理由。
 
 use minidock_core::layout::Rect;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsIconic, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
-/// C 版直接用 `DwmGetWindowAttribute(h, 14, ...)`；这里用具名常量。
+/// 直接用 `DwmGetWindowAttribute(h, 14, ...)`；这里用具名常量。
 ///
 /// 公开是因为 `app_window` 也要用它 —— "被 DWM 隐藏的 UWP 幽灵窗口"
 /// 既不算遮挡，也不算正在运行的应用。
@@ -65,7 +65,7 @@ fn should_skip(hwnd: HWND, exclude: &[HWND]) -> bool {
             return true;
         }
         // 没有标题的窗口基本都是不可见的容器。这条也会误杀少数无标题的
-        // 全屏渲染窗口（个别游戏/播放器），但上游同样如此 —— 宁可 Dock
+        // 全屏渲染窗口（个别游戏/播放器），但同样如此 —— 宁可 Dock
         // 不躲，也不要莫名其妙地躲。
         if GetWindowTextLengthW(hwnd) == 0 {
             return true;
@@ -264,8 +264,8 @@ pub fn check_fullscreen() -> FullscreenCheck {
 ///
 /// 启动应用后多久内不做全屏判定（毫秒）。
 ///
-/// 上游 1.6.5 的 `g_launchTick`（`FsWatch()` 里
-/// `GetTickCount() - g_launchTick < 1500` 直接返回）。
+/// 1.6.5 的 `g_launchTick`（`FsWatch` 里
+/// `GetTickCount - g_launchTick < 1500` 直接返回）。
 ///
 /// 为什么需要：新启动的应用常常**先以最大化/全屏姿态出现**（浏览器、
 /// 游戏启动器、安装完自动拉起的客户端）。全屏监视若在那一瞬间判定，

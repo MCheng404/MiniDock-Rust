@@ -1,6 +1,6 @@
 //! 解析快捷方式，得到它真正指向的可执行文件。
 //!
-//! 对应 C 版 `ReadLnk()` 的"取 target"部分（它还有取图标的部分，
+//! 对应 `ReadLnk` 的"取 target"部分（它还有取图标的部分，
 //! 我们不解析图标，图标走 `platform::icon` 的 shell 图像列表）。
 //!
 //! # 为什么需要它
@@ -13,7 +13,7 @@
 //! `windows` 0.62 给 `IShellLinkW::GetPath` / `GetArguments` 生成的 wrapper
 //! 签名与 COM vtable 不符（vtable 要 `(PWSTR, cch, WIN32_FIND_DATAW*, flags)`，
 //! wrapper 只传了两个参数）。照 wrapper 调用是未定义行为，因此这里绕过
-//! wrapper，直接用 `Interface::vtable()` 按 COM ABI 调用。
+//! wrapper，直接用 `Interface::vtable` 按 COM ABI 调用。
 //!
 //! 代价是这段代码依赖 vtable 布局。升级 `windows` 大版本时要重新核对 ——
 //! 有一个 `#[ignore]` 的真实解析测试可以立刻发现回归。

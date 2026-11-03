@@ -19,6 +19,16 @@ struct St {
 }
 
 fn new_harness() -> Harness<'static, St> {
+    harness(false)
+}
+
+/// `shell = true` 时模拟 `gpu::settings_win::shell`：先画标题栏，再把
+/// **剩下的**区域交给 `settings_ui`。
+///
+/// 这个变体存在的理由：`settings_ui` 曾经用 `ui.max_rect()` 取起点，而
+/// `max_rect` 不随已用内容收缩 —— 两列会直接盖到标题上。测试里不模拟
+/// 外壳就永远发现不了。
+fn harness(shell: bool) -> Harness<'static, St> {
     let state = St {
         cfg: Config::defaults(96),
         ui: SettingsState {
@@ -28,8 +38,13 @@ fn new_harness() -> Harness<'static, St> {
         commands: Vec::new(),
     };
     // 窗口给得足够大，避免 ScrollArea 把控件裁掉导致查不到节点。
-    Harness::builder()
-        .with_size([900.0, 1200.0])
+    let size = if shell {
+        [900.0, 720.0]
+    } else {
+        [900.0, 1200.0]
+    };
+    let builder = Harness::builder()
+        .with_size(size)
         // 必须在第一帧之前装字体：egui 0.37 在缺字形时**直接 panic**
         // （MissingGlyphPolicy::Panic），不是画成豆腐块。
         .with_context_setup(|ctx| {
@@ -37,16 +52,27 @@ fn new_harness() -> Harness<'static, St> {
                 minidock_settings::fonts::install_cjk(ctx),
                 "本机找不到中文字体，界面无法渲染"
             );
-        })
-        .build_ui_state(
+        });
+
+    if shell {
+        builder.build_ui_state(
             |ui, st: &mut St| {
-                let outcome = settings_ui(ui, &mut st.cfg, &mut st.ui);
-                if let Some(cmd) = outcome.command {
-                    st.commands.push(cmd);
-                }
+                ui.heading("MiniDock");
+                ui.separator();
+                run(ui, st);
             },
             state,
         )
+    } else {
+        builder.build_ui_state(|ui, st: &mut St| run(ui, st), state)
+    }
+}
+
+fn run(ui: &mut egui::Ui, st: &mut St) {
+    let outcome = settings_ui(ui, &mut st.cfg, &mut st.ui);
+    if let Some(cmd) = outcome.command {
+        st.commands.push(cmd);
+    }
 }
 
 #[test]
@@ -171,5 +197,123 @@ fn 适配器回退时给出提示() {
             .count()
             >= 1,
         "回退必须可见，否则用户会以为选择生效了"
+    );
+}
+
+// ============================ 布局契约 ============================
+//
+// 这三条测的不是"配置对不对"，而是"东西画在哪"。视觉回归没法在 CI 上做
+// （截图要 wgpu，而这一层刻意不依赖 wgpu），但"导航在左、内容在右、
+// 谁也不盖谁"是可以用矩形断言守住的。
+
+/// 导航项必须整行可点，且一律在内容区左侧。
+#[test]
+fn 导航栏在左且整行可点() {
+    let mut h = new_harness();
+    h.get_by_label("外观").click();
+    h.run();
+    assert_eq!(h.state().ui.page, Page::Appearance);
+
+    // 按角色查：页头的大标题也叫「外观」，只按文字会命中两个节点。
+    let nav = h.get_by_role_and_label(egui::Role::Tab, "外观").rect();
+    // 滑杆本身（`Role::Slider`）：只按文字会同时命中左边的标题。
+    let content = h
+        .get_by_role_and_label(egui::Role::Slider, "图标大小")
+        .rect();
+    assert!(
+        nav.right() <= content.left(),
+        "导航项与内容区重叠：nav.right={} content.left={}",
+        nav.right(),
+        content.left()
+    );
+    assert!(
+        nav.width() >= 140.0,
+        "导航项应撑满整行（文字宽度只有几十像素），实得 {}",
+        nav.width()
+    );
+}
+
+/// 外壳先画了标题栏时，两列不能盖上去。
+#[test]
+fn 有标题栏时两列不会盖住标题() {
+    let mut h = harness(true);
+    h.run();
+
+    let title = h.get_by_label("MiniDock").rect();
+    let nav = h.get_by_role_and_label(egui::Role::Tab, "常规").rect();
+    assert!(
+        nav.top() >= title.bottom() - 1.0,
+        "导航栏盖住了标题：nav.top={} title.bottom={}",
+        nav.top(),
+        title.bottom()
+    );
+}
+
+/// 行的说明**不再排版**：收进标题后的圆形感叹号，点击展开成浮层。
+///
+/// 这是设计变更（雏形 2026-11 改版）的直接契约：说明占一行 → 收进圆点。
+#[test]
+fn 描述收进感叹号气泡() {
+    let mut h = new_harness();
+    h.run();
+
+    // ① 说明文字默认不可见 —— 它现在只是气泡的内容。
+    assert_eq!(
+        h.query_all_by_label("防止误拖动、误移除图标").count(),
+        0,
+        "说明文字不该再排版出来"
+    );
+
+    // ② 圆点存在，且可访问名带"说明："前缀。
+    let hint = h.get_by_role_and_label(egui::Role::Button, "说明：防止误拖动、误移除图标");
+    hint.click();
+    h.run();
+
+    // ③ 点击后气泡展开，说明文字可见。
+    assert!(
+        h.query_all_by_label("防止误拖动、误移除图标").count() >= 1,
+        "点击感叹号后应展开说明气泡"
+    );
+}
+
+/// 顶栏搜索：只显示命中的导航标签；当前页被过滤掉时自动跳到第一个命中页。
+#[test]
+fn 搜索过滤导航并自动切页() {
+    let mut h = new_harness();
+    h.state_mut().ui.nav_filter = "图".to_owned();
+    h.run();
+
+    assert_eq!(
+        h.state().ui.page,
+        Page::Icons,
+        "常规页不含'图'，应自动跳到图标页"
+    );
+    assert_eq!(h.state().ui.nav_filter, "图", "过滤词要一直留在输入框里");
+
+    // 清空过滤词后切回逻辑不受影响：Page 仍是图标页，不回跳。
+    h.state_mut().ui.nav_filter = String::new();
+    h.run();
+    assert_eq!(h.state().ui.page, Page::Icons);
+}
+
+/// 开关与下拉的右边缘必须对齐。
+///
+/// 同一张卡片里既有开关又有下拉时最容易错开：`Checkbox` 自带文字内边距，
+/// 不给定尺寸就会比下拉缩进几个像素（附件页的「小组件」卡片就是这个组合）。
+#[test]
+fn 控件右边缘对齐() {
+    let mut h = new_harness();
+    h.state_mut().ui.page = Page::Extras;
+    h.run();
+
+    let toggle = h.get_by_role_and_label(egui::Role::CheckBox, "通知").rect();
+    let combo = h
+        .get_by_role_and_label(egui::Role::ComboBox, "小组件位置")
+        .rect();
+    assert!(
+        (toggle.right() - combo.right()).abs() < 1.0,
+        "开关右边缘 {} 与下拉右边缘 {} 没对齐",
+        toggle.right(),
+        combo.right()
     );
 }

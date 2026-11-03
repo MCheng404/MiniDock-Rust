@@ -1,17 +1,16 @@
 //! 日历弹层：点条带上的时钟卡片弹出来。
 //!
-//! 对应上游 v1.6.0 的 `ShowCalendar()` / `CalDraw()` / `CalMove()` / `CalUp()`
-//! （minidock.c:5851-5983）：392 × 556 逻辑像素，顶部年/月翻页与「今天」，
+//! 392 × 556 逻辑像素，顶部年/月翻页与「今天」，
 //! 周一起始的 6×7 网格，每格下方一行副标签（节日 / 节气 / 农历日），
 //! 底部是选中日的详情（公历、农历、干支历、下一个节气）。
 //!
 //! 与资源监视器 / 计时器面板的差别只有两点：
 //!
-//! - **它是弹层，不是面板**。上游用 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`，
+//! - **它是弹层，不是面板**。用 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`，
 //!   并且靠"鼠标移出矩形就关"来 dismiss。这里改成 `SetCapture` +
 //!   "点到自己外面就关" —— 移出就关对鼠标经过太敏感，点外面才关符合
 //!   菜单的通行习惯，也不会因为手抖扫过就消失。
-//! - **它贴在时钟卡片旁边**，不是屏幕居中（上游 `PopRun` 就是这么摆的）。
+//! - **它贴在时钟卡片旁边**，不是屏幕居中。
 //!
 //! 算法全在 `minidock_core::calendar` 里，这里只负责画和判命中。
 
@@ -39,12 +38,11 @@ use crate::gpu::{Gpu, GpuError};
 /// 窗口类名。
 pub const CLASS_NAME: &str = "MiniDockCalendar";
 
-/// 面板逻辑尺寸。上游 `Sc(392) × Sc(556)`；这里按内容的实际高度收紧到 480
-/// （上游那 556 里有一大段空白，是给 `DrawTextBox` 的行高留的余量）。
+/// 面板逻辑尺寸：宽 392，高按内容收紧到 480。
 const PANEL_W: f32 = 392.0;
 const PANEL_H: f32 = 480.0;
 
-/// 窗口边距（上游 `PM`）。
+/// 窗口边距。
 const PM: f32 = 8.0;
 
 /// 一次点击命中的目标。
@@ -228,7 +226,7 @@ impl CalendarWindow {
             return;
         }
         // 先改标志再释放捕获：`ReleaseCapture` 会同步派发
-        // `WM_CAPTURECHANGED`，那里还会调 `hide()`，靠这个标志挡住重入。
+        // `WM_CAPTURECHANGED`，那里还会调 `hide`，靠这个标志挡住重入。
         self.visible = false;
         unsafe {
             if GetCapture() == self.hwnd {
@@ -300,7 +298,7 @@ impl CalendarWindow {
                 None
             }
             WM_LBUTTONDOWN => {
-                // 点在弹层外面 → 关掉。上游是"鼠标移出矩形就关"，
+                // 点在弹层外面 → 关掉。是"鼠标移出矩形就关"，
                 // 这里改成"点外面才关"：扫过去就消失太容易误触。
                 let (x, y) = client_pos(lparam, self.ppp);
                 if !self.client_rect().contains(egui::pos2(x, y)) {
@@ -355,7 +353,7 @@ impl CalendarWindow {
 
 /// 画整块：导航 + 星期头 + 网格 + 选中日详情。
 ///
-/// 全部显式定位（上游也是 `DrawTextBox` 传矩形）。返回本帧的命中区。
+/// 全部显式定位。返回本帧的命中区。
 fn draw_panel(
     ui: &mut egui::Ui,
     dark: bool,
@@ -400,7 +398,7 @@ fn draw_panel(
         Color32::from_rgba_unmultiplied(0, 0, 0, 40)
     };
 
-    // ---- 布局基准（全部来自上游 CalDraw 的 Sc() 数值）----
+    // ---- 布局基准（全部来自CalDraw 的 Sc 数值）----
     let x0 = rect.left() + PM + 16.0;
     let y0 = rect.top() + PM + 14.0;
     let cw = PANEL_W - 2.0 * PM - 32.0;
@@ -659,7 +657,7 @@ fn physical_size(ppp: f32) -> (i32, i32) {
     )
 }
 
-/// 弹层摆在时钟卡片旁边，照上游 `PopRun` 的规则，再夹进显示器范围。
+/// 弹层摆在时钟卡片旁边，再夹进显示器范围。
 ///
 /// `anchor` 与返回值都是物理像素。
 fn place(pw: i32, ph: i32, anchor: (f32, f32, f32, f32), edge: Edge, ppp: f32) -> (i32, i32) {
@@ -680,7 +678,7 @@ fn place(pw: i32, ph: i32, anchor: (f32, f32, f32, f32), edge: Edge, ppp: f32) -
             at - ph as f32 + pm as f32 - gap as f32,
         ),
     };
-    // 夹进主显示器。上游用的是 `g_mi.rcMonitor`（不是工作区）：
+    // 夹进主显示器。用的是 `g_mi.rcMonitor`（不是工作区）：
     // 弹层压到任务栏上是可接受的，跑出屏幕不可接受。
     let mon = minidock_platform::display::monitor_rect(0);
     let (mut xi, mut yi) = (x.round() as i32, y.round() as i32);
@@ -742,7 +740,7 @@ mod tests {
     /// 顶部栏时弹层在卡片下方。
     ///
     /// 比的是**内容区**（窗口坐标 + PM 外边距）而不是窗口坐标：窗口四周
-    /// 有 8 像素透明边距（画圆角阴影用的），上游定位时让这层边距压住卡片
+    /// 有 8 像素透明边距（画圆角阴影用的），定位时让这层边距压住卡片
     /// 边缘 4 像素，看起来才是"贴着"而不是"隔着一条缝"。
     #[test]
     fn places_below_the_card_for_a_top_dock() {

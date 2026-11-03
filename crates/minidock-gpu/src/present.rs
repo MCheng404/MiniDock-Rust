@@ -107,7 +107,7 @@ impl LayeredPresenter {
         debug_assert_eq!(rgba.len(), pixels * 4);
 
         // SAFETY: `bits` 由 `CreateDIBSection` 分配，长度恰为 pixels*4；
-        // 调用方保证 `rgba` 同长（上游固定尺寸 + debug 断言）。
+        // 调用方保证 `rgba` 同长。
         // 两个切片都对齐到 u32：DIB 按 4 字节对齐分配，rgba 来自 wgpu
         // 回读缓冲（本身就是 4 字节对齐的像素数组）。
         let src = unsafe { std::slice::from_raw_parts(rgba.as_ptr().cast::<u32>(), pixels) };
@@ -160,7 +160,7 @@ impl LayeredPresenter {
 /// 0xAARRGGBB → 0xAABBGGRR：保留 A/G，交换 R 与 B。
 ///
 /// 抽成纯函数有两个原因：可以在没有窗口/DC 的环境里单测，
-/// 也可以直接对拍"逐字节赋值"的旧写法来量化收益。
+/// 也可以直接比对"逐字节赋值"的旧写法来量化收益。
 fn swap_rb(dst: &mut [u32], src: &[u32]) {
     debug_assert_eq!(dst.len(), src.len());
     for (d, s) in dst.iter_mut().zip(src) {
@@ -202,7 +202,7 @@ mod tests {
         }
     }
 
-    /// 与旧写法（逐字节四次赋值）对拍吞吐。**只打印不断言**：
+    /// 与旧写法（逐字节四次赋值）比对吞吐。**只打印不断言**：
     /// 时间在不同机器/负载下波动，断言会变成 flaky 测试。
     ///
     /// 默认 `#[ignore]`：它要搬 1320×1080×4×20 ≈ 114 MB，是 benchmark 不是

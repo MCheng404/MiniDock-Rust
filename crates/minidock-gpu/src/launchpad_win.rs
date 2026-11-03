@@ -1,7 +1,6 @@
 //! 起动台：全屏的应用网格。
 //!
-//! 对应上游 v1.6.0 的 `ShowLaunchpad()` / `LpDraw()` / `LpProc()` /
-//! `LpDrop()`（minidock.c:6757-7350）。数据模型与"拖到图标上合并成文件夹"
+//! 数据模型与"拖到图标上合并成文件夹"
 //! 的规则在 `minidock_core::launchpad`，这里只管画、判命中、收输入。
 //!
 //! 与前面几个面板的差别：**这个要抢焦点**。
@@ -49,7 +48,7 @@ const WM_APP_WAKE: u32 = WM_APP + 1;
 /// 搜索框。
 const SEARCH_W: f32 = 380.0;
 const SEARCH_H: f32 = 44.0;
-/// 网格左右留白与上下留白（上游 `side` / `topH` / `botH`）。
+/// 网格左右留白与上下留白。
 const SIDE: f32 = 70.0;
 const TOP_H: f32 = 124.0;
 const BOT_H: f32 = 146.0;
@@ -206,7 +205,7 @@ impl LaunchpadWindow {
         .map_err(|_| GpuError::Win32("CreateWindowExW（起动台）"))?;
 
         // 建好先藏起来：`WS_VISIBLE` 是为了让窗口过程能收消息，
-        // 这里立刻隐藏，等 `open()` 再显示。
+        // 这里立刻隐藏，等 `open` 再显示。
         unsafe {
             let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
             // 允许把文件拖进来（WM_DROPFILES）。
@@ -618,7 +617,7 @@ impl LaunchpadWindow {
                     let dx = x - self.down.0;
                     let dy = y - self.down.1;
                     if !self.dragging && (dx.abs() > 8.0 || dy.abs() > 8.0) {
-                        // 只有应用能拖（文件夹拖动在上游也是重排，这里先只支持应用）。
+                        // 只有应用能拖。
                         if let Some(Hit::Cell(k)) = self.press {
                             self.dragging = true;
                             self.drag_src = Some(k);
@@ -695,7 +694,7 @@ impl LaunchpadWindow {
                         self.activate(a);
                     }
                     (Some(Hit::Plus), Some(Hit::Plus)) => {
-                        // 上游这里弹"添加应用/文件夹/网址"菜单。我们改成拖拽添加，
+                        // 这里弹"添加应用/文件夹/网址"菜单。我们改成拖拽添加，
                         // 这里给出提示（点击无效果的按钮比没有按钮更让人困惑）。
                         eprintln!("[launchpad] 把文件、快捷方式或文件夹拖进窗口即可添加");
                     }
@@ -1007,9 +1006,9 @@ fn draw(
     let painter = ui.painter().clone();
     let rect = EguiRect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
 
-    // 背板：深色下 91% 的深灰，浅色下 91% 的浅灰。上游在磨砂可用时用磨砂，
+    // 背板：深色下 91% 的深灰，浅色下 91% 的浅灰。在磨砂可用时用磨砂，
     // 我们这里不拍窗口快照，用不透明度换观感。
-    // 不透明度取 246/255（约 96%）：我们没有上游那种"磨砂快照"可用，
+    // 不透明度取 246/255（约 96%）：我们没有那种"磨砂快照"可用，
     // 半透明会让背后的窗口轮廓透进来，看起来像没画完。留一点点透，
     // 只为让它在切换时不像一块实心板。
     let bg = if dark {

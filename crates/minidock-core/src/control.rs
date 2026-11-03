@@ -3,12 +3,11 @@
 //! 只有"有哪些磁贴、按什么顺序排、每行几个"这几件事 —— 全部可单测。
 //! 真正的系统调用在 `platform::sysact` / `platform::audio`，绘制在 `gpu::cc_win`。
 //!
-//! 对应上游 v1.6.0 的 `ShowCtrlCenter()`（minidock.c:6716-6735）：磁贴顺序是
-//! 硬编码的，末尾两个（节能 / 热点）按配置开关追加。
+//! 磁贴顺序是硬编码的，末尾两个（节能 / 热点）按配置开关追加。
 
 /// 一个磁贴。
 ///
-/// 下标即上游的 `u->id[k]`，取位顺序不能改 —— 上游用 `id` 去查名字表和图标表。
+/// 下标即`u->id[k]`，取位顺序不能改 —— 用 `id` 去查名字表和图标表。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Tile {
     /// 无线网络。
@@ -32,7 +31,7 @@ pub enum Tile {
 }
 
 impl Tile {
-    /// 磁贴上的文字（上游 `nm[9]`）。
+    /// 磁贴上的文字。
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -58,12 +57,12 @@ impl Tile {
     }
 }
 
-/// 磁贴每行几个（上游固定 3 列）。
+/// 磁贴每行几个。
 pub const COLS: usize = 3;
 
 /// 按配置与网卡状态排出磁贴顺序。
 ///
-/// 顺序照抄上游：`[无线/有线] 蓝牙 深色 定位 静音 设置 [节能] [热点]`。
+/// 顺序沿用：`[无线/有线] 蓝牙 深色 定位 静音 设置 [节能] [热点]`。
 /// 末尾两个是可选的，`CcEnergy` / `CcHotspot` 关了就不出现。
 #[must_use]
 pub fn tiles(energy: bool, hotspot: bool, wired: bool) -> Vec<Tile> {
@@ -84,7 +83,7 @@ pub fn tiles(energy: bool, hotspot: bool, wired: bool) -> Vec<Tile> {
     v
 }
 
-/// 磁贴占几行。上游把这里写死成 2（`2 * (th + 10)`），于是开关两个可选磁贴
+/// 磁贴占几行。把这里写死成 2（`2 * (th + 10)`），于是开关两个可选磁贴
 /// （默认就是开的）时第三行会被音量滑块压住 —— 顺手修掉。
 #[must_use]
 pub const fn rows(n: usize) -> usize {
@@ -123,7 +122,7 @@ mod tests {
         assert!(!t.contains(&Tile::Wifi));
     }
 
-    /// 行数按实际磁贴数算（修掉上游写死 2 行的问题）。
+    /// 行数按实际磁贴数算。
     #[test]
     fn rows_follow_the_tile_count() {
         assert_eq!(rows(6), 2);

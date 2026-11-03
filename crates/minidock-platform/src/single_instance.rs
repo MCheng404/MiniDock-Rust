@@ -1,6 +1,6 @@
 //! 单实例与"找到已有窗口"。
 //!
-//! 原版用一个命名互斥体 + 第二次启动时给已有实例发消息实现"双击只唤起不重开"。
+//! 用一个命名互斥体 + 第二次启动时给已有实例发消息实现"双击只唤起不重开"。
 //! 互斥体名里的 `Local\` 前缀很关键：`Local\` 是**会话级**命名空间，
 //! 多用户同时登录时各自能有一份 Dock；换成 `Global\` 会全局互斥，
 //! 第二个用户就再也起不来了。
@@ -27,14 +27,14 @@ impl SingleInstance {
     /// - `Ok(None)`：已有实例在跑，调用方应当把窗口唤到前台后退出。
     /// - `Err(_)`：连互斥体都创建不了（极少见），调用方可以选择继续启动。
     pub fn acquire() -> Result<Option<Self>, MutexError> {
-        // 名字来自 `minidock_core::SINGLETON_MUTEX`：C 版与 Rust 版共用同一个
+        // 名字来自 `minidock_core::SINGLETON_MUTEX`：与 Rust 版共用同一个
         // 互斥体名，才能做到"两个版本不会同时起两份 Dock"。这里不再硬编码，
         // 否则改常量不会生效（曾经就是个只检查非空的假断言）。
         let name = to_wide(SINGLETON_MUTEX);
         let handle = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) }
             .map_err(|e| MutexError { code: e.code().0 })?;
         // CreateMutexW 有竞态：即使对象已存在也会返回有效句柄，
-        // 真正的判定在 GetLastError()。
+        // 真正的判定在 GetLastError。
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             unsafe {
                 let _ = CloseHandle(handle);
