@@ -276,6 +276,31 @@ fn 描述收进感叹号气泡() {
     );
 }
 
+/// 点气泡之外收起 —— 雏形是"点别处就关"，钉住也不例外。
+#[test]
+fn 点击气泡外收起() {
+    let mut h = new_harness();
+    h.run();
+
+    h.get_by_role_and_label(egui::Role::Button, "说明：防止误拖动、误移除图标")
+        .click();
+    h.run();
+    assert!(
+        h.query_all_by_label("防止误拖动、误移除图标").count() >= 1,
+        "前置：气泡应已展开"
+    );
+
+    // 点一个无关的位置（页头标题）—— 点击事件照样落下去
+    h.get_by_label("外观").click();
+    h.run();
+
+    assert_eq!(
+        h.query_all_by_label("防止误拖动、误移除图标").count(),
+        0,
+        "点气泡外应收起"
+    );
+}
+
 /// 顶栏搜索：只显示命中的导航标签；当前页被过滤掉时自动跳到第一个命中页。
 #[test]
 fn 搜索过滤导航并自动切页() {

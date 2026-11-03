@@ -122,6 +122,14 @@ pub struct SettingsState {
     pub tip: Option<Tip>,
     /// 正在悬停的提示点：悬停满 3 秒才展开，需要跨帧计时。
     pub tip_hover: Option<(egui::Id, std::time::Instant)>,
+    /// 上一帧各卡片的高度（按基准左上角查）：磁吸的衰减要用。
+    pub card_h_prev: Vec<(egui::Pos2, f32)>,
+    /// 本帧各卡片的高度，下一帧变成 `card_h_prev`。
+    pub card_h: Vec<(egui::Pos2, f32)>,
+    /// 上一帧各行的矩形（按基准左上角查）：悬停底色垫在行内容之下。
+    pub row_bands_prev: Vec<(egui::Pos2, egui::Rect)>,
+    /// 本帧各行的矩形，下一帧变成 `row_bands_prev`。
+    pub row_bands: Vec<(egui::Pos2, egui::Rect)>,
 }
 
 /// 一个展开中的说明气泡。
@@ -151,6 +159,10 @@ impl Default for SettingsState {
             nav_filter: String::new(),
             tip: None,
             tip_hover: None,
+            card_h_prev: Vec::new(),
+            card_h: Vec::new(),
+            row_bands_prev: Vec::new(),
+            row_bands: Vec::new(),
         }
     }
 }
@@ -211,8 +223,14 @@ pub fn settings_ui(ui: &mut Ui, cfg: &mut Config, state: &mut SettingsState) -> 
         // `max_rect` 不随内容收缩，外壳已经画掉的标题栏高度它不认，两列会
         // 直接盖到标题上（第一版就是这样）。
         let rect = ui.available_rect_before_wrap();
-        let nav_rect =
-            egui::Rect::from_min_size(rect.min, egui::vec2(widgets::NAV_W, rect.height()));
+        // 导航高度 = 窗口高；标签超过上限时按 12 行截断，其余滚动。
+        // 目前 10 页 < 12，这条不触发 —— 它是导航的容量上限，防止以后加页被遗忘。
+        let nav_h = if Page::ALL.len() > widgets::MAX_LABELS {
+            (widgets::MAX_LABELS as f32 * (widgets::NAV_ITEM_H + 3.0) + 20.0).min(rect.height())
+        } else {
+            rect.height()
+        };
+        let nav_rect = egui::Rect::from_min_size(rect.min, egui::vec2(widgets::NAV_W, nav_h));
         let content_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left() + widgets::NAV_W + 14.0, rect.top()),
             egui::pos2(rect.right(), rect.bottom()),
@@ -234,7 +252,12 @@ pub fn settings_ui(ui: &mut Ui, cfg: &mut Config, state: &mut SettingsState) -> 
         );
         widgets::sidebar(&mut nav_ui, ctx.state);
 
-        // ② 右栏：页头 + 卡片内容
+        // ② 右栏：页头 + 卡片内容。
+        // 卡片高度 / 行矩形是"上一帧"几何，翻页时必须清空 ——
+        // 否则新页面的第一帧会拿旧页面的位置算磁吸和悬停底色。
+        ctx.state.card_h_prev = std::mem::take(&mut ctx.state.card_h);
+        ctx.state.row_bands_prev = std::mem::take(&mut ctx.state.row_bands);
+
         let mut content_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(content_rect)
@@ -260,9 +283,7 @@ pub fn settings_ui(ui: &mut Ui, cfg: &mut Config, state: &mut SettingsState) -> 
 
         // ③ 说明气泡最后渲染：此刻所有行的悬停/点击状态都已结算，
         // 不会出现"这一帧气泡开着、下一帧状态才更新"的抖动。
-        if let Some(tip) = ctx.state.tip.clone() {
-            widgets::render_tip(ui, &tip);
-        }
+        widgets::render_tip(ui, ctx.state);
     }
     out
 }

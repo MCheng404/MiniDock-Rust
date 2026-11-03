@@ -27,7 +27,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let out_path = args.next().unwrap_or_else(|| "settings.bmp".to_owned());
     let page_name = args.next();
-    let dark = args.next().is_some_and(|a| a == "dark");
+    // 剩下的参数是开关（顺序随意）：`dark` 深色主题，`tip` 展开一张说明
+    // 气泡（气泡由悬停/点击驱动，离屏渲染没有指针，只能直接塞状态）。
+    let rest: Vec<String> = args.collect();
+    let dark = rest.iter().any(|a| a == "dark");
+    let tip = rest.iter().any(|a| a == "tip");
 
     let page = match page_name.as_deref() {
         None => Page::Appearance,
@@ -60,6 +64,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats: "空闲 · 0 帧/秒 · 上一次出帧 42 ms 前".to_owned(),
         ..SettingsState::default()
     };
+    if tip {
+        state.tip = Some(minidock_settings::pages::Tip {
+            #[expect(deprecated, reason = "截图用的一次性 id")]
+            id: egui::Id::new("shot"),
+            text: "根据 Windows 强调色生成 Material You 风格色调".to_owned(),
+            anchor: egui::Rect::from_min_size(egui::pos2(560.0, 300.0), egui::vec2(120.0, 20.0)),
+            pinned: true,
+        });
+    }
     let mut out = Outcome::default();
 
     let raw = raw_input((w, h), ppp);

@@ -24,7 +24,10 @@ use super::{Command, Outcome, Page, SettingsState};
 pub(crate) const NAV_W: f32 = 193.0;
 
 /// 导航项高度。
-const NAV_ITEM_H: f32 = 40.0;
+pub(crate) const NAV_ITEM_H: f32 = 40.0;
+
+/// 导航标签数量上限（雏形的容量约定；超出部分侧栏滚动）。
+pub(crate) const MAX_LABELS: usize = 12;
 
 /// 滑杆的固定宽度。egui 的滑杆默认会吃掉整行剩余宽度，在"标题在左、
 /// 控件在右"的排版里会把标题挤扁。
@@ -126,14 +129,40 @@ pub(crate) fn card<R>(
     note: &str,
     add: impl FnOnce(&mut Ctx<'_>, &mut Ui) -> R,
 ) -> R {
-    card_frame(ui)
-        .show(ui, |ui| {
-            // 卡片必须**一律撑满**可用宽度。
-            //
-            // `Frame` 的宽度由内容决定：一行 `label` 只有几十像素，那个卡片
-            // 就缩成一小块（性能页的「当前占用」、添加页的「重置」都这样，
-            // 摆在一列同宽卡片里像排版坏了）。这里直接把内容的最小宽度
-            // 顶到可用宽度。
+    // 磁吸：卡片**整体**（连同内部控件）朝光标偏移。
+    //
+    // 内部控件在平移后的子 Ui 里布局，所以跟着一起动 —— 与雏形的 transform
+    // 行为一致。衰减用的矩形高度取上一帧的实测值（首帧用估计值 300）。
+    let avail_w = ui.available_width();
+    let base_min = ui.cursor().min;
+    let prev_h = ctx
+        .state
+        .card_h_prev
+        .iter()
+        .find(|(p, _)| (*p - base_min).length() < 1.0)
+        .map(|(_, h)| *h);
+    let base = egui::Rect::from_min_size(base_min, egui::vec2(avail_w, prev_h.unwrap_or(300.0)));
+    let off = magnet_offset(ui, base, 3.5, 90.0);
+
+    // `new_child` 不推进父光标：卡片画完之后用它的实际高度手动推进
+    //（往下 3px 的磁吸偏移不能带进布局，否则会逐卡片累积）。
+    let mut card_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                base_min + off,
+                egui::vec2(avail_w, ui.available_height()),
+            ))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    // 卡片必须**一律撑满**可用宽度。
+    //
+    // `Frame` 的宽度由内容决定：一行 `label` 只有几十像素，那个卡片
+    // 就缩成一小块（性能页的「当前占用」、添加页的「重置」都这样，
+    // 摆在一列同宽卡片里像排版坏了）。这里直接把内容的最小宽度
+    // 顶到可用宽度。
+    let frame = card_frame(&card_ui);
+    let inner = frame
+        .show(&mut card_ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.strong(title);
             if !note.is_empty() {
@@ -142,7 +171,16 @@ pub(crate) fn card<R>(
             ui.add_space(6.0);
             add(ctx, ui)
         })
-        .inner
+        .inner;
+
+    ctx.state
+        .card_h
+        .push((base_min, card_ui.min_rect().height()));
+    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+        base_min,
+        egui::vec2(avail_w, card_ui.min_rect().height()),
+    ));
+    inner
 }
 
 /// 一行：左边「标题（+ ⓘ）」，右边是控件。
@@ -157,34 +195,53 @@ pub(crate) fn row<R>(
     add: impl FnOnce(&mut Ui, egui::Id) -> R,
 ) -> R {
     let note = note.trim();
-    let r = ui
-        .horizontal(|ui| {
-            // 给控件留出固定宽度，剩下的才归左列。不这么做的话，一句长标题会
-            // 把控件挤出可视区 —— `horizontal` 不会自动换行。
-            let max = (ui.available_width() - CTL_RESERVE).max(120.0);
-            let id = ui
-                .vertical(|ui| {
-                    ui.set_max_width(max);
-                    #[expect(deprecated, reason = "占位 id，真实 id 由 label 的 resp 提供")]
-                    let mut id = egui::Id::new("row-label");
-                    ui.horizontal(|ui| {
-                        let resp = ui.label(label);
-                        id = resp.id;
-                        if !note.is_empty() {
-                            hint_button(ui, state, note);
-                        }
-                    });
-                    id
-                })
-                .inner;
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| add(ui, id))
-        })
-        // `horizontal` 返回 `InnerResponse<InnerResponse<R>>` —— 两层壳都要拆。
-        .inner
-        .inner;
+    let base_min = ui.cursor().min;
+
+    // 悬停底色（两遍法）：上一帧的行矩形还在，先垫一层再画本行内容 ——
+    // 层叠顺序正好落在卡片底色之上、行内容之下。布局稳定时矩形逐帧一致，
+    // 只有滚动/翻页后的第一帧会错位一瞬。
+    let prev_band = state
+        .row_bands_prev
+        .iter()
+        .find(|(p, _)| (*p - base_min).length() < 1.0)
+        .map(|(_, r)| *r);
+    if let Some(band) = prev_band {
+        let hovered = ui
+            .ctx()
+            .input(|i| i.pointer.hover_pos().is_some_and(|p| band.contains(p)));
+        if hovered {
+            ui.painter()
+                .rect_filled(band, egui::CornerRadius::same(12), hover(ui));
+        }
+    }
+
+    let outer = ui.horizontal(|ui| {
+        // 给控件留出固定宽度，剩下的才归左列。不这么做的话，一句长标题会
+        // 把控件挤出可视区 —— `horizontal` 不会自动换行。
+        let max = (ui.available_width() - CTL_RESERVE).max(120.0);
+        let id = ui
+            .vertical(|ui| {
+                ui.set_max_width(max);
+                #[expect(deprecated, reason = "占位 id，真实 id 由 label 的 resp 提供")]
+                let mut id = egui::Id::new("row-label");
+                ui.horizontal(|ui| {
+                    let resp = ui.label(label);
+                    id = resp.id;
+                    if !note.is_empty() {
+                        hint_button(ui, state, note);
+                    }
+                });
+                id
+            })
+            .inner;
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| add(ui, id))
+    });
+    // `horizontal` 返回 `InnerResponse<InnerResponse<R>>` —— 两层壳都要拆。
+    let r = outer.inner.inner;
     // 行与行之间留白。不能靠 `item_spacing`：那会连带把"标题 / ⓘ"的行距
     // 也撑开。
     ui.add_space(ROW_GAP);
+    state.row_bands.push((base_min, outer.response.rect));
     r
 }
 
@@ -316,7 +373,8 @@ fn hint_button(ui: &mut Ui, state: &mut SettingsState, note: &str) {
 
 /// 说明气泡本体。在 [`super::settings_ui`] 的**末尾**渲染 —— 那时所有行的
 /// 状态都已结算完，不会出现"这一帧气泡开着、下一帧状态才更新"的抖动。
-pub(crate) fn render_tip(ui: &mut Ui, tip: &super::Tip) {
+pub(crate) fn render_tip(ui: &mut Ui, state: &mut SettingsState) {
+    let Some(tip) = state.tip.clone() else { return };
     let mag = magnet_offset(ui, tip.anchor, 1.2, 30.0);
     // 气泡默认放在圆点下方；下方放不下（距窗口底不足一屏）就翻到上面。
     // 用 `pivot` 翻转，不需要提前知道气泡的高度。
@@ -338,6 +396,7 @@ pub(crate) fn render_tip(ui: &mut Ui, tip: &super::Tip) {
     // 气泡也磁吸：朝光标轻微偏移
     let pos = pos + mag;
 
+    let rect = std::cell::Cell::new(egui::Rect::NOTHING);
     #[expect(deprecated, reason = "整个应用只有一个气泡，固定 id 即可")]
     let area_id = egui::Id::new("settings-tip");
     egui::Area::new(area_id)
@@ -346,7 +405,7 @@ pub(crate) fn render_tip(ui: &mut Ui, tip: &super::Tip) {
         .fixed_pos(pos)
         .show(ui.ctx(), |ui| {
             let dark = ui.visuals().dark_mode;
-            egui::Frame::new()
+            let frame = egui::Frame::new()
                 .fill(if dark {
                     palette::DARK_MENU
                 } else {
@@ -359,16 +418,30 @@ pub(crate) fn render_tip(ui: &mut Ui, tip: &super::Tip) {
                     blur: 24,
                     spread: 2,
                     color: Color32::from_black_alpha(if dark { 120 } else { 40 }),
-                })
-                .show(ui, |ui| {
-                    ui.set_max_width(240.0);
-                    ui.label(
-                        RichText::new(&tip.text)
-                            .size(11.5)
-                            .color(ui.visuals().weak_text_color()),
-                    );
                 });
+            let resp = frame.show(ui, |ui| {
+                ui.set_max_width(240.0);
+                ui.label(
+                    RichText::new(&tip.text)
+                        .size(11.5)
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
+            rect.set(resp.response.rect);
         });
+
+    // 点气泡之外 → 收起（钉住也不例外；雏形是"点别处就关"）。
+    // 点击圆点的那一帧不会误关：光标还落在锚点上。
+    let clicked_outside = ui.ctx().input(|i| {
+        i.pointer.any_click()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|p| !tip.anchor.expand(6.0).contains(p) && !rect.get().contains(p))
+    });
+    if clicked_outside {
+        state.tip = None;
+        state.tip_hover = None;
+    }
 }
 
 /// 开关行。
