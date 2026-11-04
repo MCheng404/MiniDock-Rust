@@ -15,9 +15,13 @@
      轻微外扩（不是变色块，是"呼吸"）；
    · 无直线 —— 一条分割线都没有：分区靠留白与色调差，不靠 border。
 
-   高度固定 720（= `settings_win::LOGICAL_SIZE` 的纵向）；
-   **宽度不写死** —— 由导航栏最宽标签 + 2 个空标签 + 内容区算出来，
-   见文件末尾的 `fitWindow()`。
+   尺寸固定：893 x 720（= `settings_win::LOGICAL_SIZE`），
+   侧栏 193（= `minidock_settings::NAV_W`）。三个数字在 Rust 端各只有
+   一处定义，改这里必须同步改那边。
+
+   主题色（`--accent`）由「主题色」卡或 `?accent=RRGGBB` 驱动：
+   导航选中、开关、滑杆、焦点光晕、关闭图标全部跟着走。
+   顶栏三块（品牌 / 搜索 / 关闭）与 Rust 的绝对定位子 Ui 一一对应。
    ------------------------------------------------------------------ */
 :root {
   --bg-1:      #f3f5fa;
@@ -33,7 +37,9 @@
   --muted:     #667085;
   --faint:     #9aa1ac;
   --accent:    #3b7ddd;
-  --accent-2:  rgba(59,125,221,.13);
+  /* 只改 --accent 一处，其余全部派生：主题色换掉时不会留下一块旧蓝色。 */
+  --accent-2:  color-mix(in srgb, var(--accent) 13%, transparent);
+  --accent-3:  color-mix(in srgb, var(--accent) 45%, transparent);
   --warn:      #b8791a;
   --warn-2:    rgba(184,121,26,.13);
   --danger:    #c0392b;
@@ -73,7 +79,8 @@
     --muted:     #a3a9b4;
     --faint:     #767d89;
     --accent:    #7fb0ff;
-    --accent-2:  rgba(127,176,255,.16);
+    --accent-2:  color-mix(in srgb, var(--accent) 16%, transparent);
+    --accent-3:  color-mix(in srgb, var(--accent) 45%, transparent);
     --warn:      #e0aa54;
     --warn-2:    rgba(224,170,84,.14);
     --danger:    #ef8b82;
@@ -119,26 +126,34 @@ body {
 /* ============================ 顶栏 ============================ */
 /* 三栏网格：左右各 1fr 兜住，中间的搜索才是**真的**居中，
    不会因为左边品牌文字变长而偏。 */
+/* 三块绝对定位：品牌占导航栏同宽（文字居中）、搜索几何居中、右栏贴边。
+   用绝对矩形而不是 flex + margin，搜索框才不会跟着品牌文字宽度偏。 */
 .titlebar {
   position: relative;
-  height: 62px;
+  height: 56px;
   flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  gap: 16px;
-  padding: 0 20px;
 }
-.brand { justify-self: start; }
+.brand {
+  /* left 与 .body 的 padding-left 一致：品牌区和下方导航栏从同一条
+     竖线起算，两者中心才真正重合（差 10px 肉眼就能看出歪）。 */
+  position: absolute; left: 10px; top: 0;
+  width: var(--nav-w); height: 100%;
+  display: flex; align-items: center; justify-content: center;
+}
 .titlebar h1 {
   margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.2px;
 }
 
-/* 搜索：无边框，靠底色与焦点光晕区分状态 */
+/* 外层槽负责居中，内层 .search 承接磁吸的 transform —— 两者不能叠在
+   同一个元素上（磁吸会覆盖 translate(-50%,-50%)）。 */
+.search-slot {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 260px; height: 34px;
+}
 .search {
   position: relative;
-  justify-self: center;
-  width: clamp(180px, calc(var(--win-w) * 0.36), 320px);
+  width: 100%; height: 34px;
   will-change: transform;
   transition: transform .2s cubic-bezier(.22,1,.36,1);
 }
@@ -152,7 +167,9 @@ body {
   width: 100%; height: 34px;
   padding: 0 62px 0 34px;
   border: 0; outline: 0;
-  border-radius: var(--r-pill);
+  /* 固定 12px 圆角 + 34px 高：与下拉/按钮的 10px 曲率一致。
+     之前是 999px 胶囊（半径≈半高），和其它控件看着像两套设计。 */
+  border-radius: var(--r-search);
   background: var(--field);
   color: var(--text);
   font: inherit; font-size: 12.5px;
@@ -162,17 +179,40 @@ body {
 .search input:hover { background: var(--field-2); }
 .search input:focus {
   background: var(--card);
-  box-shadow: 0 0 0 3px var(--accent-2), var(--shadow-ctl);
+  /* inset = Rust 的 StrokeKind::Inside，2px 主题色焦点光晕 */
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
 }
+/* 焦点且未输入时收起提示，光标不会压在 hint 第一个字上 */
+.search input:focus::placeholder { color: transparent; }
 .search:focus-within svg { stroke: var(--accent); }
 .search kbd {
-  position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  position: absolute; right: 13px; top: 50%; transform: translateY(-50%);
   font: inherit; font-size: 10.5px; letter-spacing: .3px;
-  color: var(--faint); background: var(--field-2);
-  padding: 2px 6px; border-radius: 6px;
+  color: var(--faint); background: transparent; padding: 0;
   pointer-events: none;
 }
 
+.title-right {
+  position: absolute; right: 0; top: 0; height: 100%;
+  display: flex; align-items: center; gap: 8px;
+}
+.title-right .status { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+/* 关闭：绘制的 × 图标，不是文字按钮 */
+.close-btn {
+  width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: 10px;
+  background: transparent; color: var(--accent);
+  display: grid; place-items: center; cursor: pointer;
+  will-change: transform;
+  transition: background .16s ease, transform .2s cubic-bezier(.22,1,.36,1);
+}
+.close-btn:hover { background: var(--accent-2); }
+.close-btn:active { transform: scale(.94); }
+.close-btn:focus-visible { outline: 0; box-shadow: 0 0 0 3px var(--accent-2); }
+.close-btn svg {
+  width: 14px; height: 14px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round;
+}
 
 /* ============================ 主体 ============================ */
 .body {
@@ -185,7 +225,7 @@ body {
 }
 
 /* ---------------------------- 侧边导航 ---------------------------- */
-/* 宽度自适应：不写死 px，跟着最长标签走；只有下限兜住空状态 */
+/* 宽度写死，不随标签内容变化；只有高度按 12 个标签封顶 */
 .sidebar {
   flex: 0 0 auto;
   width: var(--nav-w);
@@ -451,6 +491,12 @@ body {
   cursor: pointer;
 }
 
+/* 取色器：和自绘色块同一套圆角；隐藏系统默认的方角色井 */
+.swatch[type=color] { padding: 0; border: 0; overflow: hidden; }
+.swatch[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch[type=color]::-webkit-color-swatch { border: 0; border-radius: 9px; }
+.app-icon { border-radius: 11px; box-shadow: 0 4px 12px -6px rgba(23,26,35,.6); }
+
 /* 按钮 */
 .btn {
   height: 30px; padding: 0 13px;
@@ -503,8 +549,9 @@ body {
   max-width: var(--win-w); margin: 0 auto 16px;
   color: var(--muted); font-size: 12px; line-height: 1.7;
 }
+.caption strong { color: var(--text); }
 .caption code {
-  background: rgba(23,26,35,.06); padding: 1px 5px; border-radius: 5px;
+  background: var(--field); padding: 1px 5px; border-radius: 5px;
   font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px;
 }
 </style>
@@ -512,21 +559,30 @@ body {
 <body>
 
 <p class="caption">
-  <strong>MiniDock 设置 · 布局雏形</strong>　顶栏（品牌 + 搜索）+ 自适应宽度的导航 + 多卡片内容区。<br>
-  方向：轻柔 / 圆角 / 动态间距 / 无直线 —— 全文件没有一条 <code>border</code> 分割线，分区靠留白与色调差。
+  <strong>MiniDock 设置 · 布局雏形</strong>　顶栏（品牌居中于导航栏 + 自绘搜索 + × 关闭）/ 固定宽度导航 / 多卡片内容区。<br>
+  方向：轻柔 / 圆角 / 动态间距 / 无直线 —— 全文件没有一条 <code>border</code> 分割线，分区靠留白与色调差。<br>
+  与 Rust 端同步：主题色（<code>?accent=RRGGBB</code>）、界面缩放、感叹号说明气泡、自绘下拉、磁吸。<br>
+  深链：<code>#page</code> 定位页、<code>?q=</code> 搜索、<code>?open=N</code> 展开下拉、<code>?tip=N</code> 展开说明。
 </p>
 
 <div class="window">
   <div class="titlebar">
     <div class="brand"><h1>MiniDock</h1></div>
 
-    <label class="search">
-      <svg viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.2 13.2L17 17"/></svg>
-      <input id="q" type="search" placeholder="搜索设置" aria-label="搜索设置" autocomplete="off" spellcheck="false">
-      <kbd>Ctrl K</kbd>
-    </label>
+    <div class="search-slot">
+      <label class="search">
+        <svg viewBox="0 0 20 20"><circle cx="9" cy="9" r="5.5"/><path d="M13.2 13.2L17 17"/></svg>
+        <input id="q" type="search" placeholder="搜索设置…" aria-label="搜索设置" autocomplete="off" spellcheck="false">
+        <kbd>Ctrl K</kbd>
+      </label>
+    </div>
 
-    <div></div>
+    <div class="title-right">
+      <span class="status" id="status"></span>
+      <button class="close-btn" type="button" aria-label="关闭" title="关闭">
+        <svg viewBox="0 0 14 14"><path d="M3 3l8 8M11 3l-8 8"/></svg>
+      </button>
+    </div>
   </div>
 
   <div class="body">
@@ -607,6 +663,8 @@ body {
           <div class="card-body">
             <div class="row"><div class="label">设置窗口主题</div>
               <div class="ctl"><select class="select"><option>跟随系统</option><option>浅色</option><option>深色</option></select></div></div>
+            <div class="row"><div class="label">界面缩放<span class="desc">字体与按钮、行高一起缩；百分比覆盖系统 DPI，不是叠加</span></div>
+              <div class="ctl"><select class="select"><option>跟随系统</option><option>100%</option><option>110%</option><option>125%</option><option>150%</option><option>175%</option><option>200%</option></select></div></div>
           </div>
         </div>
 
@@ -618,6 +676,15 @@ body {
                 <button class="btn">打开</button></div></div>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-head"><h3>关于<span class="desc">应用图标来自 assets/minidock.ico，已作为资源嵌入 minidock-dock.exe</span></h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">MiniDock<span class="desc">Rust 移植版 · 设置界面视觉基准</span></div>
+              <div class="ctl"><img class="app-icon" src="../assets/minidock.ico" alt="MiniDock 应用图标" width="40" height="40">
+                <span class="path">0.9.8</span></div></div>
+          </div>
+        </div>
       </section>
 
       <!-- ---------- 外观 ---------- -->
@@ -625,6 +692,19 @@ body {
         <div class="page-head">
           <h2>外观</h2>
           <p>栏体尺寸、背景材质与配色。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>主题色<span class="desc">跟随 Windows 强调色，或用取色器指定自己的颜色；导航选中、开关、滑杆、焦点光晕、关闭图标全部跟着走</span></h3></div>
+          <div class="card-body">
+            <div class="row"><div class="label">来源<span class="desc">近乎无彩的系统强调色会回落到默认蓝</span></div>
+              <div class="ctl">
+                <input type="color" class="swatch accent-pick" value="#3b7ddd" aria-label="自定义主题色" style="display:none">
+                <select class="select" id="accent-mode"><option value="system">跟随系统</option><option value="custom">自定义</option></select>
+              </div></div>
+            <div class="row"><div class="label">同步到 Dock 栏体<span class="desc">把主题色用到栏体渐变与运行指示点</span></div>
+              <div class="ctl"><button class="switch" id="accent-dock" aria-label="同步到 Dock 栏体"></button></div></div>
+          </div>
         </div>
 
         <div class="card">
@@ -1378,6 +1458,7 @@ body {
     { sel: '.nav-item',  max: 2.5, radius: 56 },
     { sel: '.search',    max: 2.0, radius: 64 },
     { sel: '.btn',       max: 1.6, radius: 40 },
+    { sel: '.close-btn', max: 1.6, radius: 40 },
     { sel: '.dd-btn',    max: 1.6, radius: 40 },
     { sel: '.switch',    max: 1.2, radius: 30 },
     { sel: '.swatch',    max: 1.2, radius: 30 }
@@ -1439,6 +1520,61 @@ body {
       mags.forEach(function (m) { m.el.style.transform = ''; });
     });
   }
+
+  // ------------------------------------------------------------------
+  // 主题色：跟随系统（用 :root 默认值）或自定义（?accent=RRGGBB / 取色器）。
+  // 只改 --accent 一个变量，--accent-2/3 由 color-mix 自动派生；
+  // Rust 侧的 `UiAccent` 与 `gpu::accent::apply_visuals` 是同一套语义。
+  // ------------------------------------------------------------------
+  var root = document.documentElement;
+  var accentMode = document.getElementById('accent-mode');
+  var accentPick = document.querySelector('.accent-pick');
+  var accentDock = document.getElementById('accent-dock');
+
+  function syncModeLabel() {
+    if (!accentMode) { return; }
+    var dd = accentMode.closest('.dd');
+    var txt = dd && dd.querySelector('.dd-btn .txt');
+    if (txt) { txt.textContent = accentMode.options[accentMode.selectedIndex].text; }
+  }
+  function writeAccentUrl(hex) {
+    var u = new URL(location.href);
+    if (hex) { u.searchParams.set('accent', hex.slice(1)); }
+    else { u.searchParams.delete('accent'); }
+    history.replaceState(null, '', u.toString());
+  }
+  function setAccent(hex, fromUser) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) { return; }
+    root.style.setProperty('--accent', hex);
+    if (accentPick) { accentPick.value = hex; accentPick.style.display = ''; }
+    if (accentMode) { accentMode.selectedIndex = 1; syncModeLabel(); }
+    if (fromUser) { writeAccentUrl(hex); }
+  }
+  if (accentPick) {
+    accentPick.addEventListener('input', function () { setAccent(accentPick.value, true); });
+  }
+  if (accentMode) {
+    accentMode.addEventListener('change', function () {
+      if (accentMode.selectedIndex === 1) {
+        setAccent(accentPick ? accentPick.value : '#3b7ddd', true);
+      } else {
+        root.style.removeProperty('--accent');
+        if (accentPick) { accentPick.style.display = 'none'; }
+        syncModeLabel();
+        writeAccentUrl(null);
+      }
+    });
+  }
+  if (accentDock) {
+    accentDock.addEventListener('click', function () {
+      accentDock.classList.toggle('on');
+    });
+  }
+  var params = new URLSearchParams(location.search);
+  var accHex = params.get('accent');
+  if (accHex && /^[0-9a-fA-F]{6}$/.test(accHex)) { setAccent('#' + accHex, false); }
+  // ?focus —— 让搜索框进入焦点态，核对主题色光晕（截图用）。
+  if (params.has('focus')) { q.focus(); }
 
   // 首屏不淡入：打开/截图时不该先看到一页半透明的东西。
   // 只在**首次**关掉；恢复由 `show()` 负责 —— 在这里用 rAF 撤掉的话，
