@@ -68,7 +68,20 @@ impl FrameRenderer {
         height: u32,
         pixels_per_point: f32,
     ) -> Result<Self, GpuError> {
-        let offscreen = Offscreen::new(&gpu.device, width, height, Gpu::COLOR_FORMAT);
+        // MSAA 4x：圆角弧段与斜线的几何边缘做 4 重覆盖采样，叠在 egui 的
+        // 1px 羽化之上。格式不支持时回落 1（理论上 renderable 格式都支持
+        // 4x，这里只是兜底硬件怪癖）。
+        let samples = if gpu
+            .adapter
+            .get_texture_format_features(Gpu::COLOR_FORMAT)
+            .flags
+            .sample_count_supported(4)
+        {
+            4
+        } else {
+            1
+        };
+        let offscreen = Offscreen::new(&gpu.device, width, height, Gpu::COLOR_FORMAT, samples);
         let presenter = LayeredPresenter::new(width as i32, height as i32)?;
 
         let ctx = egui::Context::default();
@@ -80,9 +93,11 @@ impl FrameRenderer {
             &gpu.device,
             Gpu::COLOR_FORMAT,
             RendererOptions {
-                msaa_samples: 1,
+                msaa_samples: samples,
                 depth_stencil_format: None,
-                dithering: false,
+                // 抖动：柔和大面积低透明度的投影渐变时，8bit 里只有几十个
+                // 可用档位，不开抖动会出肉眼可见的色带。
+                dithering: true,
                 ..Default::default()
             },
         );
@@ -108,7 +123,13 @@ impl FrameRenderer {
         if self.offscreen.width() == width && self.offscreen.height() == height {
             return Ok(());
         }
-        self.offscreen = Offscreen::new(&gpu.device, width, height, Gpu::COLOR_FORMAT);
+        self.offscreen = Offscreen::new(
+            &gpu.device,
+            width,
+            height,
+            Gpu::COLOR_FORMAT,
+            self.offscreen.samples(),
+        );
         self.presenter = LayeredPresenter::new(width as i32, height as i32)?;
         Ok(())
     }
@@ -127,6 +148,12 @@ impl FrameRenderer {
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         (self.offscreen.width(), self.offscreen.height())
+    }
+
+    /// MSAA 采样数。截图工具会在输出里带出来，方便确认抗锯齿档位。
+    #[must_use]
+    pub const fn samples(&self) -> u32 {
+        self.offscreen.samples()
     }
 
     /// 画一帧并呈现到 `hwnd`。`pos` 是窗口左上角的屏幕坐标。
@@ -195,12 +222,15 @@ impl FrameRenderer {
                 .update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
 
         {
+            // MSAA 开启时颜色画进多采样纹理、硬件 resolve 到离屏纹理；
+            // 关闭时 color_target() 把两个引用都指向同一块纹理。
+            let (color, resolve) = self.offscreen.color_target();
             let mut pass = encoder
                 .begin_render_pass(&egui_wgpu::wgpu::RenderPassDescriptor {
                     label: Some("minidock"),
                     color_attachments: &[Some(egui_wgpu::wgpu::RenderPassColorAttachment {
-                        view: &self.offscreen.view,
-                        resolve_target: None,
+                        view: color,
+                        resolve_target: resolve,
                         depth_slice: None,
                         ops: egui_wgpu::wgpu::Operations {
                             // 透明清屏：分层窗口里 alpha=0 即"透出桌面"。

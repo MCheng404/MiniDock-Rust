@@ -98,11 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     write_bmp(&out_path, w, h, &pixels, dark)?;
     println!(
-        "已写出 {out_path}（{}×{}，{:?}，{}）",
+        "已写出 {out_path}（{}×{}，{:?}，{}，MSAA {}x）",
         w,
         h,
         page,
-        if dark { "深色" } else { "浅色" }
+        if dark { "深色" } else { "浅色" },
+        frame.samples()
     );
     Ok(())
 }
