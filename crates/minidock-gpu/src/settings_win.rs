@@ -496,15 +496,16 @@ pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out
             .layout(Layout::top_down(Align::Min)),
     );
 
-    // ---- 顶栏：品牌 / 搜索（居中）/ 状态 + 关闭 ----
+    // ---- 顶栏：品牌 / 搜索（居中）/ 状态 + 图标关闭 ----
     //
-    // 搜索框要**几何意义上**居中，不能靠 flex 加 margin —— 那会跟着左边
-    // 品牌文字的宽度偏。所以顶栏切成三个绝对定位的子 Ui。
+    // 三块都用绝对矩形定位：搜索框要几何居中，品牌要和下方导航栏同宽
+    // 并在其中居中，都不能靠 flex + margin（会随文字宽度偏）。
     let bar_h = 56.0;
     let bar = egui::Rect::from_min_size(
         child.max_rect().min,
         egui::vec2(child.max_rect().width(), bar_h),
     );
+    let nav_w = minidock_settings::NAV_W;
 
     // Ctrl + K：聚焦搜索框（雏形的交互定义）。
     let ctrl_k = child
@@ -517,31 +518,114 @@ pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out
         child.memory_mut(|m| m.request_focus(search_id));
     }
 
-    // 品牌
+    // ① 品牌：占导航栏同宽的一格，文字在这格正中 —— 与下方导航项对齐。
     let mut brand = child.new_child(
         egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_size(bar.min, egui::vec2(160.0, bar_h)))
-            .layout(Layout::left_to_right(Align::Center)),
+            .max_rect(egui::Rect::from_min_size(bar.min, egui::vec2(nav_w, bar_h)))
+            .layout(Layout::top_down(Align::Center)),
     );
-    brand.label(RichText::new("MiniDock").size(20.0).strong());
+    brand.centered_and_justified(|ui| {
+        ui.label(RichText::new("MiniDock").size(20.0).strong());
+    });
 
-    // 搜索：以顶栏中心为轴
-    let search_rect = egui::Rect::from_center_size(bar.center(), egui::vec2(240.0, 32.0));
+    // ② 搜索：自绘外壳 + 透明的 TextEdit。
+    //
+    // 不直接用 TextEdit 自带的框：它的高度由「文字 + 内边距」决定
+    // （实测约 22px），而圆角是固定的 10px —— 半径几乎等于半高，看起来
+    // 是胶囊；下拉/按钮约 30px 高、同样 10px 圆角却是小圆角矩形，曲率
+    // 对不上。而且焦点态描边走 selection.stroke、非焦点走 bg_stroke，
+    // 切状态时边框还会再变一次。自己画壳，高度/圆角/焦点光晕全部可控。
+    let search_rect = egui::Rect::from_center_size(bar.center(), egui::vec2(260.0, 34.0));
     let mut search = child.new_child(
         egui::UiBuilder::new()
             .max_rect(search_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
-    search.add(
+    let (accent, faint) = {
+        let v = search.visuals();
+        (v.selection.stroke.color, v.weak_text_color())
+    };
+    let focused = search.ctx().memory(|m| m.has_focus(search_id));
+    let r = egui::CornerRadius::same(12);
+    let field = if dark {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 16)
+    } else {
+        Color32::from_rgba_unmultiplied(23, 26, 35, 14)
+    };
+    let fill = if focused {
+        if dark {
+            Color32::from_rgb(38, 39, 47)
+        } else {
+            Color32::WHITE
+        }
+    } else {
+        field
+    };
+    search.painter().rect_filled(search_rect, r, fill);
+    if focused {
+        // 焦点光晕跟着主题色，与卡片/导航的强调色同一套。
+        search.painter().rect_stroke(
+            search_rect.shrink(1.0),
+            r,
+            egui::Stroke::new(2.0, accent.linear_multiply(0.55)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    // 放大镜（左侧）
+    let cy = search_rect.center().y;
+    let cx = search_rect.left() + 17.0;
+    let glass = egui::Stroke::new(1.6, faint);
+    search
+        .painter()
+        .circle_stroke(egui::pos2(cx, cy - 1.5), 5.0, glass);
+    search.painter().line_segment(
+        [
+            egui::pos2(cx + 3.8, cy + 2.3),
+            egui::pos2(cx + 8.0, cy + 6.5),
+        ],
+        glass,
+    );
+    // Ctrl K 提示（右侧），不再塞进 hint_text 里
+    search.painter().text(
+        egui::pos2(search_rect.right() - 13.0, cy),
+        egui::Align2::RIGHT_CENTER,
+        "Ctrl K",
+        egui::FontId::proportional(10.5),
+        faint,
+    );
+    // 整块外壳都可点聚焦：TextEdit 只占中间的文字区，点放大镜或
+    // Ctrl K 那一侧不该没反应。
+    let shell_id = search.make_persistent_id("search-shell");
+    let shell_resp = search.interact(search_rect, shell_id, egui::Sense::click());
+    if shell_resp.clicked() {
+        search.memory_mut(|m| m.request_focus(search_id));
+    }
+    // 输入区：无框、透明、尺寸固定，不参与圆角
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(search_rect.left() + 32.0, search_rect.top()),
+        egui::pos2(search_rect.right() - 58.0, search_rect.bottom()),
+    );
+    let mut edit = search.new_child(
+        egui::UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    // 无框 TextEdit 内边距为 0：焦点时光标正好压在 hint 第一个字上。
+    // 聚焦且还没输入时收起 hint，只留光标 + 右侧 Ctrl K 提示。
+    let hint = if focused { "" } else { "搜索设置…" };
+    edit.add_sized(
+        text_rect.size(),
         egui::TextEdit::singleline(&mut state.nav_filter)
-            .hint_text("搜索设置…  (Ctrl+K)")
+            .hint_text(hint)
             .id(search_id)
-            .desired_width(search_rect.width() - 8.0),
+            .frame(egui::Frame::NONE)
+            .desired_width(text_rect.width()),
     );
 
-    // 右栏：状态文本 + 关闭（right_to_left，先加的在最右）
+    // ③ 右栏：状态 + 自绘关闭图标按钮（主题色 ×）。
+    // right_to_left，先分配的在最右 —— 图标要贴窗口右缘。
     let right = egui::Rect::from_min_max(
-        egui::pos2(bar.left() + 160.0, bar.top()),
+        egui::pos2(bar.left() + nav_w, bar.top()),
         egui::pos2(bar.right(), bar.bottom()),
     );
     let mut side = child.new_child(
@@ -549,10 +633,36 @@ pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out
             .max_rect(right)
             .layout(Layout::right_to_left(Align::Center)),
     );
-    if side.button("关闭").clicked() {
+    let (btn, resp) = side.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let (icon_color, hover_bg) = {
+        let v = side.visuals();
+        (
+            v.selection.stroke.color,
+            v.selection.bg_fill.linear_multiply(0.85),
+        )
+    };
+    if resp.hovered() {
+        side.painter()
+            .rect_filled(btn, egui::CornerRadius::same(10), hover_bg);
+    }
+    let c = btn.center();
+    let d = 5.0;
+    let stroke = egui::Stroke::new(1.8, icon_color);
+    side.painter().line_segment(
+        [egui::pos2(c.x - d, c.y - d), egui::pos2(c.x + d, c.y + d)],
+        stroke,
+    );
+    side.painter().line_segment(
+        [egui::pos2(c.x + d, c.y - d), egui::pos2(c.x - d, c.y + d)],
+        stroke,
+    );
+    // 自绘控件必须自报节点，读屏与 kittest 才查得到。
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "关闭"));
+    if resp.clicked() {
         out.command = Some(Command::Close);
     }
     if !state.status.is_empty() {
+        side.add_space(8.0);
         side.label(RichText::new(&state.status).small().weak());
     }
 

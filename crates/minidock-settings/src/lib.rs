@@ -16,3 +16,9 @@ pub mod fonts;
 pub mod pages;
 
 pub use pages::{settings_ui, Command, Outcome, Page, SettingsState};
+
+/// 左侧导航栏宽度（逻辑像素）。**写死**，不随标签内容变化。
+///
+/// 公开给窗口层：顶栏的品牌区要占同宽的一格并把文字居中，和下方导航项
+/// 对齐；两处必须读同一个数字，否则改宽度就会错位。
+pub const NAV_W: f32 = 193.0;

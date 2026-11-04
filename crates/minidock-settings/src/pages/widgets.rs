@@ -20,8 +20,8 @@ use minidock_core::config::{Config, Key};
 
 use super::{Command, Outcome, Page, SettingsState};
 
-/// 左侧导航栏宽度（逻辑像素）。**写死**，不随标签内容变化。
-pub(crate) const NAV_W: f32 = 193.0;
+/// 见 crate 根的 `NAV_W`（窗口层也要用，所以定义在那里）。
+pub(crate) use crate::NAV_W;
 
 /// 导航项高度。
 pub(crate) const NAV_ITEM_H: f32 = 40.0;

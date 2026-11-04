@@ -33,6 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rest: Vec<String> = args.collect();
     let dark = rest.iter().any(|a| a == "dark");
     let tip = rest.iter().any(|a| a == "tip");
+    // `focus`：模拟搜索框获得焦点，核对焦点光晕。
+    let focus = rest.iter().any(|a| a == "focus");
     // 界面缩放（自定义 DPI）：裸数字按百分比（150 -> 1.5）。验证 UiScale
     // 键的渲染 —— 字体与所有元素一起放大，逻辑布局不变。
     let scale = rest
@@ -91,6 +93,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let mut out = Outcome::default();
+
+    if focus {
+        #[expect(deprecated, reason = "与 shell 里固定的搜索框 id 对应")]
+        let id = egui::Id::new("nav-search");
+        frame.ctx().memory_mut(|m| m.request_focus(id));
+    }
 
     // 三帧出图：字体图集(0s) → 动画推进(0.4s) → 稳定画面(10s)。
     //
