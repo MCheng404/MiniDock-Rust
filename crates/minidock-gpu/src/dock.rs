@@ -934,6 +934,7 @@ impl Dock {
                 self.paint_clock_card(painter, p, dark, lines);
             }
         }
+        self.paint_ctrl_center_card(painter, p, dark);
         self.paint_resource_card(painter, p, dark, ui.ctx());
         self.paint_tool_card(painter, p, dark);
         self.paint_tray_card(painter, p, dark);
@@ -1113,6 +1114,42 @@ impl Dock {
     ///
     /// 一个圆 + 两根指针。
     /// 卡片不显示数字，时间在面板里看。
+    /// 控制中心卡片：只画图标（两条滑轨），点开是系统面板。
+    fn paint_ctrl_center_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
+        let m = &self.metrics;
+        let Some(idx) = m
+            .widgets
+            .iter()
+            .position(|(k, _)| k == layout::WidgetKind::CtrlCenter)
+        else {
+            return;
+        };
+        let Some(left) = m
+            .widgets
+            .left_of(idx, self.geom.bar_l, self.geom.bar_w, m.gap)
+        else {
+            return;
+        };
+        let width = m
+            .widgets
+            .width_of(layout::WidgetKind::CtrlCenter)
+            .unwrap_or(0);
+        if width <= 0 {
+            return;
+        }
+        let c = self.map(left, self.geom.bar_top, width as f32, m.bar_h, p);
+        self.paint_card_bg(painter, c, dark, p);
+        let color = if dark {
+            Color32::from_rgba_unmultiplied(235, 240, 240, 246)
+        } else {
+            Color32::from_rgba_unmultiplied(232, 30, 32, 40)
+        };
+        // 图标略小于计时器卡片里的表盘：滑轨本身有留白，画等大反而显小。
+        let s = c.width().min(c.height()) * 0.62;
+        let icon = EguiRect::from_center_size(c.center(), egui::vec2(s, s));
+        crate::glyph::sliders(painter, icon, color);
+    }
+
     fn paint_tool_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
         let m = &self.metrics;
         let Some(idx) = m
@@ -1462,6 +1499,12 @@ impl Dock {
                 rect.min + egui::vec2(inset * p.k, inset * p.k),
                 egui::vec2((iw - 2.0 * inset) * p.k, (ih - 2.0 * inset) * p.k),
             );
+        }
+
+        // 内置条目（开始 / 起动台）没有 shell 图标可取，现画。
+        if let Some(kind) = crate::glyph::Builtin::from_path(&it.path) {
+            crate::glyph::paint_tile(painter, inner, kind);
+            return;
         }
 
         // 真图标：按 `bbox` 采样，内容占 `fill` 比例，长边对齐、居中。

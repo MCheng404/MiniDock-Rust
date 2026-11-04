@@ -50,6 +50,18 @@ pub fn open_quick_settings() {
     }
 }
 
+/// 打开开始菜单。
+///
+/// 没有公开接口能在"不模拟按键"的前提下打开它（`shell:AppsFolder` 是另一
+/// 个界面），所以这里就按一下 Win 键：系统自己处理"按下即开、再按即关"。
+pub fn open_start() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_LWIN};
+    unsafe {
+        keybd_event(VK_LWIN.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
 /// 打开 Windows 的通知区域（托盘溢出面板）。
 ///
 /// 1.6.5 的 `TrayOpen` 是两段式：先跨进程点 Explorer 的溢出按钮

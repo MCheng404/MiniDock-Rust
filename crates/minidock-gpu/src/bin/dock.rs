@@ -621,6 +621,29 @@ impl App {
         }
     }
 
+    /// 打开起动台。菜单项与 Dock 上的 `mdock:launchpad` 条目共用一条路径。
+    fn open_launchpad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // 主题跟着配置走（`UiTheme` 可能强制浅色），不是跟系统走。
+        let dark = self
+            .dock
+            .cfg
+            .dock_is_dark(minidock_platform::theme::is_dark());
+        let lw = ensure_launchpad(
+            &self.gpu,
+            &mut self.launchpad_slot,
+            &self.paths,
+            self.ppp,
+            dark,
+        )?;
+        // 行列数每次打开都跟配置同步：设置窗口里可能刚改过。
+        lw.set_grid(
+            self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
+            self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
+        );
+        lw.open();
+        Ok(())
+    }
+
     /// 点击启动。放在主循环而不是窗口过程里：`ShellExecuteW` 可能阻塞
     /// 几十毫秒，不该占着消息处理。
     fn step_click(&mut self) {
@@ -640,6 +663,21 @@ impl App {
             eprintln!("点击了第 {i} 项，但配置里没有对应条目");
             return;
         };
+
+        // 内置条目不是文件：`ShellExecute` 对 `mdock:` 只会失败（连错误都
+        // 不明显 —— 点上去像没反应）。这两条走自己的动作。
+        if let Some(kind) = minidock_gpu::glyph::Builtin::from_path(&item.path) {
+            match kind {
+                minidock_gpu::glyph::Builtin::Launchpad => {
+                    if let Err(e) = self.open_launchpad() {
+                        eprintln!("打开起动台失败：{e}");
+                    }
+                }
+                minidock_gpu::glyph::Builtin::Start => minidock_platform::sysact::open_start(),
+            }
+            self.dock.start_bounce(i);
+            return;
+        }
 
         // `force`（Shift+点击 / 中键）= 不管有没有在跑，都新起一个。
         // `force` 连"激活已有窗口"一起跳过，否则想开第二个实例永远开不出来。
@@ -711,24 +749,7 @@ impl App {
                 );
             }
             if cmd == MenuCmd::Launchpad {
-                // 主题跟着配置走（`UiTheme` 可能强制浅色），不是跟系统走。
-                let dark = self
-                    .dock
-                    .cfg
-                    .dock_is_dark(minidock_platform::theme::is_dark());
-                let lw = ensure_launchpad(
-                    &self.gpu,
-                    &mut self.launchpad_slot,
-                    &self.paths,
-                    self.ppp,
-                    dark,
-                )?;
-                // 行列数每次打开都跟配置同步：设置窗口里可能刚改过。
-                lw.set_grid(
-                    self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
-                    self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
-                );
-                lw.open();
+                self.open_launchpad()?;
             } else if cmd == MenuCmd::Settings {
                 // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
                 // 那儿没有 `gpu`，也不该有。
@@ -2143,7 +2164,10 @@ fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
     for (i, item) in raw.iter().enumerate() {
         // 分割线不画图标；已经有图标的跳过 —— `replace_items` 会按路径把
         // 旧图标搬过来，全量重排会让整条 Dock 闪一次"首字占位"。
-        if item.kind == ItemKind::Separator || dock.has_icon(i) {
+        if item.kind == ItemKind::Separator
+            || dock.has_icon(i)
+            || minidock_gpu::glyph::Builtin::from_path(&item.path).is_some()
+        {
             continue;
         }
         loader.submit(IconRequest {

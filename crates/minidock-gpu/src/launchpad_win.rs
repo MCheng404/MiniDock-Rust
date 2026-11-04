@@ -72,6 +72,8 @@ struct Overlay<'a> {
     menu: Option<usize>,
     /// 菜单左上角（逻辑点）。
     menu_at: (f32, f32),
+    /// 键盘选中的格（**当前页内**的序号）。`None` = 还没用键盘选过。
+    sel: Option<usize>,
     /// 正在重命名哪一格。
     renaming: Option<usize>,
     /// 重命名缓冲。
@@ -138,6 +140,8 @@ pub struct LaunchpadWindow {
     menu: Option<usize>,
     /// 菜单左上角（逻辑点）。
     menu_at: (f32, f32),
+    /// 键盘选中的格（**当前页内**的序号）。`None` = 还没用键盘选过。
+    sel: Option<usize>,
     /// 正在重命名哪一格。
     renaming: Option<usize>,
     /// 重命名缓冲。
@@ -249,6 +253,7 @@ impl LaunchpadWindow {
             ime: Ime::new(),
             menu: None,
             menu_at: (0.0, 0.0),
+            sel: None,
             renaming: None,
             rename_buf: String::new(),
             cmds: Vec::new(),
@@ -302,6 +307,7 @@ impl LaunchpadWindow {
         self.page = 0;
         self.open_folder = None;
         self.hover = None;
+        self.sel = None;
         self.menu = None;
         self.renaming = None;
         self.rename_buf.clear();
@@ -500,9 +506,12 @@ impl LaunchpadWindow {
         let mut icons_rects: HitList = Vec::new();
         let apps = lp.apps().to_vec();
         let rename_buf = self.rename_buf.clone();
+        // 选中格越界就当没选：翻页 / 搜索之后格子数会变。
+        let sel = self.sel.filter(|k| *k < self.page_len());
         let ov = Overlay {
             menu: self.menu,
             menu_at: self.menu_at,
+            sel,
             renaming: self.renaming,
             rename_buf: &rename_buf,
         };
@@ -756,6 +765,47 @@ impl LaunchpadWindow {
             }
             WM_KEYDOWN => {
                 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+                // 方向键与回车只在"没有任何浮层"时归网格；菜单、重命名、
+                // 文件夹弹层各自有自己的键盘语义，不抢。
+                // 只用 if 链而不是 match：没命中的键（比如 Esc）要继续往下
+                // 走默认分支，`match` 里写 `_ => return None` 会把 Esc 吞掉。
+                if self.menu.is_none() && self.renaming.is_none() && self.open_folder.is_none() {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT,
+                        VK_UP,
+                    };
+                    let vk = wparam.0 as u16;
+                    if vk == VK_LEFT.0 {
+                        self.move_sel(-1, 0);
+                        return Some(LRESULT(0));
+                    } else if vk == VK_RIGHT.0 {
+                        self.move_sel(1, 0);
+                        return Some(LRESULT(0));
+                    } else if vk == VK_UP.0 {
+                        self.move_sel(0, -1);
+                        return Some(LRESULT(0));
+                    } else if vk == VK_DOWN.0 {
+                        self.move_sel(0, 1);
+                        return Some(LRESULT(0));
+                    } else if vk == VK_HOME.0 {
+                        self.sel = Some(0);
+                        self.next_repaint = Instant::now();
+                        return Some(LRESULT(0));
+                    } else if vk == VK_END.0 {
+                        self.sel = Some(self.page_len().saturating_sub(1));
+                        self.next_repaint = Instant::now();
+                        return Some(LRESULT(0));
+                    } else if vk == VK_PRIOR.0 {
+                        self.turn_page(-1);
+                        return Some(LRESULT(0));
+                    } else if vk == VK_NEXT.0 {
+                        self.turn_page(1);
+                        return Some(LRESULT(0));
+                    } else if vk == VK_RETURN.0 {
+                        self.enter_sel();
+                        return Some(LRESULT(0));
+                    }
+                }
                 if wparam.0 == VK_ESCAPE.0 as usize {
                     // 一层一层往后退：菜单 → 重命名 → 文件夹 → 窗口。
                     if self.menu.is_some() {
@@ -811,6 +861,8 @@ impl LaunchpadWindow {
                 }
                 self.page = 0;
                 self.open_folder = None;
+                // 过滤结果变了，旧的选中格不再指同一个应用。
+                self.sel = None;
                 self.next_repaint = Instant::now();
                 None
             }
@@ -843,6 +895,66 @@ impl LaunchpadWindow {
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
             _ => None,
+        }
+    }
+
+    /// 当前页有多少格。
+    fn page_len(&self) -> usize {
+        let per = self.per().max(1);
+        (self.count().saturating_sub(self.page * per)).min(per)
+    }
+
+    /// 键盘移动选中格。
+    ///
+    /// 左右到头会翻页（起动台的惯性操作），上下夹在本页内 —— 上下翻页
+    /// 需要额外约定"翻到下一页的第几列"，实际用起来更容易迷路。
+    fn move_sel(&mut self, dx: i32, dy: i32) {
+        let len = self.page_len();
+        if len == 0 {
+            self.sel = None;
+            self.next_repaint = Instant::now();
+            return;
+        }
+        let cols = self.grid.0.max(1);
+        let k = self.sel.unwrap_or(0).min(len - 1);
+        let (col, row) = (k % cols, k / cols);
+        if dx != 0 {
+            let next = k as i32 + dx;
+            if next < 0 {
+                // 左边界 → 上一页最后一格。
+                if self.page > 0 {
+                    self.page -= 1;
+                    self.sel = Some(self.page_len().saturating_sub(1));
+                }
+            } else if next >= len as i32 {
+                // 右边界 → 下一页第一格。
+                if self.page + 1 < self.pages() {
+                    self.page += 1;
+                    self.sel = Some(0);
+                }
+            } else {
+                self.sel = Some(next as usize);
+            }
+        } else {
+            let nr = (row as i32 + dy).clamp(0, self.grid.1 as i32 - 1) as usize;
+            let nk = nr * cols + col;
+            if nk < len {
+                self.sel = Some(nk);
+            }
+        }
+        self.next_repaint = Instant::now();
+    }
+
+    /// 回车：打开选中的格；没选过时，搜索态直接开第一条。
+    fn enter_sel(&mut self) {
+        if let Some(k) = self.sel {
+            if k < self.page_len() {
+                self.activate(k);
+                return;
+            }
+        }
+        if !self.query.is_empty() && self.page_len() > 0 {
+            self.activate(0);
         }
     }
 
@@ -1193,6 +1305,17 @@ fn draw(
             FontId::proportional(11.5),
             if ghost { sub } else { tc },
         );
+
+        // 键盘选中的格：图标外面一圈高亮。悬停另有底色，两者不冲突。
+        if ov.sel == Some(k) && drag_src.is_none() {
+            let halo = icon_rect.expand(icon_s * 0.1);
+            painter.rect_stroke(
+                halo,
+                CornerRadius::same((icon_s * 0.24) as u8),
+                Stroke::new(2.5, accent),
+                egui::StrokeKind::Outside,
+            );
+        }
     }
 
     // 空态

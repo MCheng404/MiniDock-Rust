@@ -26,6 +26,7 @@ pub mod cc_win;
 pub mod cursor;
 pub mod dock;
 pub mod frame;
+pub mod glyph;
 pub mod gpu;
 pub mod ime;
 pub mod input;
