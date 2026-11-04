@@ -27,8 +27,7 @@ fn harness(text: &str) -> Harness<'static, St> {
                     ui.max_rect().center(),
                     egui::vec2(260.0, FIELD_H),
                 );
-                #[expect(deprecated, reason = "测试用的固定 id")]
-                let id = egui::Id::new("test-field");
+                let id = egui::Id::unique("test-field");
                 text_field(
                     ui,
                     rect,

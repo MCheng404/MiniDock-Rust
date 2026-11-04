@@ -89,8 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if tip {
         state.tip = Some(minidock_settings::pages::Tip {
-            #[expect(deprecated, reason = "截图用的一次性 id")]
-            id: egui::Id::new("shot"),
+            id: egui::Id::unique("shot"),
             text: "根据 Windows 强调色生成 Material You 风格色调".to_owned(),
             anchor: egui::Rect::from_min_size(egui::pos2(560.0, 300.0), egui::vec2(120.0, 20.0)),
             pinned: true,
@@ -99,9 +98,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = Outcome::default();
 
     if focus {
-        #[expect(deprecated, reason = "与 shell 里固定的搜索框 id 对应")]
-        let id = egui::Id::new("nav-search");
+        let id = egui::Id::unique("nav-search");
         frame.ctx().memory_mut(|m| m.request_focus(id));
+    }
+    // 实验开关：只在离屏出图时覆盖 TessellationOptions，用来挑出
+    // 真正影响 RectShape 圆角/圆点质量的官方参数。
+    let feather = rest.iter().find_map(|a| a.strip_prefix("feather="));
+    let no_discs = rest.iter().any(|a| a == "nodiscs");
+    let no_round = rest.iter().any(|a| a == "noroundrect");
+    if feather.is_some() || no_discs || no_round {
+        frame.ctx().tessellation_options_mut(|opt| {
+            if let Some(v) = feather.and_then(|x| x.parse::<f32>().ok()) {
+                opt.feathering_size_in_pixels = v;
+            }
+            if no_discs {
+                opt.prerasterized_discs = false;
+            }
+            if no_round {
+                opt.round_rects_to_pixels = false;
+            }
+        });
     }
 
     // 三帧出图：字体图集(0s) → 动画推进(0.4s) → 稳定画面(10s)。

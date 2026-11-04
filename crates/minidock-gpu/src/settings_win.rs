@@ -327,8 +327,13 @@ impl SettingsWindow {
 
     /// 设置窗口有自己的主题设置（`UiTheme`），与栏体主题（`DockTheme`）无关。
     ///
-    /// 0 = 浅色 / 1 = 深色 / 2 = 跟随系统。只对第一次和变化时的帧调用：
-    /// `set_visuals` 会让 egui 认为样式变了，每帧调用等于每帧都重绘。
+    /// 0 = 浅色 / 1 = 深色 / 2 = 跟随系统。只在第一次和变化时的帧调用。
+    ///
+    /// 用官方的 `set_theme` 切换 `ThemePreference`，而不是 `set_visuals`
+    /// 覆盖当前主题的样式：后者只改 style、不改 preference，之后任何一次
+    /// `set_theme`（截图工具也在用）都会突然加载另一套默认样式，主题和
+    /// 视觉效果各说各话。`set_theme` 只动一个 preference 字段，比重建
+    /// 整套 `Visuals` 也轻。
     fn apply_theme(&mut self, mode: i32) {
         if self.ui_theme == Some(mode) {
             return;
@@ -339,12 +344,11 @@ impl SettingsWindow {
             2 => minidock_platform::theme::is_dark(),
             _ => false,
         };
-        let visuals = if dark {
-            egui::Visuals::dark()
+        self.renderer.ctx().set_theme(if dark {
+            egui::Theme::Dark
         } else {
-            egui::Visuals::light()
-        };
-        self.renderer.ctx().set_visuals(visuals);
+            egui::Theme::Light
+        });
     }
 
     fn update_stats(&mut self, dt: f32) {
@@ -512,8 +516,7 @@ pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out
         .ctx()
         .input(|i| i.key_pressed(egui::Key::K) && i.modifiers.ctrl);
     // 固定 id 是刻意的：Ctrl+K 要跨帧请求同一个输入框的焦点。
-    #[expect(deprecated, reason = "单一搜索框，固定 id 即可")]
-    let search_id = egui::Id::new("nav-search");
+    let search_id = egui::Id::unique("nav-search");
     if ctrl_k {
         child.memory_mut(|m| m.request_focus(search_id));
     }

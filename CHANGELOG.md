@@ -5,6 +5,42 @@
 
 ---
 
+## 0.9.11 — 代码审查：跟进 egui 0.37 官方 API（2026-11-04）
+
+系统审查了弃用豁免、自绘控件、样式与 tessellation 用法，对照
+docs.rs 0.37 文档与本地 epaint/egui 源码验证每项是否真有收益。
+
+### 采纳（都有实测依据）
+
+- **`Id::new` → `Id::unique`（6 处）**：官方弃用说明明确 `Id::new`
+  就是 `Self::unique(source)` 的别名，行为完全等价；清掉全部
+  `#[expect(deprecated)]` 豁免，避免以后 egui 升级时被静默移除。
+- **主题切换改用官方 `set_theme`**：原来 `apply_theme` 用
+  `set_visuals(Visuals::dark/light())` 覆盖当前主题的样式，而截图工具
+  用 `set_theme` —— preference 与 style 各说各话，是主题类 bug 的温床。
+  `set_theme` 只改一个 `ThemePreference` 字段，比重建整套 `Visuals` 轻。
+  验证：浅色 / 深色两张离屏 BMP **逐字节完全相同**（视觉零变化）。
+
+### 实验后不采纳（记录结论，避免以后重复试）
+
+| 官方选项 | 实测 | 结论 |
+|---|---|---|
+| `bezier_tolerance` 0.1→0.02 | 全图差异 **0 像素** | 只作用于 `Quadratic/CubicBezierShape`；界面全是 `RectShape`，圆角走 epaint 自己的栅格化 |
+| `prerasterized_discs=false` | 差异 **0 像素** | 界面没有用到预栅格化圆盘 |
+| `feathering_size_in_pixels` 1.25 | 直边 R 降到 241/240（默认 245），弧段过渡像素 157→132 | 官方"更大值会发虚"属实，默认 1.0 最优 |
+| `round_rects_to_pixels=false` | 圆角/直边与默认一致，仅别处 0.5px 位移 | 无收益，反而可能让拼接矩形露缝 |
+
+`settings_shot` 保留 `feather=` / `nodiscs` / `noroundrect` 三个实验开关
+（只作用于离屏出图），以后升级 egui 可一键复核这些默认是否仍最优。
+
+### 审查确认已经跟上的
+
+`Ui::visuals_mut`（不标脏）、`TextEdit::align`（弃用 vertical_align 的替代）、
+`Visuals::slider_trailing_fill`、`StrokeKind`、`WidgetInfo::labeled/selected`、
+`Id::with`、MSAA 能力查询 `sample_count_supported(4)`。
+
+---
+
 ## 0.9.10 — 输入框：文字对齐修复 + 共享控件（2026-11-04）
 
 ### 修复

@@ -236,8 +236,7 @@ pub(crate) fn row<R>(
         let id = ui
             .vertical(|ui| {
                 ui.set_max_width(max);
-                #[expect(deprecated, reason = "占位 id，真实 id 由 label 的 resp 提供")]
-                let mut id = egui::Id::new("row-label");
+                let mut id = egui::Id::unique("row-label");
                 ui.horizontal(|ui| {
                     let resp = ui.label(label);
                     id = resp.id;
@@ -411,8 +410,7 @@ pub(crate) fn render_tip(ui: &mut Ui, state: &mut SettingsState) {
     let pos = pos + mag;
 
     let rect = std::cell::Cell::new(egui::Rect::NOTHING);
-    #[expect(deprecated, reason = "整个应用只有一个气泡，固定 id 即可")]
-    let area_id = egui::Id::new("settings-tip");
+    let area_id = egui::Id::unique("settings-tip");
     egui::Area::new(area_id)
         .order(egui::Order::Tooltip)
         .pivot(pivot)
