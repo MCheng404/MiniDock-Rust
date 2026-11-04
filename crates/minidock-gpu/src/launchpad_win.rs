@@ -65,15 +65,28 @@ pub enum LaunchpadCmd {
     },
 }
 
+/// 右键菜单当前是哪一层、作用于谁。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MenuState {
+    /// 顶层格的菜单（未过滤视图）。
+    Cell(usize),
+    /// 过滤视图里的某一格的菜单（此时格子是应用，不是顶层格）。
+    App(usize),
+    /// 二级菜单：给这个应用选标签组。
+    Category(usize),
+}
+
 /// 画在网格之上的东西：右键菜单与重命名框。
 #[derive(Copy, Clone, Debug, Default)]
 struct Overlay<'a> {
-    /// 菜单作用于哪一格（顶层下标）。
-    menu: Option<usize>,
+    /// 菜单项文案（空 = 不画菜单）。
+    menu_items: &'a [String],
     /// 菜单左上角（逻辑点）。
     menu_at: (f32, f32),
     /// 键盘选中的格（**当前页内**的序号）。`None` = 还没用键盘选过。
     sel: Option<usize>,
+    /// 当前分类筛选。`0` = 全部，`1..=tags.len()` = 第几组标签。
+    cat: usize,
     /// 正在重命名哪一格。
     renaming: Option<usize>,
     /// 重命名缓冲。
@@ -92,6 +105,10 @@ enum Hit {
     MenuItem(usize),
     /// 右上角的「＋」。
     Plus,
+    /// 标签栏第 k 个：0 = 全部，1..=tags.len() = 标签，最后一个是「＋」。
+    Tab(usize),
+    /// 左上角的 A–Z 排序按钮。
+    SortAz,
     /// 文件夹弹层里的第 k 个。
     FolderCell(usize),
     /// 文件夹弹层里第 k 个的「移出」小按钮。
@@ -136,12 +153,14 @@ pub struct LaunchpadWindow {
 
     /// 输入法状态（搜索框 / 重命名框）。
     ime: Ime,
-    /// 右键菜单：作用于哪一格（顶层下标）。`None` 表示没开。
-    menu: Option<usize>,
+    /// 右键菜单当前状态。`None` = 没开。
+    menu: Option<MenuState>,
     /// 菜单左上角（逻辑点）。
     menu_at: (f32, f32),
     /// 键盘选中的格（**当前页内**的序号）。`None` = 还没用键盘选过。
     sel: Option<usize>,
+    /// 当前分类筛选。`0` = 全部，`1..=tags.len()` = 第几组标签。
+    cat: usize,
     /// 正在重命名哪一格。
     renaming: Option<usize>,
     /// 重命名缓冲。
@@ -254,6 +273,7 @@ impl LaunchpadWindow {
             menu: None,
             menu_at: (0.0, 0.0),
             sel: None,
+            cat: 0,
             renaming: None,
             rename_buf: String::new(),
             cmds: Vec::new(),
@@ -308,6 +328,7 @@ impl LaunchpadWindow {
         self.open_folder = None;
         self.hover = None;
         self.sel = None;
+        self.cat = 0;
         self.menu = None;
         self.renaming = None;
         self.rename_buf.clear();
@@ -369,12 +390,25 @@ impl LaunchpadWindow {
         self.next_repaint = Instant::now();
     }
 
-    /// 当前显示多少格（搜索时是过滤结果的数量）。
+    /// 是否处于"过滤视图"：按分类或搜索词筛选。
+    ///
+    /// 过滤视图里只列应用、不列文件夹 —— 分类是给应用分的，文件夹没有分类，
+    /// 混进结果里只会让人困惑（原版 `LpFiltered` 同此）。
+    fn filtered(&self) -> bool {
+        self.cat != 0 || !self.query.is_empty()
+    }
+
+    /// 过滤视图下要显示的应用下标。
+    fn shown(&self) -> Vec<usize> {
+        self.lp.visible_in(self.cat, &self.query)
+    }
+
+    /// 当前显示多少格。
     fn count(&self) -> usize {
-        if self.query.is_empty() {
-            self.lp.len()
+        if self.filtered() {
+            self.shown().len()
         } else {
-            self.lp.filter(&self.query).len()
+            self.lp.len()
         }
     }
 
@@ -385,7 +419,7 @@ impl LaunchpadWindow {
     /// 打开某一格（应用 → 启动，文件夹 → 展开）。
     fn activate(&mut self, k: usize) {
         let idx = self.page * self.per() + k;
-        if self.query.is_empty() {
+        if !self.filtered() {
             match self.lp.top().get(idx).copied() {
                 Some(Top::App(i)) => {
                     let path = self.lp.apps()[i].path.clone();
@@ -399,8 +433,7 @@ impl LaunchpadWindow {
                 None => {}
             }
         } else {
-            let hits = self.lp.filter(&self.query);
-            if let Some(&ai) = hits.get(idx) {
+            if let Some(&ai) = self.shown().get(idx) {
                 let path = self.lp.apps()[ai].path.clone();
                 minidock_platform::sysact::open_uri(&path);
                 self.close();
@@ -431,7 +464,7 @@ impl LaunchpadWindow {
 
         // 收集这一页要显示的 app 下标。
         let mut want: Vec<usize> = Vec::new();
-        if self.query.is_empty() {
+        if !self.filtered() {
             for k in 0..per {
                 let idx = page * per + k;
                 if idx >= count {
@@ -447,7 +480,7 @@ impl LaunchpadWindow {
                 }
             }
         } else {
-            let hits = self.lp.filter(&self.query);
+            let hits = self.shown();
             for k in 0..per {
                 if let Some(&ai) = hits.get(page * per + k) {
                     want.push(ai);
@@ -508,10 +541,12 @@ impl LaunchpadWindow {
         let rename_buf = self.rename_buf.clone();
         // 选中格越界就当没选：翻页 / 搜索之后格子数会变。
         let sel = self.sel.filter(|k| *k < self.page_len());
+        let menu_items = self.menu_items();
         let ov = Overlay {
-            menu: self.menu,
+            menu_items: &menu_items,
             menu_at: self.menu_at,
             sel,
+            cat: self.cat,
             renaming: self.renaming,
             rename_buf: &rename_buf,
         };
@@ -655,10 +690,13 @@ impl LaunchpadWindow {
                 let released = self.hit_at(x, y);
                 // 菜单开着时，这一下点击只用于"选菜单项"或"点外面关掉"。
                 if self.menu.is_some() {
+                    // 只有"点在菜单外面"才关；点到某一项由 `run_menu_item`
+                    // 自己决定下一步（二级菜单要接着显示）。
                     if let Some(Hit::MenuItem(i)) = released {
                         self.run_menu_item(i);
+                    } else {
+                        self.menu = None;
                     }
-                    self.menu = None;
                     self.press = None;
                     self.next_repaint = Instant::now();
                     return Some(LRESULT(0));
@@ -702,6 +740,24 @@ impl LaunchpadWindow {
                     (Some(Hit::Cell(a)), Some(Hit::Cell(b))) if a == b => {
                         self.activate(a);
                     }
+                    (Some(Hit::Tab(a)), Some(Hit::Tab(b))) if a == b => {
+                        let n = self.lp.tags().len();
+                        if b <= n {
+                            // 切分类：页码与选中都归零（格子数变了）。
+                            self.cat = b;
+                            self.page = 0;
+                            self.sel = None;
+                        } else if self.lp.add_tag("").is_some() {
+                            // 「＋」新加一组，先给个占位名，右键可改名。
+                            self.dirty_save = true;
+                        }
+                        self.next_repaint = Instant::now();
+                    }
+                    (Some(Hit::SortAz), Some(Hit::SortAz)) => {
+                        self.lp.sort_az();
+                        self.dirty_save = true;
+                        self.next_repaint = Instant::now();
+                    }
                     (Some(Hit::Plus), Some(Hit::Plus)) => {
                         // 这里弹"添加应用/文件夹/网址"菜单。我们改成拖拽添加，
                         // 这里给出提示（点击无效果的按钮比没有按钮更让人困惑）。
@@ -730,11 +786,19 @@ impl LaunchpadWindow {
                         self.hits.len()
                     );
                 }
-                if self.open_folder.is_none() && self.query.is_empty() {
+                if self.open_folder.is_none() {
                     if let Some(Hit::Cell(k)) = self.hit_at(x, y) {
                         let idx = self.page * self.per() + k;
-                        if idx < self.lp.len() {
-                            self.menu = Some(idx);
+                        // 过滤视图里格子是应用；未过滤时是顶层格。
+                        if self.filtered() {
+                            if let Some(&ai) = self.shown().get(idx) {
+                                self.menu = Some(MenuState::App(ai));
+                                self.menu_at = (x.min(self.size.0 - 170.0), y);
+                                self.next_repaint = Instant::now();
+                                return Some(LRESULT(0));
+                            }
+                        } else if idx < self.lp.len() {
+                            self.menu = Some(MenuState::Cell(idx));
                             self.menu_at = (x.min(self.size.0 - 170.0), y);
                             self.next_repaint = Instant::now();
                             return Some(LRESULT(0));
@@ -953,7 +1017,7 @@ impl LaunchpadWindow {
                 return;
             }
         }
-        if !self.query.is_empty() && self.page_len() > 0 {
+        if self.filtered() && self.page_len() > 0 {
             self.activate(0);
         }
     }
@@ -973,7 +1037,8 @@ impl LaunchpadWindow {
     /// 松手：算落点，合并或重排。
     fn drop(&mut self, x: f32, y: f32) {
         let Some(src) = self.drag_src else { return };
-        if self.query.is_empty() {
+        // 过滤视图里格子是"应用"，与顶层格的下标不是一回事，拖拽先不做。
+        if !self.filtered() {
             // 只在同一页内算落点。
             if let Some(Hit::Cell(k)) = self.hit_at(x, y) {
                 if self.page == self.drag_page {
@@ -990,13 +1055,50 @@ impl LaunchpadWindow {
         self.press = None;
     }
 
-    /// 这一格的菜单项文案。应用 4 项，文件夹 3 项（没有"添加到 Dock"）。
-    fn menu_labels(&self, idx: usize) -> Vec<&'static str> {
-        match self.lp.top().get(idx) {
-            Some(Top::Folder(_)) => vec!["打开", "重命名…", "解散文件夹"],
-            Some(Top::App(_)) => vec!["打开", "重命名…", "添加到 Dock 栏", "从起动台移除"],
-            None => Vec::new(),
+    /// 当前菜单该显示哪些项。
+    ///
+    /// 三层：顶层格（应用 / 文件夹）、过滤视图里的应用、给应用选标签组。
+    fn menu_items(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        match self.menu {
+            Some(MenuState::Cell(idx)) => match self.lp.top().get(idx) {
+                Some(Top::Folder(_)) => {
+                    out = vec!["打开".into(), "重命名…".into(), "解散文件夹".into()];
+                }
+                Some(Top::App(_)) => {
+                    out = vec![
+                        "打开".into(),
+                        "重命名…".into(),
+                        "移动到标签组…".into(),
+                        "添加到 Dock 栏".into(),
+                        "从起动台移除".into(),
+                    ];
+                }
+                None => {}
+            },
+            Some(MenuState::App(_)) => {
+                out = vec![
+                    "打开".into(),
+                    "移动到标签组…".into(),
+                    "添加到 Dock 栏".into(),
+                ];
+            }
+            Some(MenuState::Category(ai)) => {
+                let cur = self.lp.category_of(ai);
+                for (i, t) in self.lp.tags().iter().enumerate() {
+                    // 当前所在组打勾，省得用户猜"现在在哪一组"。
+                    out.push(if i + 1 == cur {
+                        format!("✓ {t}")
+                    } else {
+                        t.to_string()
+                    });
+                }
+                out.push("自动分类（清除）".into());
+                out.push("（返回）".into());
+            }
+            None => {}
         }
+        out
     }
 
     /// 执行菜单第 `i` 项。
@@ -1004,9 +1106,56 @@ impl LaunchpadWindow {
         if std::env::var("MINIDOCK_LP_TRACE").is_ok() {
             eprintln!("[lp] 菜单项 {i}，作用于 {:?}", self.menu);
         }
-        let Some(idx) = self.menu else { return };
-        let labels = self.menu_labels(idx);
-        let Some(label) = labels.get(i).copied() else {
+        let Some(state) = self.menu else { return };
+        let labels = self.menu_items();
+        let Some(label) = labels.get(i).map(String::as_str) else {
+            return;
+        };
+        // 二级菜单：给应用挑一组标签。
+        if let MenuState::Category(ai) = state {
+            match label {
+                "自动分类（清除）" => self.lp.set_category(ai, None),
+                "（返回）" => {
+                    self.menu = Some(MenuState::App(ai));
+                    self.next_repaint = Instant::now();
+                    return;
+                }
+                _ => {
+                    // 标签名后面可能带「（当前）」，比对前先剪掉。
+                    let bare = label.trim_end_matches("（当前）");
+                    if let Some(pos) = self.lp.tags().iter().position(|t| t == bare) {
+                        self.lp.set_category(ai, Some(pos + 1));
+                    }
+                }
+            }
+            self.dirty_save = true;
+            self.menu = None;
+            self.next_repaint = Instant::now();
+            return;
+        }
+        // 过滤视图里的应用菜单。
+        if let MenuState::App(ai) = state {
+            match label {
+                "打开" => {
+                    let path = self.lp.apps()[ai].path.clone();
+                    minidock_platform::sysact::open_uri(&path);
+                    self.close();
+                }
+                "移动到标签组…" => self.menu = Some(MenuState::Category(ai)),
+                "添加到 Dock 栏" => {
+                    self.menu = None;
+                    let app = &self.lp.apps()[ai];
+                    self.cmds.push(LaunchpadCmd::AddToDock {
+                        name: app.name.clone(),
+                        path: app.path.clone(),
+                    });
+                }
+                _ => {}
+            }
+            self.next_repaint = Instant::now();
+            return;
+        }
+        let MenuState::Cell(idx) = state else {
             return;
         };
         match label {
@@ -1024,6 +1173,11 @@ impl LaunchpadWindow {
                     });
                 }
             }
+            "移动到标签组…" => {
+                if let Some(Top::App(ai)) = self.lp.top().get(idx).copied() {
+                    self.menu = Some(MenuState::Category(ai));
+                }
+            }
             "从起动台移除" => {
                 if self.lp.remove_top(idx) {
                     self.dirty_save = true;
@@ -1039,6 +1193,7 @@ impl LaunchpadWindow {
             }
             _ => {}
         }
+        self.menu = None;
         self.next_repaint = Instant::now();
     }
 
@@ -1195,6 +1350,73 @@ fn draw(
         }
     }
 
+    // ---- 标签栏（全部 + 标签组 + ＋） ----
+    //
+    // 位置贴着搜索框下方：分类是"搜索的另一种过滤方式"，放一起符合直觉。
+    let nt = 1 + lp.tags().len();
+    let tab_h = 28.0;
+    let tab_gap = 8.0;
+    let tab_y = search.bottom() + 8.0;
+    let cell_w = (SEARCH_W - tab_gap * nt as f32) / (nt + 1) as f32;
+    for t in 0..=nt {
+        let tx = search.left() + t as f32 * (cell_w + tab_gap);
+        let r = EguiRect::from_min_size(Pos2::new(tx, tab_y), egui::vec2(cell_w, tab_h));
+        let on = ov.cat == t && t <= lp.tags().len();
+        let adding = t == nt;
+        let label = if adding {
+            "＋".to_owned()
+        } else if t == 0 {
+            "全部".to_owned()
+        } else {
+            lp.tags()[t - 1].clone()
+        };
+        let fill = if on {
+            accent
+        } else if hover == Some(Hit::Tab(t)) {
+            hover_bg
+        } else if dark {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 45)
+        } else {
+            Color32::from_rgba_unmultiplied(0, 0, 0, 26)
+        };
+        painter.rect_filled(r, CornerRadius::same(9), fill);
+        painter.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            fit_text(ui, &label, cell_w - 8.0, 12.5),
+            FontId::proportional(12.5),
+            if on { Color32::WHITE } else { sub },
+        );
+        hits.push((Hit::Tab(t), r));
+    }
+
+    // ---- A–Z 排序按钮（搜索框左侧） ----
+    let az = EguiRect::from_min_size(
+        Pos2::new(search.left() - SEARCH_H - 12.0, search.top()),
+        egui::vec2(SEARCH_H, SEARCH_H),
+    );
+    if az.left() > 8.0 {
+        painter.rect_filled(
+            az,
+            CornerRadius::same((SEARCH_H * 0.5) as u8),
+            if hover == Some(Hit::SortAz) {
+                hover_bg
+            } else if dark {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 60)
+            } else {
+                Color32::from_rgba_unmultiplied(0, 0, 0, 40)
+            },
+        );
+        painter.text(
+            az.center(),
+            Align2::CENTER_CENTER,
+            "A–Z",
+            FontId::proportional(13.0),
+            tc,
+        );
+        hits.push((Hit::SortAz, az));
+    }
+
     // ---- 加号按钮 ----
     let plus = EguiRect::from_min_size(Pos2::new(w - 84.0, 40.0), egui::vec2(SEARCH_H, SEARCH_H));
     hits.push((Hit::Plus, plus));
@@ -1225,16 +1447,15 @@ fn draw(
     let gx = SIDE;
     let gy = TOP_H;
 
-    let filtered: Vec<usize> = if query.is_empty() {
+    // 过滤视图 = 有搜索词**或**选了分类。两者都为空时才按"顶层格 + 文件夹"
+    // 显示，否则只列应用（分类是给应用分的，文件夹没有分类）。
+    let filtering = ov.cat != 0 || !query.is_empty();
+    let filtered: Vec<usize> = if filtering {
+        lp.visible_in(ov.cat, query)
+    } else {
         Vec::new()
-    } else {
-        lp.filter(query)
     };
-    let count = if query.is_empty() {
-        lp.len()
-    } else {
-        filtered.len()
-    };
+    let count = if filtering { filtered.len() } else { lp.len() };
 
     for k in 0..per {
         let idx = page * per + k;
@@ -1271,7 +1492,7 @@ fn draw(
         // `hit_at` 只查 `hits`，而它当时只有右上角的「＋」。
         hits.push((Hit::Cell(k), cell));
 
-        let (name, app_idx, is_folder, folder) = if query.is_empty() {
+        let (name, app_idx, is_folder, folder) = if !filtering {
             match lp.top()[idx] {
                 Top::App(i) => (lp.apps()[i].name.clone(), Some(i), false, None),
                 Top::Folder(f) => (lp.folders()[f].name.clone(), None, true, Some(f)),
@@ -1323,10 +1544,12 @@ fn draw(
         painter.text(
             Pos2::new(w * 0.5, h * 0.5 - 20.0),
             Align2::CENTER_CENTER,
-            if query.is_empty() {
-                "起动台是空的 —— 把文件、快捷方式或文件夹拖进来"
-            } else {
+            if !query.is_empty() {
                 "没有找到匹配的应用"
+            } else if ov.cat != 0 {
+                "这一组里还没有应用 —— 右键图标可以把它移过来"
+            } else {
+                "起动台是空的 —— 把文件、快捷方式或文件夹拖进来"
             },
             FontId::proportional(14.0),
             sub,
@@ -1349,7 +1572,7 @@ fn draw(
     // 拖动时图标跟手。
     if let Some(k) = drag_src {
         let idx = page * per + k;
-        if query.is_empty() {
+        if !filtering {
             if let Some(t) = lp.top().get(idx).copied() {
                 let s = icon_s * 1.1;
                 let r = EguiRect::from_min_size(
@@ -1423,15 +1646,17 @@ fn draw(
     // 两者都画在同一个窗口里，不另开 HWND：这样命中判定、输入法、重绘
     // 全都走同一套，省掉一个窗口类与一份消息循环。
     let mut overlay_hits: HitList = Vec::new();
-    if let Some(idx) = ov.menu {
-        let labels: Vec<&str> = match lp.top().get(idx) {
-            Some(Top::Folder(_)) => vec!["打开", "重命名…", "解散文件夹"],
-            Some(Top::App(_)) => vec!["打开", "重命名…", "添加到 Dock 栏", "从起动台移除"],
-            None => Vec::new(),
-        };
+    if !ov.menu_items.is_empty() {
+        let labels = ov.menu_items;
         let row_h = 28.0;
         let pad = 6.0;
-        let mw = 170.0;
+        // 宽度按最长一项量：标签名是用户起的（"办公"/"设计素材"…），
+        // 固定 170 会把长名字截断。
+        let widest = labels
+            .iter()
+            .map(|l| measure(ui, l, 12.5))
+            .fold(170.0_f32 - 34.0, f32::max);
+        let mw = (widest + 34.0).max(170.0).min(w - 24.0);
         let mh = labels.len() as f32 * row_h + pad * 2.0;
         let mx = ov.menu_at.0.min(w - mw - 8.0).max(8.0);
         let my = ov.menu_at.1.min(h - mh - 8.0).max(8.0);
@@ -1462,9 +1687,9 @@ fn draw(
             painter.text(
                 egui::pos2(r.left() + 10.0, r.center().y),
                 Align2::LEFT_CENTER,
-                *label,
+                label.as_str(),
                 FontId::proportional(12.5),
-                if *label == "从起动台移除" {
+                if label == "从起动台移除" {
                     Color32::from_rgba_unmultiplied(230, 74, 70, 255)
                 } else {
                     tc

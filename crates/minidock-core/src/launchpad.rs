@@ -11,9 +11,13 @@
 //! f\t<path>\t<name>    文件夹里的应用
 //! E                     文件夹结束
 //! H\t<path>             从起动台隐藏
+//! G\t<name>            一组标签（按出现顺序编号，1..=8）
+//! C\t<name>\t<cat>     手工指定的分类：应用名 → 第几组
 //! ```
 //!
 //! 兼容这个格式的好处是：用户升级过来，格子顺序和文件夹都还在。
+//! `G` / `C` 是后加的：老文件没有这两行，读出来就是默认的办公 / 系统 /
+//! 工具三组，分类全走启发式。
 
 /// 应用数量上限。
 pub const MAX_APPS: usize = 700;
@@ -23,6 +27,13 @@ pub const MAX_FOLDERS: usize = 60;
 pub const MAX_TOP: usize = 760;
 /// 一个文件夹最多装几个。
 pub const MAX_IN_FOLDER: usize = 24;
+/// 标签组（分类）最多几组。
+pub const MAX_TAGS: usize = 8;
+/// 标签名的字符上限。
+pub const TAG_NAME_CAP: usize = 16;
+
+/// 默认三组：办公 / 系统 / 工具。与分类器的三档一一对应。
+const DEFAULT_TAGS: [&str; 3] = ["办公", "系统", "工具"];
 
 /// 扫描出来的一个候选应用（平台层产出、模型层消费）。
 ///
@@ -75,12 +86,32 @@ pub enum TakeOut {
 }
 
 /// 起动台数据。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launchpad {
     apps: Vec<App>,
     folders: Vec<Folder>,
     top: Vec<Top>,
     hidden: Vec<String>,
+    /// 标签组名（1..=[`MAX_TAGS`]）。下标 +1 即分类号。
+    tags: Vec<String>,
+    /// 手工指定的分类：应用**名** → 分类号（1..=tags.len()）。
+    ///
+    /// 按名字而不是按路径存：`launchpad.dat` 与 ini 都是给人看的，
+    /// 路径里那一长串 GUID 既难读也容易在重装后变。
+    cat_of: Vec<(String, usize)>,
+}
+
+impl Default for Launchpad {
+    fn default() -> Self {
+        Self {
+            apps: Vec::new(),
+            folders: Vec::new(),
+            top: Vec::new(),
+            hidden: Vec::new(),
+            tags: DEFAULT_TAGS.iter().map(|s| (*s).to_owned()).collect(),
+            cat_of: Vec::new(),
+        }
+    }
 }
 
 impl Launchpad {
@@ -201,6 +232,161 @@ impl Launchpad {
             .filter(|(_, a)| !self.is_hidden(&a.path) && a.name.to_lowercase().contains(&q))
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// 标签组名。
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// 改一个标签名。空名 / 超长一律拒绝。
+    pub fn set_tag(&mut self, i: usize, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > TAG_NAME_CAP || i >= self.tags.len() {
+            return false;
+        }
+        self.tags[i] = name.to_owned();
+        true
+    }
+
+    /// 加一组标签，返回它的分类号。满了返回 `None`。
+    pub fn add_tag(&mut self, name: &str) -> Option<usize> {
+        if self.tags.len() >= MAX_TAGS {
+            return None;
+        }
+        let name = name.trim();
+        let name = if name.is_empty() {
+            format!("标签{}", self.tags.len() + 1)
+        } else {
+            name.chars().take(TAG_NAME_CAP).collect()
+        };
+        self.tags.push(name);
+        Some(self.tags.len())
+    }
+
+    /// 删一组标签。手工指定的分类跟着前移 / 退回自动。
+    pub fn remove_tag(&mut self, i: usize) -> bool {
+        if i >= self.tags.len() || self.tags.len() <= 1 {
+            return false;
+        }
+        self.tags.remove(i);
+        let gone = i + 1;
+        self.cat_of.retain(|(_, c)| *c != gone);
+        for (_, c) in &mut self.cat_of {
+            if *c > gone {
+                *c -= 1;
+            }
+        }
+        true
+    }
+
+    /// 启发式分类：1 办公 / 2 系统 / 3 工具。
+    ///
+    /// 照搬原版 `LpCat` 的关键词表 —— 它本来就是个"差不多就行"的分类器，
+    /// 精确分类靠右键手工指定（[`Self::set_category`]）。
+    #[must_use]
+    fn classify(app: &App) -> usize {
+        let path = app.path.to_lowercase();
+        let name = app.name.to_lowercase();
+        let any = |hay: &str, keys: &[&str]| keys.iter().any(|k| hay.contains(k));
+        // 只看 System32 / SysWOW64，**不能**用宽泛的 `\windows\`：
+        // 起动台里存的是开始菜单的 .lnk 路径，而它本身就长这样 ——
+        // `C:\ProgramData\Microsoft\Windows\Start Menu\Programs\…`，
+        // 照抄原版的关键词会把所有应用都判成"系统"（实测 190/190）。
+        if any(
+            &path,
+            &["\\windows\\system32\\", "\\windows\\syswow64\\", "shell:"],
+        ) || any(
+            &name,
+            &["开始", "设置", "回收站", "此电脑", "控制面板", "资源管理器"],
+        ) {
+            return 2;
+        }
+        if any(
+            &name,
+            &[
+                "word",
+                "excel",
+                "powerpoint",
+                "ppt",
+                "office",
+                "wps",
+                "onenote",
+                "outlook",
+                "onedrive",
+                "notion",
+            ],
+        ) {
+            return 1;
+        }
+        3
+    }
+
+    /// 应用属于哪一组（1..=tags.len()）。手工指定的优先。
+    #[must_use]
+    pub fn category_of(&self, ai: usize) -> usize {
+        let n = self.tags.len().max(1);
+        if let Some(app) = self.apps.get(ai) {
+            if let Some((_, c)) = self
+                .cat_of
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&app.name))
+            {
+                return (*c).clamp(1, n);
+            }
+            return Self::classify(app).clamp(1, n);
+        }
+        1
+    }
+
+    /// 手工指定分类；`None` = 退回自动分类。
+    pub fn set_category(&mut self, ai: usize, cat: Option<usize>) {
+        let Some(app) = self.apps.get(ai) else {
+            return;
+        };
+        let name = app.name.clone();
+        self.cat_of.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+        if let Some(c) = cat {
+            self.cat_of.push((name, c.clamp(1, self.tags.len().max(1))));
+        }
+    }
+
+    /// 按分类 + 搜索词过滤出要显示的应用。
+    ///
+    /// `cat == 0` 表示"全部"。这两个条件任一为真时界面就进入"过滤视图"
+    /// （只列应用、不列文件夹）—— 与原版 `LpFiltered` 一致：分类是给应用
+    /// 分的，文件夹没有分类，混在过滤结果里只会让人困惑。
+    #[must_use]
+    pub fn visible_in(&self, cat: usize, query: &str) -> Vec<usize> {
+        let q = query.to_lowercase();
+        self.apps
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                !self.is_hidden(&a.path)
+                    && (cat == 0 || self.category_of(*i) == cat)
+                    && (q.is_empty() || a.name.to_lowercase().contains(&q))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 按名字给顶层格子排序（大小写不敏感的插入排序，稳定）。
+    ///
+    /// 排的是**格子顺序**，会被 [`Self::serialize`] 存下来 —— 用户再拖一次
+    /// 就覆盖回去，与原版"点 A–Z 就重排、拖拽仍可改"的行为一致。
+    pub fn sort_az(&mut self) {
+        let mut order: Vec<usize> = (0..self.top.len()).collect();
+        order.sort_by(|a, b| {
+            let na = self.name_of(self.top[*a]).to_lowercase();
+            let nb = self.name_of(self.top[*b]).to_lowercase();
+            na.cmp(&nb).then(a.cmp(b))
+        });
+        let old = self.top.clone();
+        for (dst, src) in order.iter().enumerate() {
+            self.top[dst] = old[*src];
+        }
     }
 
     /// 顶层某一格显示什么名字（文件夹取文件夹名）。
@@ -368,6 +554,10 @@ impl Launchpad {
     pub fn parse(text: &str) -> Self {
         let mut lp = Self::new();
         let mut cur: Option<usize> = None;
+        // 文件里有 G 行时以文件为准，先丢掉默认三组 —— 只能丢一次。
+        // 早先写成"每次 push 前都比一次 `== DEFAULT_TAGS`"，于是读完前三组
+        // 正好又等于默认值，第四行把前三组整片清掉：四组只剩最后一组。
+        let mut tags_seen = false;
         for line in text.lines() {
             let line = line.trim_end_matches('\r');
             if line.is_empty() {
@@ -418,6 +608,27 @@ impl Launchpad {
                         lp.hidden.push(path.to_owned());
                     }
                 }
+                // 标签组：`G\t<名字>`，按出现顺序编号。
+                "G" => {
+                    if let Some(name) = it.next() {
+                        if !name.trim().is_empty() && lp.tags.len() < MAX_TAGS {
+                            if !tags_seen {
+                                lp.tags.clear();
+                                tags_seen = true;
+                            }
+                            lp.tags.push(name.trim().to_owned());
+                        }
+                    }
+                }
+                // 手工分类：`C\t<应用名>\t<分类号>`。
+                "C" => {
+                    let (Some(name), Some(cat)) = (it.next(), it.next()) else {
+                        continue;
+                    };
+                    if let Ok(c) = cat.trim().parse::<usize>() {
+                        lp.cat_of.push((name.to_owned(), c));
+                    }
+                }
                 _ => {}
             }
         }
@@ -448,6 +659,12 @@ impl Launchpad {
         }
         for h in &self.hidden {
             let _ = writeln!(s, "H\t{}", h);
+        }
+        for t in &self.tags {
+            let _ = writeln!(s, "G\t{t}");
+        }
+        for (name, cat) in &self.cat_of {
+            let _ = writeln!(s, "C\t{name}\t{cat}");
         }
         s
     }
@@ -641,5 +858,144 @@ mod tests {
         let mut lp = with(&["A", "B"]);
         assert!(!lp.drop_at(1, 1, true));
         assert_eq!(lp.len(), 2);
+    }
+
+    // ---- 分类 / 标签 / A–Z ----
+
+    fn app(name: &str, path: &str) -> App {
+        App {
+            name: name.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    /// 默认三组：办公 / 系统 / 工具。
+    #[test]
+    fn default_tags_are_office_system_tools() {
+        let lp = Launchpad::new();
+        assert_eq!(lp.tags(), ["办公", "系统", "工具"]);
+    }
+
+    /// 分类器的关键词表：系统 / 办公 / 其余工具。
+    #[test]
+    fn classifier_maps_system_office_and_tools() {
+        assert_eq!(
+            Launchpad::classify(&app("设置", r"C:\Windows\ImmersiveControlPanel\x.exe")),
+            2,
+            "Windows 目录下的算系统"
+        );
+        assert_eq!(
+            Launchpad::classify(&app("回收站", "shell:RecycleBinFolder")),
+            2
+        );
+        assert_eq!(
+            Launchpad::classify(&app("Microsoft Word", r"C:\Office\WINWORD.EXE")),
+            1
+        );
+        assert_eq!(
+            Launchpad::classify(&app("Notion", r"C:\Apps\Notion.exe")),
+            1
+        );
+        assert_eq!(
+            Launchpad::classify(&app("Visual Studio Code", r"C:\Apps\Code.exe")),
+            3
+        );
+        // 开始菜单里的 .lnk 路径本身就含 `\Windows\`，不能被判成系统。
+        assert_eq!(
+            Launchpad::classify(&app(
+                "123云盘",
+                r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\123云盘.lnk"
+            )),
+            3
+        );
+    }
+
+    /// 手工指定优先于分类器，清除后回到自动。
+    #[test]
+    fn manual_category_overrides_classifier() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Notepad")]);
+        assert_eq!(lp.category_of(0), 3, "记事本默认归工具");
+        lp.set_category(0, Some(2));
+        assert_eq!(lp.category_of(0), 2);
+        lp.set_category(0, None);
+        assert_eq!(lp.category_of(0), 3, "清除后应当回到自动分类");
+    }
+
+    /// 分类号超出标签数时夹到最后一组，不留悬空值。
+    #[test]
+    fn category_is_clamped_to_tag_count() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("X")]);
+        lp.set_category(0, Some(99));
+        assert_eq!(lp.category_of(0), lp.tags().len());
+        lp.remove_tag(2);
+        assert_eq!(lp.category_of(0), lp.tags().len(), "删组后要重新夹紧");
+    }
+
+    /// `visible_in`：分类与搜索词是"与"的关系，隐藏项永远不出现。
+    #[test]
+    fn visible_in_combines_category_and_query() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Word"), entry("Excel"), entry("Code"), entry("Zoom")]);
+        let office = lp.visible_in(1, "");
+        assert_eq!(office.len(), 2, "Word / Excel 归办公");
+        let hit = lp.visible_in(1, "ex");
+        assert_eq!(hit.len(), 1);
+        assert_eq!(lp.apps()[hit[0]].name, "Excel");
+        assert_eq!(lp.visible_in(0, "").len(), 4, "cat=0 是全部");
+        let first = lp.apps()[0].path.clone();
+        lp.hidden.push(first);
+        assert_eq!(lp.visible_in(0, "").len(), 3, "隐藏的不出现");
+    }
+
+    /// A–Z 排序改的是**格子顺序**，不是应用表。
+    #[test]
+    fn sort_az_reorders_top_by_name() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Zoom"), entry("alpha"), entry("Beta")]);
+        lp.sort_az();
+        let names: Vec<&str> = lp.top().iter().map(|t| lp.name_of(*t)).collect();
+        assert_eq!(names, ["alpha", "Beta", "Zoom"], "大小写不敏感");
+    }
+
+    /// 标签与手工分类要能存进 dat 再读回来。
+    #[test]
+    fn tags_and_overrides_roundtrip() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Word"), entry("Code")]);
+        assert!(lp.set_tag(2, "开发"));
+        lp.add_tag("游戏");
+        lp.set_category(1, Some(4));
+        let again = Launchpad::parse(&lp.serialize());
+        assert_eq!(again.tags(), ["办公", "系统", "开发", "游戏"]);
+        assert_eq!(again.category_of(1), 4);
+        assert_eq!(again.category_of(0), 1, "没指定的仍走自动分类");
+    }
+
+    /// 原样存回的三组要能原样读回来。
+    ///
+    /// 这条钉的是一个很隐蔽的错：文件里的标签恰好等于默认三组时，
+    /// "读到第一个 G 行就清掉默认值"的判断如果写成每次都比一遍 `==`，
+    /// 读完第三组又会命中，第四行把前三个全清掉。
+    #[test]
+    fn default_tags_survive_a_roundtrip() {
+        let lp = Launchpad::new();
+        let again = Launchpad::parse(&lp.serialize());
+        assert_eq!(again.tags(), ["办公", "系统", "工具"]);
+    }
+
+    /// 删掉中间一组：后面的编号前移，落在它上面的手工指定退回自动。
+    #[test]
+    fn remove_tag_shifts_and_clears_overrides() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("A"), entry("B")]);
+        lp.add_tag("游戏");
+        lp.set_category(0, Some(2)); // A → 系统
+        lp.set_category(1, Some(3)); // B → 工具
+        assert!(lp.remove_tag(1)); // 删「系统」
+        assert_eq!(lp.tags(), ["办公", "工具", "游戏"]);
+        assert_eq!(lp.category_of(0), 3, "被删那组的指定退回自动（A 归工具）");
+        assert_eq!(lp.category_of(1), 2, "原第 3 组前移成第 2 组");
     }
 }
