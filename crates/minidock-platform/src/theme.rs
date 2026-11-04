@@ -36,14 +36,12 @@ pub fn is_dark() -> bool {
     value == 0
 }
 
-/// Windows 强调色（DWM 的着色色），`None` = 取不到（远程会话、组策略禁用等）。
+/// Windows 强调色（DWM 的着色色）原始 RGB，未做明度归一化。
 ///
-/// 归一化到**最大分量 170**：DWM 给的是用户自己调的颜色，明度差异很大 ——
-/// 冰蓝的 (200,230,255) 与深蓝的 (0,60,120) 直接拿去当烟雾色，前者会亮到
-/// 糊成白团、后者几乎看不见。压到同一上限之后只有色相在起作用，这正是
-/// "跟随强调色"想要的语义。
+/// `None` = 取不到（远程会话、组策略禁用等）。界面主题色要用这个原始值，
+/// 因为自定义色与系统色走的是同一条 COLORREF 路径；归一化版见 [`accent`]。
 #[must_use]
-pub fn accent() -> Option<[f32; 3]> {
+pub fn accent_raw() -> Option<[u8; 3]> {
     use windows::core::BOOL;
     use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
 
@@ -51,11 +49,21 @@ pub fn accent() -> Option<[f32; 3]> {
     let mut opaque = BOOL(0);
     // SAFETY: 两个参数都是本栈帧上的有效指针，调用期间不会被移动。
     unsafe { DwmGetColorizationColor(&mut color, &mut opaque) }.ok()?;
-    let rgb = [
-        ((color >> 16) & 0xFF) as f32,
-        ((color >> 8) & 0xFF) as f32,
-        (color & 0xFF) as f32,
-    ];
+    Some([
+        ((color >> 16) & 0xFF) as u8,
+        ((color >> 8) & 0xFF) as u8,
+        (color & 0xFF) as u8,
+    ])
+}
+
+/// Windows 强调色，归一化到**最大分量 170**：DWM 给的是用户自己调的颜色，
+/// 明度差异很大 —— 冰蓝的 (200,230,255) 与深蓝的 (0,60,120) 直接拿去当
+/// 烟雾色，前者会亮到糊成白团、后者几乎看不见。压到同一上限之后只有色相
+/// 在起作用，这正是烟雾"跟随强调色"想要的语义。
+#[must_use]
+pub fn accent() -> Option<[f32; 3]> {
+    let raw = accent_raw()?;
+    let rgb = [raw[0] as f32, raw[1] as f32, raw[2] as f32];
     let max = rgb[0].max(rgb[1]).max(rgb[2]);
     if max < 1.0 {
         return None;

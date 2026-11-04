@@ -70,6 +70,11 @@ mod palette {
     pub(super) const DARK_MENU: Color32 = Color32::from_rgb(38, 39, 47);
 }
 
+/// 行悬停底色：比中性 hover 多带一点主题色，扫过时能看出是哪一套配色。
+fn row_hover(ui: &Ui) -> Color32 {
+    ui.visuals().selection.bg_fill.linear_multiply(0.40)
+}
+
 /// 悬停底色（雏形的 `--hover`：浅色下一层黑、深色下一层白）。
 fn hover(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
@@ -220,7 +225,7 @@ pub(crate) fn row<R>(
             .input(|i| i.pointer.hover_pos().is_some_and(|p| band.contains(p)));
         if hovered {
             ui.painter()
-                .rect_filled(band, egui::CornerRadius::same(12), hover(ui));
+                .rect_filled(band, egui::CornerRadius::same(12), row_hover(ui));
         }
     }
 
@@ -302,7 +307,7 @@ fn hint_button(ui: &mut Ui, state: &mut SettingsState, note: &str) {
 
     let (bg, fg) = if open || resp.hovered() {
         (
-            vis.selection.bg_fill.linear_multiply(0.35),
+            vis.selection.bg_fill.linear_multiply(0.70),
             vis.selection.stroke.color,
         )
     } else {
@@ -555,6 +560,54 @@ pub(crate) fn button(ctx: &mut Ctx<'_>, ui: &mut Ui, label: &str, cmd: Command) 
     }
 }
 
+/// 主题色：来源下拉（跟随系统 / 自定义）+ 自定义时的取色器。
+///
+/// 与 `color_row` 的区别：这里"跟随系统"是一个**有效取值**（-1），
+/// 不是"没启用"；所以不用复选框，用下拉表达两种来源。
+pub(crate) fn accent_row(ctx: &mut Ctx<'_>, ui: &mut Ui) {
+    let cur = ctx.cfg.get_i32(Key::UI_ACCENT);
+    let mut custom = cur >= 0;
+    let mut rgb = {
+        let c = color::from_colorref(cur.max(0) as u32);
+        [color::red(c), color::green(c), color::blue(c)]
+    };
+    let before = custom;
+    row(
+        ui,
+        ctx.state,
+        "来源",
+        "跟随 Windows 强调色，或指定自己的颜色",
+        |ui, id| {
+            egui::ComboBox::from_id_salt("ui-accent-mode")
+                .selected_text(if custom { "自定义" } else { "跟随系统" })
+                .width(112.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut custom, false, "跟随系统")
+                        .labelled_by(id);
+                    ui.selectable_value(&mut custom, true, "自定义")
+                        .labelled_by(id);
+                })
+                .response
+                .labelled_by(id);
+            if custom {
+                ui.color_edit_button_srgb(&mut rgb).labelled_by(id);
+            }
+        },
+    );
+    if custom != before {
+        // 切到自定义时给一个可读的蓝色起点，别让用户从黑色开始调。
+        ctx.cfg
+            .apply_i32(Key::UI_ACCENT, if custom { 0x0099_6633 } else { -1 });
+        ctx.out.changed = true;
+    } else if custom {
+        let v = color::to_colorref(color::rgb(rgb[0], rgb[1], rgb[2])) as i32;
+        if v != cur {
+            ctx.cfg.apply_i32(Key::UI_ACCENT, v);
+            ctx.out.changed = true;
+        }
+    }
+}
+
 /// 自定义颜色：`-1` = 未启用，否则是 COLORREF。
 pub(crate) fn color_row(ctx: &mut Ctx<'_>, ui: &mut Ui, key: Key, label: &str) {
     let cur = ctx.cfg.get_i32(key);
@@ -646,7 +699,7 @@ fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> egui::Response {
         let vis = ui.visuals();
         let (bg, fg) = if selected {
             (
-                vis.selection.bg_fill.linear_multiply(0.30),
+                vis.selection.bg_fill.linear_multiply(0.70),
                 vis.selection.stroke.color,
             )
         } else if resp.hovered() {

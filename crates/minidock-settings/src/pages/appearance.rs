@@ -4,9 +4,20 @@ use egui::Ui;
 use minidock_core::config::Key;
 
 use super::options::{BG_OPTS, MENU_THEME_OPTS, THEME_OPTS};
-use super::widgets::{card, color_row, combo, slider, toggle, Ctx};
+use super::widgets::{accent_row, card, color_row, combo, slider, toggle, Ctx};
 
 pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
+    card(ctx, ui, "主题色", "", |ctx, ui| {
+        accent_row(ctx, ui);
+        toggle(
+            ctx,
+            ui,
+            Key::UI_ACCENT_DOCK,
+            "同步到 Dock 栏体",
+            "把主题色用到栏体渐变与运行指示点",
+        );
+    });
+
     card(ctx, ui, "尺寸", "", |ctx, ui| {
         slider(ctx, ui, Key::IconSize, "图标大小", " px");
         slider(ctx, ui, Key::ZoomSize, "放大后大小", " px");

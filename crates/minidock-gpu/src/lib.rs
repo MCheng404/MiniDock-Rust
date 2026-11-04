@@ -21,6 +21,33 @@
 
 #![deny(missing_debug_implementations)]
 
+pub mod accent;
+
+/// 从本 exe 的资源表加载应用图标（资源 ID 1，由 `build.rs` 嵌入）。
+///
+/// 资源没编进去（没装 Windows SDK / rc.exe）时返回 `None`，窗口类退化成
+/// 系统默认图标 —— 图标是外观，不能让程序起不来。
+#[must_use]
+#[expect(
+    clippy::manual_dangling_ptr,
+    reason = "Win32 MAKEINTRESOURCE 用整数 1 当资源 ID 传入，从不解引用，不是悬垂指针"
+)]
+pub fn app_icon() -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::LoadIconW;
+
+    let hinst = unsafe { GetModuleHandleW(None) }.ok()?;
+    let icon = unsafe {
+        LoadIconW(
+            Some(windows::Win32::Foundation::HINSTANCE(hinst.0)),
+            PCWSTR(1usize as *const u16), // MAKEINTRESOURCE(1)
+        )
+    }
+    .ok()?;
+    (!icon.0.is_null()).then_some(icon)
+}
+
 pub mod calendar_win;
 pub mod cc_win;
 pub mod cursor;

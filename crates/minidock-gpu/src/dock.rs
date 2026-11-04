@@ -1575,7 +1575,9 @@ impl Dock {
             CornerRadius::same(r8(dot.width().min(dot.height()) / 2.0 + p.k)),
             argbc(120, 0, 0, 0),
         );
-        let fill = if dark {
+        let fill = if let Some(a) = self.cfg.runtime_accent {
+            argbc(255, a[0], a[1], a[2])
+        } else if dark {
             argbc(255, 255, 255, 255)
         } else {
             argbc(255, 24, 26, 34)
@@ -1687,11 +1689,30 @@ impl Dock {
         }
     }
 
-    /// 栏体的两色。优先级：强调色 → 自定义色 → 主题默认。
+    /// 栏体的两色。优先级：主题色（同步开关打开时）→ 自定义背景色 → 默认。
     ///
-    /// 强调色要向 DWM 取真实色相，M1 还没接，所以它暂时与默认深浅色同值 ——
-    /// 两个分支合并成一条，避免"改了一处忘了另一处"。
+    /// 主题色不直接拿来铺满栏体（会太艳）：浅色下往白里掺 16%~28%，
+    /// 深色下往默认深灰里掺 20%~32%，只借它的色相。
     fn bar_colors(&self, dark: bool) -> ((f32, f32, f32), (f32, f32, f32)) {
+        if let Some(a) = self.cfg.runtime_accent {
+            let t = [a[0] as f32, a[1] as f32, a[2] as f32];
+            let mix = |base: [f32; 3], k: f32| {
+                [
+                    base[0] * (1.0 - k) + t[0] * k,
+                    base[1] * (1.0 - k) + t[1] * k,
+                    base[2] * (1.0 - k) + t[2] * k,
+                ]
+            };
+            return if dark {
+                let c1 = mix([58.0, 60.0, 68.0], 0.30);
+                let c2 = mix([30.0, 31.0, 36.0], 0.22);
+                ((c1[0], c1[1], c1[2]), (c2[0], c2[1], c2[2]))
+            } else {
+                let c1 = mix([255.0, 255.0, 255.0], 0.16);
+                let c2 = mix([232.0, 235.0, 243.0], 0.28);
+                ((c1[0], c1[1], c1[2]), (c2[0], c2[1], c2[2]))
+            };
+        }
         if !self.cfg.accent_tone && self.cfg.bg_color1 >= 0 {
             let c1 = color::from_colorref(self.cfg.bg_color1 as u32);
             let c2 = if self.cfg.bg_color2 >= 0 {

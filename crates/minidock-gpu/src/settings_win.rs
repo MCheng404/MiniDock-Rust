@@ -141,6 +141,7 @@ impl SettingsWindow {
             lpszClassName: class_pcwstr(),
             // 类光标留空 = 进入窗口时显示忙光标（ADR-045）。
             hCursor: crate::cursor::class_cursor(),
+            hIcon: crate::app_icon().unwrap_or_default(),
             ..Default::default()
         };
         unsafe {
@@ -476,6 +477,8 @@ impl SettingsWindow {
 /// 公开是因为离屏截图（`examples/settings_shot.rs`）要画**同一份**外壳 ——
 /// 自己再拼一个近似版，截出来的图就不能代表真实窗口了。
 pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out: &mut Outcome) {
+    // 主题色必须在建任何子 Ui 之前灌进 Visuals：子 Ui 继承创建时的样式。
+    crate::accent::apply_visuals(ui, cfg);
     let rect = ui.max_rect();
     let dark = ui.visuals().dark_mode;
     // 250/255：圆角外侧留一点透明让边缘融进桌面，又不至于让壁纸干扰阅读。

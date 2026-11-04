@@ -18,6 +18,7 @@
 use std::io::Write as _;
 
 use minidock_core::config::Config;
+use minidock_core::config::Key;
 use minidock_gpu::frame::FrameRenderer;
 use minidock_gpu::gpu::Gpu;
 use minidock_gpu::settings_win::{shell, LOGICAL_SIZE};
@@ -70,6 +71,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats: "空闲 · 0 帧/秒 · 上一次出帧 42 ms 前".to_owned(),
         ..SettingsState::default()
     };
+    // `accent=RRGGBB`：自定义主题色出图（默认 -1 = 跟随系统）。
+    if let Some(hex) = rest.iter().find_map(|a| a.strip_prefix("accent=")) {
+        if let Ok(v) = u32::from_str_radix(hex, 16) {
+            // COLORREF 是 0x00BBGGRR，参数是 0xRRGGBB。
+            let r = (v >> 16) & 0xFF;
+            let g = (v >> 8) & 0xFF;
+            let b = v & 0xFF;
+            cfg.apply_i32(Key::UI_ACCENT, (b << 16 | g << 8 | r) as i32);
+        }
+    }
     if tip {
         state.tip = Some(minidock_settings::pages::Tip {
             #[expect(deprecated, reason = "截图用的一次性 id")]

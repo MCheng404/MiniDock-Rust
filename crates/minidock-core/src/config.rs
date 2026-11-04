@@ -102,7 +102,7 @@ fn section_of_numeric(name: &str) -> &'static str {
         // 起动台毛玻璃。
         "LpFrost" => return "widgets.launchpad",
         // 设置窗口毛玻璃 / 栏体左右内边距 / 界面缩放。
-        "UiFrost" | "HPad" | "UiScale" => return "appearance",
+        "UiFrost" | "HPad" | "UiScale" | "UiAccent" | "UiAccentDock" => return "appearance",
         // 右键菜单毛玻璃。
         "MenuFrost" => return "menu",
         // 分割线拖动等比缩放。
@@ -278,6 +278,11 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     // 只作用于设置窗口 —— Dock 的尺寸由图标大小等键自己管。
     // 下限 80：再小窗口就小到没法点了；下限以下的杂值按"跟随系统"处理。
     ("UiScale", 0, 300, 0, false, false),
+    // 界面主题色：-1 = 跟随系统 DWM 强调色，0..0xFFFFFF = COLORREF 自定义色。
+    // 作用于设置窗口全部控件；UiAccentDock 打开时同步到 Dock 栏体。
+    ("UiAccent", -1, 16777215, -1, false, false),
+    // 主题色是否也作用到 Dock（栏体渐变 + 运行指示点）。
+    ("UiAccentDock", 0, 1, 0, true, false),
 ];
 
 impl Key {
@@ -483,6 +488,10 @@ impl Key {
     pub const PANEL_DISMISS: Key = Key::Numeric(94);
     /// `UiScale`：设置窗口的界面缩放百分比；0 = 跟随系统。
     pub const UI_SCALE: Key = Key::Numeric(95);
+    /// `UiAccent`：界面主题色；-1 = 跟随系统强调色。
+    pub const UI_ACCENT: Key = Key::Numeric(96);
+    /// `UiAccentDock`：主题色是否同步到 Dock。
+    pub const UI_ACCENT_DOCK: Key = Key::Numeric(97);
 }
 
 impl Key {
@@ -634,6 +643,8 @@ impl Key {
         Key::SMOKE_CLOUDS,
         Key::PANEL_DISMISS,
         Key::UI_SCALE,
+        Key::UI_ACCENT,
+        Key::UI_ACCENT_DOCK,
     ];
 
     /// 需要读写的全部键：行序表在前，自有键在后。
@@ -1079,6 +1090,10 @@ pub struct Config {
     /// 那些键与 ini 行序一一对应，是刻意保留的对应关系，
     /// 这个键是 Rust 版独有的，混进去会破坏这条不变式。
     pub adapter: String,
+    /// 运行时主题色（RGB 0..255）。由窗口层按 `UiAccent` 解析后写入，
+    /// 不参与 ini 读写 —— 系统强调色是环境值，不该被保存到配置里。
+    /// `None` = 使用主题默认配色。
+    pub runtime_accent: Option<[u8; 3]>,
 }
 
 impl Config {
@@ -1140,6 +1155,7 @@ impl Config {
                 .collect(),
 
             adapter: String::new(),
+            runtime_accent: None,
         }
     }
 
@@ -1596,6 +1612,8 @@ mod tests {
             (Key::SMOKE_CLOUDS, "SmokeClouds"),
             (Key::PANEL_DISMISS, "PanelDismiss"),
             (Key::UI_SCALE, "UiScale"),
+            (Key::UI_ACCENT, "UiAccent"),
+            (Key::UI_ACCENT_DOCK, "UiAccentDock"),
         ];
         for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");

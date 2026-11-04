@@ -317,6 +317,8 @@ impl App {
             // Windows 会退回忙光标（沙漏），表现为"鼠标一进 Dock 就转"。
             // 见 `gpu::cursor` / ADR-045。
             hCursor: minidock_gpu::cursor::class_cursor(),
+            // 任务栏 / Alt+Tab 用 exe 资源里的应用图标。
+            hIcon: minidock_gpu::app_icon().unwrap_or_default(),
             ..Default::default()
         };
         unsafe {
@@ -1700,6 +1702,14 @@ impl App {
         }
 
         let ppp = self.ppp;
+        // 主题色同步到 Dock：运行时值不写 ini，每帧出图时重算一次
+        // （空闲时本就不出帧，DWM 调用可以忽略）。必须在下面取 `&Dock`
+        // 之前写 —— 之后 cfg 就被不可变借用了。
+        self.dock.cfg.runtime_accent = if self.dock.cfg.get_i32(Key::UI_ACCENT_DOCK) != 0 {
+            minidock_gpu::accent::resolve(&self.dock.cfg)
+        } else {
+            None
+        };
         let dock = &*self.dock;
         // 烟雾的输入全部在闭包外取好：闭包里同时持有 `&Dock` 与
         // `&mut SmokeFx`，再读 `self` 的其它字段就会撞借用。
@@ -2377,6 +2387,7 @@ fn register_menu_class() -> Result<(), Box<dyn std::error::Error>> {
             lpszClassName: w!("MiniDockMenuWindow"),
             // 同上：类光标留空 = 忙光标（ADR-045）。
             hCursor: minidock_gpu::cursor::class_cursor(),
+            hIcon: minidock_gpu::app_icon().unwrap_or_default(),
             ..Default::default()
         };
         RegisterClassW(&raw const wc);
