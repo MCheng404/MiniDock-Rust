@@ -60,6 +60,23 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
 
     card(ctx, ui, "设置界面", "", |ctx, ui| {
         combo(ctx, ui, Key::UiTheme, "设置窗口主题", UI_THEME_OPTS);
+        // 界面缩放：字体与按钮、行高、卡片间距一起缩（egui 的 ppp）。
+        // 改完由主循环就地重建窗口，不用重开。
+        combo(
+            ctx,
+            ui,
+            Key::UI_SCALE,
+            "界面缩放",
+            &[
+                (0, "跟随系统"),
+                (100, "100%"),
+                (110, "110%"),
+                (125, "125%"),
+                (150, "150%"),
+                (175, "175%"),
+                (200, "200%"),
+            ],
+        );
     });
 
     card(ctx, ui, "数据", "", |ctx, ui| {

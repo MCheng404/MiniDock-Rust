@@ -32,6 +32,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rest: Vec<String> = args.collect();
     let dark = rest.iter().any(|a| a == "dark");
     let tip = rest.iter().any(|a| a == "tip");
+    // 界面缩放（自定义 DPI）：裸数字按百分比（150 -> 1.5）。验证 UiScale
+    // 键的渲染 —— 字体与所有元素一起放大，逻辑布局不变。
+    let scale = rest
+        .iter()
+        .filter_map(|a| a.parse::<f32>().ok())
+        .next()
+        .map_or(1.0, |v| (v / 100.0).clamp(0.8, 3.0));
 
     let page = match page_name.as_deref() {
         None => Page::Appearance,
@@ -42,8 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (lw, lh) = LOGICAL_SIZE;
-    // 截图固定 1.0：BMP 没有 DPI 概念，用 2 倍只是把文件变大四倍。
-    let ppp = 1.0_f32;
+    let ppp = scale;
     let (w, h) = ((lw * ppp) as u32, (lh * ppp) as u32);
 
     let gpu = Gpu::new("")?;

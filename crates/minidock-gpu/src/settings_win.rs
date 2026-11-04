@@ -32,10 +32,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetForegroundWindow, GetWindowLongPtrW, RegisterClassW,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, GWLP_USERDATA, SW_HIDE, SW_SHOW,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_APPWINDOW,
-    WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -52,6 +52,24 @@ pub const CLASS_NAME: &str = "MiniDockSettings";
 /// 否则截出来的排版不代表真实窗口。雏形 `docs/settings-prototype.html`
 /// 里写的也是这两个数。
 pub const LOGICAL_SIZE: (f32, f32) = (893.0, 720.0);
+
+/// 设置窗口的有效缩放（pixels per point）。
+///
+/// `UiScale` 就是“自定义 DPI”：0（以及 80 以下的杂值）= 跟随系统 DPI；
+/// 80..=300 按百分比**直接生效** —— 与 Windows 自定义缩放一致，是覆盖
+/// 而不是叠加：系统 150% 下选 125% 得到的是 125%，不是 187%。
+///
+/// 字体、按钮、行高、卡片间距全部跟着走（egui 的一切尺寸都以 point
+/// 计，ppp 是唯一的缩放入口），所以一个键就能整体调大小。
+#[must_use]
+pub fn effective_ppp(cfg: &Config) -> f32 {
+    let pct = cfg.get_i32(Key::UI_SCALE);
+    if (80..=300).contains(&pct) {
+        pct as f32 / 100.0
+    } else {
+        minidock_platform::display::system_dpi() as f32 / 96.0
+    }
+}
 
 /// 设置窗口及其专属渲染器。
 pub struct SettingsWindow {
@@ -202,6 +220,31 @@ impl SettingsWindow {
 
     /// 显示并激活。已经显示时只把它提到前面：重复 `SetForegroundWindow`
     /// 在同一进程内是被允许的，不会有前台锁问题。
+    /// 当前生效的缩放。主循环拿它和配置算出的目标值比较，变了就 rescale。
+    #[must_use]
+    pub fn ppp(&self) -> f32 {
+        self.ppp
+    }
+
+    /// 就地把窗口重建到新的缩放（自定义 DPI 改动时调用）。
+    ///
+    /// 渲染器整个换新：离屏缓冲、DIB 与 egui 上下文都按新 ppp 重建
+    /// （字体图集重新上传，几十毫秒，设置改动可以接受）。窗口矩形同步
+    /// 调整并重新居中 —— 逻辑尺寸不变，变的是物理尺寸。
+    pub fn rescale(&mut self, gpu: &Gpu, ppp: f32) -> Result<(), GpuError> {
+        if (self.ppp - ppp).abs() < f32::EPSILON {
+            return Ok(());
+        }
+        let (pw, ph) = physical_size(ppp);
+        self.renderer = FrameRenderer::new(gpu, pw as u32, ph as u32, ppp)?;
+        self.ppp = ppp;
+        let (x, y) = centered_origin(pw, ph);
+        self.pos = (x, y);
+        unsafe { SetWindowPos(self.hwnd, None, x, y, pw, ph, SWP_NOACTIVATE | SWP_NOZORDER) }
+            .map_err(|_| GpuError::Win32("SetWindowPos（设置窗口缩放）"))?;
+        Ok(())
+    }
+
     pub fn show(&mut self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
@@ -583,5 +626,31 @@ fn current_modifiers() -> egui::Modifiers {
         shift: down(VK_SHIFT.0),
         mac_cmd: false,
         command: down(VK_CONTROL.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 自定义缩放的取值规则：0 = 跟随系统；80..=300 生效；80 以下的杂值
+    /// 回落系统（clamp 兜着 ini，但规则上也要兜住）。
+    #[test]
+    fn 自定义缩放的取值规则() {
+        let mut cfg = Config::defaults(96);
+        let sys = minidock_platform::display::system_dpi() as f32 / 96.0;
+
+        // 默认 0：跟随系统
+        assert!((effective_ppp(&cfg) - sys).abs() < 1e-6);
+
+        // 生效区间：覆盖而不是叠加 —— 125% 就是 1.25
+        cfg.apply_i32(Key::UI_SCALE, 125);
+        assert!((effective_ppp(&cfg) - 1.25).abs() < 1e-6);
+        cfg.apply_i32(Key::UI_SCALE, 300);
+        assert!((effective_ppp(&cfg) - 3.0).abs() < 1e-6);
+
+        // 80 以下：按跟随系统处理
+        cfg.apply_i32(Key::UI_SCALE, 50);
+        assert!((effective_ppp(&cfg) - sys).abs() < 1e-6);
     }
 }

@@ -101,8 +101,8 @@ fn section_of_numeric(name: &str) -> &'static str {
         "TrayW" | "WMerge" => return "widgets",
         // 起动台毛玻璃。
         "LpFrost" => return "widgets.launchpad",
-        // 设置窗口毛玻璃 / 栏体左右内边距。
-        "UiFrost" | "HPad" => return "appearance",
+        // 设置窗口毛玻璃 / 栏体左右内边距 / 界面缩放。
+        "UiFrost" | "HPad" | "UiScale" => return "appearance",
         // 右键菜单毛玻璃。
         "MenuFrost" => return "menu",
         // 分割线拖动等比缩放。
@@ -274,6 +274,10 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("SmokeClouds", 0, 1, 1, true, false),
     // 小组件面板的关闭方式：点击面板外面就收起。
     ("PanelDismiss", 0, 1, 1, true, false),
+    // 设置窗口的界面缩放（自定义 DPI）：0 = 跟随系统，80..300 为百分比。
+    // 只作用于设置窗口 —— Dock 的尺寸由图标大小等键自己管。
+    // 下限 80：再小窗口就小到没法点了；下限以下的杂值按"跟随系统"处理。
+    ("UiScale", 0, 300, 0, false, false),
 ];
 
 impl Key {
@@ -477,6 +481,8 @@ impl Key {
     pub const SMOKE_CLOUDS: Key = Key::Numeric(93);
     /// `PanelDismiss`
     pub const PANEL_DISMISS: Key = Key::Numeric(94);
+    /// `UiScale`：设置窗口的界面缩放百分比；0 = 跟随系统。
+    pub const UI_SCALE: Key = Key::Numeric(95);
 }
 
 impl Key {
@@ -627,6 +633,7 @@ impl Key {
         Key::SMOKE_REACH,
         Key::SMOKE_CLOUDS,
         Key::PANEL_DISMISS,
+        Key::UI_SCALE,
     ];
 
     /// 需要读写的全部键：行序表在前，自有键在后。
@@ -1588,6 +1595,7 @@ mod tests {
             (Key::SMOKE_REACH, "SmokeReach"),
             (Key::SMOKE_CLOUDS, "SmokeClouds"),
             (Key::PANEL_DISMISS, "PanelDismiss"),
+            (Key::UI_SCALE, "UiScale"),
         ];
         for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");

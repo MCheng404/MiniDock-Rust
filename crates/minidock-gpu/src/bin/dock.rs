@@ -32,7 +32,7 @@ use minidock_gpu::gpu::Gpu;
 use minidock_gpu::launchpad_win::LaunchpadWindow;
 use minidock_gpu::menu::{Menu, MenuCmd};
 use minidock_gpu::resmon_win::ResMonWindow;
-use minidock_gpu::settings_win::SettingsWindow;
+use minidock_gpu::settings_win::{self, SettingsWindow};
 use minidock_gpu::smoke::{SmokeFx, View as SmokeView};
 use minidock_gpu::tool_win::ToolWindow;
 use minidock_gpu::worker::{
@@ -753,8 +753,14 @@ impl App {
             } else if cmd == MenuCmd::Settings {
                 // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
                 // 那儿没有 `gpu`，也不该有。
-                let sw =
-                    ensure_settings(&self.gpu, &mut self.settings_slot, &self.paths, self.ppp)?;
+                // 创建时就用配置算出的有效缩放 —— 上次会话改过缩放的话，
+                // 这次打开直接就是新尺寸。
+                let sw = ensure_settings(
+                    &self.gpu,
+                    &mut self.settings_slot,
+                    &self.paths,
+                    settings_win::effective_ppp(&self.dock.cfg),
+                )?;
                 // 每次打开都重读：用户可能刚在任务管理器里改过它。
                 sw.state.auto_start = theme::get_autostart();
                 sw.show();
@@ -2594,6 +2600,13 @@ fn tick_settings(
         let out = std::mem::take(&mut sw.outcome);
         changed = out.changed;
         cmd = out.command;
+
+        // 自定义缩放：配置变了就地把窗口重建到新 DPI。放在 render 之后，
+        // 用户在界面里一改下拉、下一帧就是新尺寸，不用重开。
+        let want = settings_win::effective_ppp(&dock.cfg);
+        if (sw.ppp() - want).abs() > f32::EPSILON {
+            sw.rescale(gpu, want)?;
+        }
     }
     // Esc 与"关闭"都走这个标志。命令已经取出来了，由调用方在隐藏之后
     // 结算 —— 隐藏不影响命令本身（它要改的是 `cfg` 与条目）。
