@@ -238,6 +238,10 @@ impl SettingsWindow {
         let (pw, ph) = physical_size(ppp);
         self.renderer = FrameRenderer::new(gpu, pw as u32, ph as u32, ppp)?;
         self.ppp = ppp;
+        // 渲染器换新 = egui 上下文换新（默认深色 visuals）。`ui_theme` 里
+        // 还留着旧上下文的主题标记，`apply_theme` 会以为"已经应用过"而
+        // 跳过 —— 浅色用户一调缩放就跳回深色。置回 None 强制下一帧重套。
+        self.ui_theme = None;
         let (x, y) = centered_origin(pw, ph);
         self.pos = (x, y);
         unsafe { SetWindowPos(self.hwnd, None, x, y, pw, ph, SWP_NOACTIVATE | SWP_NOZORDER) }
