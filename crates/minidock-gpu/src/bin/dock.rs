@@ -115,6 +115,12 @@ mod trace {
         static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_MENU_TRACE"));
         *V
     }
+
+    /// 面板"点外面收起"的判定。
+    pub fn popup() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_POPUP_TRACE"));
+        *V
+    }
 }
 
 // ============================ 应用状态 ============================
@@ -169,6 +175,13 @@ struct App {
     launchpad_slot: Option<Pin<Box<LaunchpadWindow>>>,
     /// `MINIDOCK_DEBUG_OPEN` 只处理一次。
     debug_opened: bool,
+    /// 面板的「点外面收起」：全局鼠标按键轮询。
+    ///
+    /// 不用鼠标捕获 —— 见 [`minidock_gpu::popup`] 顶部的说明：
+    /// 只有前台窗口能抓鼠标，而 Dock 从不去抢前台。
+    watcher: minidock_gpu::popup::Watcher,
+    /// 上一轮有没有面板开着。用来在"刚打开"那一刻重置 `watcher`。
+    panel_was_open: bool,
     /// 上一次启动应用的时间点（距进程启动的毫秒数）。
     ///
     /// 用途见 [`LAUNCH_GRACE_MS`]：刚启动的应用常常先以最大化/全屏姿态出现，
@@ -445,6 +458,8 @@ impl App {
             cc_slot,
             launchpad_slot,
             debug_opened,
+            watcher: minidock_gpu::popup::Watcher::default(),
+            panel_was_open: false,
             last_launch_ms,
             tool_save_at,
             widgets_dump,
@@ -526,7 +541,9 @@ impl App {
             need_frame |= self.step_fullscreen();
             // ⑪ 自动隐藏 / 智能隐藏。
             need_frame |= self.step_auto_hide();
-            // ⑫ 环境烟雾：自己控制帧率（见 `step_smoke`）。
+            // ⑫ 点面板外面收起（轮询全局按键，见 `popup`）。
+            need_frame |= self.step_panel_dismiss();
+            // ⑬ 环境烟雾：自己控制帧率（见 `step_smoke`）。
             need_frame |= self.step_smoke();
 
             if need_frame || self.dock.anim {
@@ -616,6 +633,8 @@ impl App {
                 self.dock.mouse, self.dock.geom.slot_l
             );
         }
+        // 点条目 = 要切应用，面板该让位（点卡片的路径不走这里）。
+        self.hide_panels();
         // 图标数与配置不一致时不要静默吞掉，这类错配要能看见。
         let Some(item) = self.item_at(i) else {
             eprintln!("点击了第 {i} 项，但配置里没有对应条目");
@@ -1177,6 +1196,97 @@ impl App {
         Ok(true)
     }
 
+    /// 四块面板各自的「可见 / 句柄」。
+    ///
+    /// 三处判定（有没有面板开着、点是不是落在面板里、全部收起）都按同一份
+    /// 清单走 —— 加第五块面板时只需要在这里补一项。
+    fn panels(&self) -> [Option<(bool, HWND)>; 4] {
+        [
+            self.calendar_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.cc_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.resmon_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.tool_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+        ]
+    }
+
+    /// 有面板开着吗。
+    fn panel_open(&self) -> bool {
+        self.panels().iter().flatten().any(|(visible, _)| *visible)
+    }
+
+    /// 这个屏幕点是否落在某个**可见**面板里。
+    fn panel_covers(&self, x: i32, y: i32) -> bool {
+        self.panels()
+            .iter()
+            .flatten()
+            .any(|(visible, hwnd)| *visible && minidock_gpu::popup::hits(*hwnd, x, y))
+    }
+
+    /// 收起全部面板。返回是否真的收了什么。
+    fn hide_panels(&mut self) -> bool {
+        let mut any = false;
+        if let Some(w) = self.calendar_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.cc_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.resmon_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.tool_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// 点面板外面收起（`[widgets] PanelDismiss`）。返回是否收起。
+    ///
+    /// 三处命中都不关：
+    ///
+    /// - **落在 Dock 上**：交给点击逻辑自己处理 —— 点卡片是切换、点图标是
+    ///   启动。放行之后"点一下就把面板收掉、应用却没动静"就不会发生。
+    /// - **落在面板里**：用户在操作面板。
+    /// - **配置关掉了**：这一项就是让用户不要自动收起。
+    fn step_panel_dismiss(&mut self) -> bool {
+        // 刚打开：把"打开它的那一下"的边沿丢掉，否则鼠标一离开 Dock
+        // 就会被读成一次新的点击，面板立刻自己关掉。
+        let open = self.panel_open();
+        if open && !self.panel_was_open {
+            self.watcher.reset();
+        }
+        self.panel_was_open = open;
+        // 没面板就什么都不做，连按键状态都不问。
+        if !open {
+            return false;
+        }
+        let Some((x, y)) = self.watcher.poll() else {
+            return false;
+        };
+        if self.dock.cfg.get_i32(Key::PANEL_DISMISS) == 0 {
+            return false;
+        }
+        if minidock_gpu::popup::hits(self.hwnd, x, y) || self.panel_covers(x, y) {
+            return false;
+        }
+        if trace::popup() {
+            eprintln!("[popup] 面板外点了 ({x}, {y})，收起");
+        }
+        self.hide_panels()
+    }
+
     fn step_resmon(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
         if self.debug_open_once()? {
             // 这一帧先把面板建出来，下一帧再画。
@@ -1231,13 +1341,20 @@ impl App {
                     }
                 }
                 minidock_core::layout::WidgetKind::Resource => {
-                    if self.resmon_slot.is_none() {
-                        let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
-                        win.attach_public();
-                        self.resmon_slot = Some(win);
-                    }
-                    if let Some(win) = self.resmon_slot.as_mut() {
-                        win.show();
+                    // 与日历一样：卡片点第二下就收起。
+                    if self.resmon_slot.as_ref().is_some_and(|w| w.visible()) {
+                        if let Some(w) = self.resmon_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        if self.resmon_slot.is_none() {
+                            let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
+                            win.attach_public();
+                            self.resmon_slot = Some(win);
+                        }
+                        if let Some(win) = self.resmon_slot.as_mut() {
+                            win.show();
+                        }
                     }
                 }
                 minidock_core::layout::WidgetKind::CtrlCenter => {
@@ -1276,18 +1393,25 @@ impl App {
                     minidock_platform::sysact::open_tray();
                 }
                 minidock_core::layout::WidgetKind::Tool => {
-                    if self.tool_slot.is_none() {
-                        // 第一次打开才读 `[Tool]` 段：面板关着时它不在内存里，
-                        // 也不该在 —— 没人看的东西没必要常驻。
-                        let ini = Ini::load(&self.paths.ini)?;
-                        let state = minidock_core::tool::ToolState::load(&ini);
-                        let win = ToolWindow::new(&self.gpu, self.ppp, dark, state)?;
-                        self.tool_slot = Some(win);
-                    }
-                    if let Some(win) = self.tool_slot.as_mut() {
-                        win.show();
-                        if trace::geom() {
-                            eprintln!("[widget] 计时器面板已显示");
+                    // 卡片点第二下收起。
+                    if self.tool_slot.as_ref().is_some_and(|w| w.visible()) {
+                        if let Some(w) = self.tool_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        if self.tool_slot.is_none() {
+                            // 第一次打开才读 `[Tool]` 段：面板关着时它不在内存里，
+                            // 也不该在 —— 没人看的东西没必要常驻。
+                            let ini = Ini::load(&self.paths.ini)?;
+                            let state = minidock_core::tool::ToolState::load(&ini);
+                            let win = ToolWindow::new(&self.gpu, self.ppp, dark, state)?;
+                            self.tool_slot = Some(win);
+                        }
+                        if let Some(win) = self.tool_slot.as_mut() {
+                            win.show();
+                            if trace::geom() {
+                                eprintln!("[widget] 计时器面板已显示");
+                            }
                         }
                     }
                 }
@@ -1625,6 +1749,11 @@ impl App {
         } else {
             FS_CHECK_MS
         };
+        // 面板开着时按轮询节拍醒：`step_panel_dismiss` 要看全局按键状态，
+        // 睡满 1 秒才醒的话，点外面得等一秒才收。
+        if self.panel_open() && self.dock.cfg.get_i32(Key::PANEL_DISMISS) != 0 {
+            timeout = timeout.min(minidock_gpu::popup::POLL_MS);
+        }
         // 烟雾按自己的节奏睡：睡满 16 ms 再发现"还差 17 ms"是每秒白醒
         // 30 次，而每次醒来都要过一遍消息队列与全部 step。
         if Tuning::from_config(&self.dock.cfg, self.accent).enabled && !self.fs_hidden {

@@ -1204,8 +1204,8 @@ impl Dock {
             Color32::from_rgba_unmultiplied(232, 30, 32, 40)
         };
         // egui 不会自动缩字，所以先量再缩 ——
-        // 这里量一次宽度，装不下就缩字号。卡片留 4 px 内边距。
-        let mut size = self.small_font_size();
+        // 这里量一次宽度，装不下就缩字号。卡片留 4 逻辑点内边距。
+        let mut size = self.card_font_size(c.height());
         let avail = c.width() - 8.0;
         // 用 galley 量真实文字宽度（`row_height` 只给行高，量不出字宽）。
         let galley = ctx.fonts_mut(|f| {
@@ -1227,18 +1227,20 @@ impl Dock {
         );
     }
 
-    /// 资源监视器卡片用的字号。
+    /// 小组件卡片上文字的字号（**逻辑点**）。
     ///
-    /// 固定 10 逻辑像素。
-    /// 这里不能沿用成固定值 —— 卡片宽度是 `barH × 1.16`，栏高会随
-    /// 条目数量被压缩（128 个条目时 `barH` 从 76 掉到 37），
-    /// 固定 10pt 在窄卡片里会被裁成 "PU%"。
+    /// 直接给固定值会坏两件事：
     ///
-    /// 所以按**栏高**的比例走：`barH × 0.27` 在 76 栏高下约 20 物理像素
-    /// （= 13.5 逻辑点），栏高被压缩时同比缩小，
-    /// 文字始终装得下。
-    fn small_font_size(&self) -> f32 {
-        (self.metrics.bar_h * 0.27).max(8.0)
+    /// 1. 卡片宽度是 `barH × 1.16`，栏高会随条目数量被压缩（128 个条目时
+    ///    `barH` 从 76 掉到 37），固定字号在窄卡片里会被裁成 "PU%"；
+    /// 2. 拿 `metrics.bar_h`（**物理像素**）当逻辑点用，等于把 DPI 乘了
+    ///    两遍 —— 150% 缩放下字会变成 100% 的 2.25 倍。
+    ///
+    /// 所以传进来的是卡片的**逻辑高度**：`c.height()` 已经除过 `ppp`，
+    /// 用它算出来的字号在 100% / 150% / 200% 下是同一物理尺寸，
+    /// 栏高被压缩时又同比缩小。宽度装不下时调用方还会再缩一次。
+    fn card_font_size(&self, card_h: f32) -> f32 {
+        (card_h * 0.27).max(9.0)
     }
 
     /// 刷新系统采样。
@@ -1288,26 +1290,47 @@ impl Dock {
         };
         // 卡片高度按**行数均分**。
         // 写死两行会出错：只显示时间或只显示日期时只有一行。
+        //
+        // 字号从行高推，单位是**逻辑点**。以前写的是 `14.0 * p.k` ——
+        // 那是"固定 14 物理像素"，在 150% 缩放下只有 9.3 逻辑点，
+        // 比悬停气泡（12 逻辑点）还小一圈，这就是"时间日期字号偏小"的来源。
+        // 行高本身已经除过 `ppp`，拿它推字号，100% / 150% / 200% 下
+        // 物理尺寸一致。
         let n = lines.len().max(1);
-        let line_h = (c.height() - 8.0 * p.k) / n as f32;
+        // 横向留白比纵向大：日期那行几乎顶满卡片，贴着圆角很难看。
+        const PAD_X: f32 = 6.0;
+        const PAD_Y: f32 = 4.0;
+        let line_h = (c.height() - PAD_Y * 2.0) / n as f32;
+        let avail = c.width() - PAD_X * 2.0;
         let mut prev: Option<&ClockLine> = None;
         for (k, line) in lines.iter().enumerate() {
-            let (size, color) = if line.is_date { (11.0, dc) } else { (14.0, tc) };
+            // 时间比日期大一号：汉字在同样字号下比数字"重"，比例再拉大会
+            // 让日期反而喧宾夺主。
+            let mut size = clock_line_size(line_h, line.is_date);
+            let color = if line.is_date { dc } else { tc };
+            // 装不下就按真实字宽缩：中文日期 + 周几最容易顶到卡片边。
+            let w = painter
+                .layout_no_wrap(line.text.clone(), FontId::proportional(size), color)
+                .size()
+                .x;
+            if w > avail && w > 0.0 {
+                size *= avail / w;
+            }
             painter.text(
                 EguiRect::from_min_max(
-                    Pos2::new(c.left(), c.top() + 4.0 * p.k + line_h * k as f32),
-                    Pos2::new(c.right(), c.top() + 4.0 * p.k + line_h * (k + 1) as f32),
+                    Pos2::new(c.left(), c.top() + PAD_Y + line_h * k as f32),
+                    Pos2::new(c.right(), c.top() + PAD_Y + line_h * (k + 1) as f32),
                 )
                 .center(),
                 Align2::CENTER_CENTER,
                 &line.text,
-                FontId::proportional(size * p.k),
+                FontId::proportional(size),
                 color,
             );
             // 时间组与日期组之间一条细线。
             if let Some(pv) = prev {
                 if pv.is_date != line.is_date {
-                    let y = c.top() + 4.0 * p.k + line_h * k as f32;
+                    let y = c.top() + PAD_Y + line_h * k as f32;
                     let ink = if dark {
                         argbc(90, 255, 255, 255)
                     } else {
@@ -1883,6 +1906,16 @@ fn to_rgb(c: color::Argb) -> (f32, f32, f32) {
     )
 }
 
+/// 时钟卡片某一行的字号（**逻辑点**）。
+///
+/// 输入是行高（逻辑点），不是物理像素 —— 见 ADR-051。乘 `p.k` 会让字号
+/// 固定成物理像素、不随 DPI 缩放；直接用 `bar_h`（物理）则是把 DPI 乘两遍。
+#[must_use]
+fn clock_line_size(line_h: f32, is_date: bool) -> f32 {
+    let ratio = if is_date { 0.44 } else { 0.70 };
+    (line_h * ratio).max(9.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1900,6 +1933,39 @@ mod tests {
 
         let [r, g, b, a] = argbc(255, 245, 245, 247).to_srgba_unmultiplied();
         assert_eq!((r, g, b, a), (245, 245, 247, 255));
+    }
+
+    /// 小组件字号随 DPI 同比放大：换算回**逻辑点**后必须恒定。
+    ///
+    /// 钉的是 ADR-051 那个坑 —— 时钟曾经写死 `14.0 * p.k`（等于固定 14 物理
+    /// 像素，150% 下只有 9.3 逻辑点，比悬停气泡还小），资源卡片则把物理
+    /// `bar_h` 当逻辑点用（DPI 乘两遍）。谁再往字号上乘 `p.k`、或者直接拿
+    /// `bar_h` 当字号，这条会红。
+    #[test]
+    fn widget_font_keeps_logical_size_across_dpi() {
+        let mut sizes = Vec::new();
+        for dpi in [96, 120, 144, 192] {
+            let ppp = dpi as f32 / 96.0;
+            let cfg = Config::defaults(dpi);
+            let m = layout::calc_metrics(&cfg, dpi, 3, 0, LRect::new(0, 0, 2560, 1400));
+            // 卡片逻辑高度 = 物理 ÷ ppp；两行各占一半，上下各 4 逻辑点。
+            let line_h = (m.bar_h / ppp - 8.0) / 2.0;
+            sizes.push((
+                clock_line_size(line_h, false),
+                clock_line_size(line_h, true),
+            ));
+        }
+        // 容差 1 逻辑点：`bar_h` 是**取整到整数物理像素**的，除以 ppp 之后
+        // 天然有 ±0.5 的抖动。真正的单位错误（乘 `p.k` 或直接用 `bar_h`）
+        // 会让差值翻倍甚至更多，这条拦得住。
+        let (time0, date0) = sizes[0];
+        for (t, d) in &sizes {
+            assert!((t - time0).abs() <= 1.0, "时间字号随 DPI 漂了：{sizes:?}");
+            assert!((d - date0).abs() <= 1.0, "日期字号随 DPI 漂了：{sizes:?}");
+        }
+        assert!(time0 > date0, "时间应当比日期大一号：{sizes:?}");
+        // 150% 下不能再是"9 逻辑点"那种迷你字。
+        assert!(time0 > 14.0, "时间字号偏小：{time0}");
     }
 
     /// 圆角 + 渐变必须真的走网格，且轮廓要离开矩形四角。

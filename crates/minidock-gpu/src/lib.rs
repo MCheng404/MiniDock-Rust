@@ -33,6 +33,7 @@ pub mod launchpad_win;
 pub mod mem;
 pub mod menu;
 pub mod offscreen;
+pub mod popup;
 pub mod present;
 pub mod resmon_win;
 pub mod settings_win;

@@ -7,9 +7,7 @@
 //! 与资源监视器 / 计时器面板的差别只有两点：
 //!
 //! - **它是弹层，不是面板**。用 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`，
-//!   并且靠"鼠标移出矩形就关"来 dismiss。这里改成 `SetCapture` +
-//!   "点到自己外面就关" —— 移出就关对鼠标经过太敏感，点外面才关符合
-//!   菜单的通行习惯，也不会因为手抖扫过就消失。
+//!   点外面就收起（由主循环轮询，见 [`crate::popup`]）。
 //! - **它贴在时钟卡片旁边**，不是屏幕居中。
 //!
 //! 算法全在 `minidock_core::calendar` 里，这里只负责画和判命中。
@@ -23,13 +21,11 @@ use minidock_core::config::Edge;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, RegisterClassW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOWNA, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, GWLP_USERDATA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -197,6 +193,12 @@ impl CalendarWindow {
         }
     }
 
+    /// 窗口句柄。主循环判"点是否落在面板里"要用。
+    #[must_use]
+    pub const fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     #[must_use]
     pub const fn visible(&self) -> bool {
         self.visible
@@ -212,26 +214,18 @@ impl CalendarWindow {
         unsafe {
             let _ = SetWindowPos(self.hwnd, None, x, y, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
             let _ = ShowWindow(self.hwnd, SW_SHOWNA);
-            // 抓住鼠标：这样"点到自己外面"能被我们收到。
-            // 不抓的话，点桌面/别的窗口时我们根本不知道，弹层会一直挂着。
-            SetCapture(self.hwnd);
         }
         self.visible = true;
         self.next_repaint = Instant::now();
     }
 
-    /// 关掉。会释放鼠标捕获。
+    /// 关掉。点外面关闭由主循环轮询（见 `crate::popup`）。
     pub fn hide(&mut self) {
         if !self.visible {
             return;
         }
-        // 先改标志再释放捕获：`ReleaseCapture` 会同步派发
-        // `WM_CAPTURECHANGED`，那里还会调 `hide`，靠这个标志挡住重入。
         self.visible = false;
         unsafe {
-            if GetCapture() == self.hwnd {
-                let _ = ReleaseCapture();
-            }
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
@@ -292,34 +286,16 @@ impl CalendarWindow {
                     self.hover = self.hits.at(p);
                     self.next_repaint = Instant::now();
                 }
-                // 弹层一露头就 `SetCapture`（点外面关闭），捕获期间收不到
-                // `WM_SETCURSOR`，光标只能在这里设（ADR-045）。
                 crate::cursor::set_hand_if(self.hover.is_some());
                 None
             }
-            WM_LBUTTONDOWN => {
-                // 点在弹层外面 → 关掉。是"鼠标移出矩形就关"，
-                // 这里改成"点外面才关"：扫过去就消失太容易误触。
-                let (x, y) = client_pos(lparam, self.ppp);
-                if !self.client_rect().contains(egui::pos2(x, y)) {
-                    self.hide();
-                    return Some(LRESULT(0));
-                }
-                Some(LRESULT(0))
-            }
+            WM_LBUTTONDOWN => Some(LRESULT(0)),
             WM_LBUTTONUP => {
                 let (x, y) = client_pos(lparam, self.ppp);
                 if let Some(hit) = self.hits.at(egui::pos2(x, y)) {
                     self.click(hit);
                 }
                 Some(LRESULT(0))
-            }
-            WM_CAPTURECHANGED => {
-                // 捕获被别人抢走（比如弹出了系统菜单）→ 当作关闭。
-                if self.visible && unsafe { GetCapture() } != self.hwnd {
-                    self.hide();
-                }
-                None
             }
             WM_SETCURSOR => {
                 crate::cursor::set_hand_if(self.hover.is_some());
@@ -336,18 +312,6 @@ impl CalendarWindow {
             WM_ERASEBKGND => Some(LRESULT(1)),
             _ => None,
         }
-    }
-
-    /// 客户区矩形（逻辑点）。
-    fn client_rect(&self) -> EguiRect {
-        let mut rc = windows::Win32::Foundation::RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut rc);
-        }
-        EguiRect::from_min_max(
-            egui::pos2(0.0, 0.0),
-            egui::pos2(rc.right as f32 / self.ppp, rc.bottom as f32 / self.ppp),
-        )
     }
 }
 

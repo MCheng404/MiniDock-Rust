@@ -34,6 +34,13 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             toggle(ctx, ui, Key::RES_MON, "资源监视器", "");
             toggle(ctx, ui, Key::TOOL_W, "计时器 / 待办", "");
             toggle(ctx, ui, Key::MODE_W, "专注模式", "");
+            toggle(
+                ctx,
+                ui,
+                Key::PANEL_DISMISS,
+                "点面板外面收起",
+                "日历 / 控制中心 / 资源监视器 / 计时器都适用；关掉后改为再点一次卡片收起",
+            );
             super::widgets::row(ui, ctx.state, "小组件位置", "", |ui, id| {
                 let mut cur = ctx.cfg.get_i32(Key::W_SIDE);
                 egui::ComboBox::from_id_salt(Key::W_SIDE.name())

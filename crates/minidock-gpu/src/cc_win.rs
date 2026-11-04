@@ -7,7 +7,8 @@
 //!
 //! - **音量是真的**。走 Core Audio（`platform::audio`），不是模拟
 //!   `VK_VOLUME_*` 按键 —— 后者会改"应用程序音量"分组、会在系统 OSD 上闪。
-//! - **滑块要能拖**。按下在滑块上就开始跟手，走 `SetCapture`，抬起才结束。
+//! - **滑块要能拖**。按下在滑块上就开始跟手，抬起才结束；拖动期间自己
+//!   拿鼠标捕获，光标滑出面板也还跟得住。
 //!
 //! 磁贴里的深色模式 / 节能是"有状态"的：点完要把自己的状态改掉并重画，
 //! 深色还要通知主循环重读主题（`dirty_theme`）。
@@ -22,13 +23,12 @@ use minidock_platform::sysact;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, RegisterClassW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOWNA, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, GWLP_USERDATA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::frame::FrameRenderer;
@@ -187,6 +187,12 @@ impl CcWindow {
         }
     }
 
+    /// 窗口句柄。主循环判"点是否落在面板里"要用。
+    #[must_use]
+    pub const fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     #[must_use]
     pub const fn visible(&self) -> bool {
         self.visible
@@ -205,7 +211,6 @@ impl CcWindow {
         unsafe {
             let _ = SetWindowPos(self.hwnd, None, x, y, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
             let _ = ShowWindow(self.hwnd, SW_SHOWNA);
-            SetCapture(self.hwnd);
         }
         self.visible = true;
         self.next_repaint = Instant::now();
@@ -218,9 +223,6 @@ impl CcWindow {
         }
         self.visible = false;
         unsafe {
-            if GetCapture() == self.hwnd {
-                let _ = ReleaseCapture();
-            }
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
@@ -346,12 +348,13 @@ impl CcWindow {
             WM_LBUTTONDOWN => {
                 let (x, y) = client_pos(lparam, self.ppp);
                 let p = egui::pos2(x, y);
-                if !self.client_rect().contains(p) {
-                    self.hide();
-                    return Some(LRESULT(0));
-                }
                 if self.slider.contains(p) {
                     self.dragging = true;
+                    // 拖动要自己拿捕获，否则光标一滑出面板就收不到
+                    // `WM_MOUSEMOVE`，滑块会卡在半路。
+                    unsafe {
+                        SetCapture(self.hwnd);
+                    }
                     let left = self.slider.left() + 30.0;
                     let right = self.slider.right() - 4.0;
                     if right > left {
@@ -364,6 +367,9 @@ impl CcWindow {
             WM_LBUTTONUP => {
                 if self.dragging {
                     self.dragging = false;
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
                     return Some(LRESULT(0));
                 }
                 let (x, y) = client_pos(lparam, self.ppp);
@@ -376,12 +382,6 @@ impl CcWindow {
                     self.click_tile(k);
                 }
                 Some(LRESULT(0))
-            }
-            WM_CAPTURECHANGED => {
-                if self.visible && unsafe { GetCapture() } != self.hwnd {
-                    self.hide();
-                }
-                None
             }
             WM_SETCURSOR => {
                 crate::cursor::set_hand_if(self.hover.is_some());
@@ -398,17 +398,6 @@ impl CcWindow {
             WM_ERASEBKGND => Some(LRESULT(1)),
             _ => None,
         }
-    }
-
-    fn client_rect(&self) -> EguiRect {
-        let mut rc = windows::Win32::Foundation::RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut rc);
-        }
-        EguiRect::from_min_max(
-            egui::pos2(0.0, 0.0),
-            egui::pos2(rc.right as f32 / self.ppp, rc.bottom as f32 / self.ppp),
-        )
     }
 }
 

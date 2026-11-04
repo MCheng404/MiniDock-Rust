@@ -81,7 +81,7 @@ fn section_of_numeric(name: &str) -> &'static str {
     match name {
         // 小组件条带：位置 / 顺序 / 开关 / 双倍宽掩码。
         "WSide" | "WOrder" | "WideMask" | "NotifyW" | "CtrlCenter" | "CcEnergy" | "CcHotspot"
-        | "ResMon" | "ToolW" | "ModeW" => return "widgets",
+        | "ResMon" | "ToolW" | "ModeW" | "PanelDismiss" => return "widgets",
         // 起动台。
         "Launchpad" | "LpCols" | "LpRows" => return "widgets.launchpad",
         // 系统集成：资源管理器右键菜单 / 托盘图标 / 自动更新。
@@ -272,6 +272,8 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("SmokeMouse", 0, 2, 1, false, false),
     ("SmokeReach", 0, 2, 1, false, false),
     ("SmokeClouds", 0, 1, 1, true, false),
+    // 小组件面板的关闭方式：点击面板外面就收起。
+    ("PanelDismiss", 0, 1, 1, true, false),
 ];
 
 impl Key {
@@ -473,6 +475,8 @@ impl Key {
     pub const SMOKE_REACH: Key = Key::Numeric(92);
     /// `SmokeClouds`
     pub const SMOKE_CLOUDS: Key = Key::Numeric(93);
+    /// `PanelDismiss`
+    pub const PANEL_DISMISS: Key = Key::Numeric(94);
 }
 
 impl Key {
@@ -622,6 +626,7 @@ impl Key {
         Key::SMOKE_MOUSE,
         Key::SMOKE_REACH,
         Key::SMOKE_CLOUDS,
+        Key::PANEL_DISMISS,
     ];
 
     /// 需要读写的全部键：行序表在前，自有键在后。
@@ -1582,6 +1587,7 @@ mod tests {
             (Key::SMOKE_MOUSE, "SmokeMouse"),
             (Key::SMOKE_REACH, "SmokeReach"),
             (Key::SMOKE_CLOUDS, "SmokeClouds"),
+            (Key::PANEL_DISMISS, "PanelDismiss"),
         ];
         for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");
@@ -2298,6 +2304,28 @@ mod tests {
         let long = "x".repeat(500);
         assert_eq!(Config::sanitize_adapter(&long).chars().count(), 128);
         assert_eq!(Config::sanitize_adapter("   "), "");
+    }
+
+    /// 「点面板外面收起」默认开、落在 `[widgets]` 段，且能原样过一遍 ini。
+    ///
+    /// 这条键是 Rust 版自有键（上游没有），所以放在 `EXTRA` 里：`Key::ALL`
+    /// 必须与上游 118 个键逐项对应，混进去会废掉那条回归测试。
+    #[test]
+    fn panel_dismiss_defaults_on_and_roundtrips() {
+        let c = Config::defaults(96);
+        assert_eq!(c.get_i32(Key::PANEL_DISMISS), 1);
+        assert_eq!(Key::PANEL_DISMISS.section(), "widgets");
+        assert!(Key::EXTRA.contains(&Key::PANEL_DISMISS));
+        assert!(!Key::ALL.contains(&Key::PANEL_DISMISS));
+
+        let mut ini = Ini::new();
+        c.write_ini(&mut ini);
+        assert_eq!(ini.get("widgets", "PanelDismiss"), Some("1"));
+        ini.set("widgets", "PanelDismiss", "0");
+        assert_eq!(Config::from_ini(&ini, 96).get_i32(Key::PANEL_DISMISS), 0);
+        // 越界值夹回 0/1，不留悬空状态。
+        ini.set("widgets", "PanelDismiss", "9");
+        assert_eq!(Config::from_ini(&ini, 96).get_i32(Key::PANEL_DISMISS), 1);
     }
 
     #[test]

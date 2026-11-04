@@ -265,6 +265,12 @@ impl ToolWindow {
         }
     }
 
+    /// 窗口句柄。主循环判"点是否落在面板里"要用。
+    #[must_use]
+    pub const fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     #[must_use]
     pub const fn visible(&self) -> bool {
         self.visible
@@ -279,10 +285,13 @@ impl ToolWindow {
     }
 
     pub fn hide(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.visible = false;
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
-        self.visible = false;
         self.typing = false;
         self.typed.clear();
     }
@@ -838,6 +847,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // 输入待办时的键盘处理。用 `WM_KEYDOWN` 转成字符而不是直接读
         // `WM_CHAR`：这样退格、回车、Esc 三个特殊键与字符走同一条路径。
         WM_KEYDOWN => {
+            // 不在输入态时 Esc 直接收起：面板不靠捕获也能关（`PanelDismiss`
+            // 关掉时唯一的出口，输入态下的 Esc 归 `on_char` 管）。
+            if !win.typing && wparam.0 == VK_ESCAPE {
+                win.hide();
+                return LRESULT(0);
+            }
             if win.typing {
                 let handled = match wparam.0 {
                     VK_ESCAPE => win.on_char(0x1b),

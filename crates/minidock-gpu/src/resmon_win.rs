@@ -27,6 +27,9 @@ use crate::gpu::{Gpu, GpuError};
 /// 窗口类名。
 pub const CLASS_NAME: &str = "MiniDockResMon";
 
+/// `VK_ESCAPE`。`windows` crate 里有常量，这里只用一个键，不值得为它开一条导入。
+const VK_ESCAPE: usize = 0x1B;
+
 /// 面板逻辑尺寸（本地坐标）。是 340 宽，这里放宽一点让进度条有地方画。
 const LOGICAL_SIZE: (f32, f32) = (340.0, 210.0);
 
@@ -135,6 +138,12 @@ impl ResMonWindow {
         }
     }
 
+    /// 窗口句柄。主循环判"点是否落在面板里"要用。
+    #[must_use]
+    pub const fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     #[must_use]
     pub const fn visible(&self) -> bool {
         self.visible
@@ -151,10 +160,13 @@ impl ResMonWindow {
     }
 
     pub fn hide(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.visible = false;
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
-        self.visible = false;
     }
 
     /// 是否到了该刷新的时刻。
@@ -184,7 +196,7 @@ impl ResMonWindow {
         Ok(())
     }
 
-    fn on_message(&mut self, msg: u32, _wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
+    fn on_message(&mut self, msg: u32, wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             // 面板只读，光标恒为箭头。但**必须自己回**：类光标留空时
             // 系统会退回忙光标（ADR-045）。
@@ -193,7 +205,13 @@ impl ResMonWindow {
                 Some(LRESULT(1))
             }
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP | WM_MOUSEMOVE => None,
-            WM_KEYDOWN => None,
+            // Esc 永远能收起：这是关掉"点外面关闭"之后唯一的出口。
+            WM_KEYDOWN => {
+                if wparam.0 == VK_ESCAPE {
+                    self.hide();
+                }
+                Some(LRESULT(0))
+            }
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 unsafe {
