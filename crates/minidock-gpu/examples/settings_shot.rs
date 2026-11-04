@@ -75,14 +75,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut out = Outcome::default();
 
-    let raw = raw_input((w, h), ppp);
-    // 第一帧只是让 egui 量出文字尺寸并上传字形图集。
-    let _ = frame.render_rgba(&gpu, raw.clone(), |ui| {
+    // 三帧出图：字体图集(0s) → 动画推进(0.4s) → 稳定画面(10s)。
+    //
+    // 时间必须往前走：egui 的浮层（如说明气泡）有淡入 + 滑入动画，靠
+    // `RawInput::time` 推进 —— 时间不动的话动画永远停在第一帧，气泡整个
+    // 层只有 ~8% 不透明度、位置也停在半路，截出来是"半透明脏块"。
+    for t in [0.0_f64, 0.4] {
+        let _ = frame.render_rgba(&gpu, raw_input((w, h), ppp, t), |ui| {
+            shell(ui, &mut state, &mut cfg, &mut out)
+        })?;
+    }
+    // 第三帧才是"字体已就绪、动画已落定"的稳定画面。
+    let (pixels, _) = frame.render_rgba(&gpu, raw_input((w, h), ppp, 10.0), |ui| {
         shell(ui, &mut state, &mut cfg, &mut out)
     })?;
-    // 第二帧才是"字体已就绪"的稳定画面。
-    let (pixels, _) =
-        frame.render_rgba(&gpu, raw, |ui| shell(ui, &mut state, &mut cfg, &mut out))?;
 
     write_bmp(&out_path, w, h, &pixels, dark)?;
     println!(
@@ -100,14 +106,14 @@ fn titles() -> Vec<&'static str> {
 }
 
 /// 单帧输入。与 `bin/dock.rs` 里的 `raw_input` 同口径。
-fn raw_input(size: (u32, u32), ppp: f32) -> egui::RawInput {
+fn raw_input(size: (u32, u32), ppp: f32, time: f64) -> egui::RawInput {
     let (w, h) = size;
     let mut raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(w as f32 / ppp, h as f32 / ppp),
         )),
-        time: Some(0.0),
+        time: Some(time),
         ..Default::default()
     };
     raw.viewports.insert(

@@ -422,11 +422,14 @@ pub(crate) fn render_tip(ui: &mut Ui, state: &mut SettingsState) {
                 })
                 .corner_radius(egui::CornerRadius::same(12))
                 .inner_margin(egui::Margin::symmetric(12, 10))
+                // spread 必须 = 0（与卡片同一条规矩）：spread 会外扩投影矩形
+                // 但不扩圆角半径，暗边从气泡 AA 边缘里透出来。密度靠
+                // alpha 与 blur 控制。
                 .shadow(egui::Shadow {
-                    offset: [0, 12],
-                    blur: 24,
-                    spread: 2,
-                    color: Color32::from_black_alpha(if dark { 120 } else { 40 }),
+                    offset: [0, 8],
+                    blur: 20,
+                    spread: 0,
+                    color: Color32::from_black_alpha(if dark { 90 } else { 24 }),
                 });
             let resp = frame.show(ui, |ui| {
                 ui.set_max_width(240.0);
