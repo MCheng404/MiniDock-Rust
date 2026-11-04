@@ -14,6 +14,7 @@
 
 pub mod fonts;
 pub mod pages;
+pub mod text_field;
 
 pub use pages::{settings_ui, Command, Outcome, Page, SettingsState};
 

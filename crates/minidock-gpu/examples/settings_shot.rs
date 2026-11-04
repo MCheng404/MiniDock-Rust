@@ -73,6 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats: "空闲 · 0 帧/秒 · 上一次出帧 42 ms 前".to_owned(),
         ..SettingsState::default()
     };
+    // `q=文字`：预填搜索框内容，核对输入文字与图标/提示的对齐。
+    if let Some(text) = rest.iter().find_map(|a| a.strip_prefix("q=")) {
+        state.nav_filter = text.to_owned();
+    }
     // `accent=RRGGBB`：自定义主题色出图（默认 -1 = 跟随系统）。
     if let Some(hex) = rest.iter().find_map(|a| a.strip_prefix("accent=")) {
         if let Ok(v) = u32::from_str_radix(hex, 16) {

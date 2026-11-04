@@ -5,6 +5,39 @@
 
 ---
 
+## 0.9.10 — 输入框：文字对齐修复 + 共享控件（2026-11-04）
+
+### 修复
+
+- **搜索框文字偏上**：之前用 `add_sized` 把 `TextEdit` 强塞进 34px 高、
+  又给 `Frame::NONE`（零内边距），文字按内容高度顶格排，与居中的放大镜
+  和 `Ctrl K` 明显不在一条线上。查 egui 0.37 官方文档（docs.rs）确认
+  `vertical_align` 已弃用、应使用 **`align(Align2::LEFT_CENTER)`**：
+  它把内部文字在已分配区域内二维对齐。修复后实测输入文字中心 46.5、
+  清除图标 45.5、框中线 46。
+- **清除按钮点不动**：整框 `interact` 注册在清除按钮之后，命中顺序把点击
+  吃掉了。把整框交互提前注册，后注册的按钮才能压在上层。
+
+### 重构
+
+- 新建 `minidock_settings::text_field` —— 所有 rs 输入框共用一个控件：
+  外壳（12px 圆角 / field 底色 / 主题色 2px 焦点光晕）、放大镜图标、
+  快捷键提示、有内容时的 × 清除按钮、整框可点聚焦、焦点收起 hint、
+  官方 `align(Align2::LEFT_CENTER)` 垂直居中。`FieldOpts` / `FieldIcon`
+  参数化，后续任何输入框（重命名、数值输入）直接调用，不再各写一遍
+  painter + interact。
+- 全工程当前只有顶栏这一处 `TextEdit`，`settings_win::shell` 已改为调用
+  共享控件，原来 80 行手写绘制删掉。
+- `settings_shot` 加 `q=文字` 预填参数，核对输入态对齐。
+
+### 测试
+
+kittest：清除按钮清空字符串、空内容时无清除按钮；纯函数单测：
+焦点且空值时收起 hint。hint 是绘制文字、不是 AccessKit 节点，所以
+焦点规则走纯函数而不是节点查询。
+
+---
+
 ## 0.9.9 — HTML 雏形同步到当前 Rust 界面（2026-11-04）
 
 只改 `docs/settings-prototype.html`，不动 Rust。

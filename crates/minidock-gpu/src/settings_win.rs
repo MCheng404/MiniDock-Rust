@@ -528,98 +528,26 @@ pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out
         ui.label(RichText::new("MiniDock").size(20.0).strong());
     });
 
-    // ② 搜索：自绘外壳 + 透明的 TextEdit。
+    // ② 搜索：所有输入框共用 `minidock_settings::text_field`。
     //
-    // 不直接用 TextEdit 自带的框：它的高度由「文字 + 内边距」决定
-    // （实测约 22px），而圆角是固定的 10px —— 半径几乎等于半高，看起来
-    // 是胶囊；下拉/按钮约 30px 高、同样 10px 圆角却是小圆角矩形，曲率
-    // 对不上。而且焦点态描边走 selection.stroke、非焦点走 bg_stroke，
-    // 切状态时边框还会再变一次。自己画壳，高度/圆角/焦点光晕全部可控。
-    let search_rect = egui::Rect::from_center_size(bar.center(), egui::vec2(260.0, 34.0));
-    let mut search = child.new_child(
-        egui::UiBuilder::new()
-            .max_rect(search_rect)
-            .layout(Layout::left_to_right(Align::Center)),
+    // 外壳（圆角/底色/焦点光晕/图标/快捷键/清除按钮）在共享控件里统一画，
+    // 文字对齐用官方 `align(Align2::LEFT_CENTER)` —— 之前把 TextEdit 强塞
+    // 进 34px 高、又用零内边距的 Frame，文字按内容高度顶格排，明显偏上。
+    let search_rect = egui::Rect::from_center_size(
+        bar.center(),
+        egui::vec2(260.0, minidock_settings::text_field::FIELD_H),
     );
-    let (accent, faint) = {
-        let v = search.visuals();
-        (v.selection.stroke.color, v.weak_text_color())
-    };
-    let focused = search.ctx().memory(|m| m.has_focus(search_id));
-    let r = egui::CornerRadius::same(12);
-    let field = if dark {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 16)
-    } else {
-        Color32::from_rgba_unmultiplied(23, 26, 35, 14)
-    };
-    let fill = if focused {
-        if dark {
-            Color32::from_rgb(38, 39, 47)
-        } else {
-            Color32::WHITE
-        }
-    } else {
-        field
-    };
-    search.painter().rect_filled(search_rect, r, fill);
-    if focused {
-        // 焦点光晕跟着主题色，与卡片/导航的强调色同一套。
-        search.painter().rect_stroke(
-            search_rect.shrink(1.0),
-            r,
-            egui::Stroke::new(2.0, accent.linear_multiply(0.55)),
-            egui::StrokeKind::Inside,
-        );
-    }
-    // 放大镜（左侧）
-    let cy = search_rect.center().y;
-    let cx = search_rect.left() + 17.0;
-    let glass = egui::Stroke::new(1.6, faint);
-    search
-        .painter()
-        .circle_stroke(egui::pos2(cx, cy - 1.5), 5.0, glass);
-    search.painter().line_segment(
-        [
-            egui::pos2(cx + 3.8, cy + 2.3),
-            egui::pos2(cx + 8.0, cy + 6.5),
-        ],
-        glass,
-    );
-    // Ctrl K 提示（右侧），不再塞进 hint_text 里
-    search.painter().text(
-        egui::pos2(search_rect.right() - 13.0, cy),
-        egui::Align2::RIGHT_CENTER,
-        "Ctrl K",
-        egui::FontId::proportional(10.5),
-        faint,
-    );
-    // 整块外壳都可点聚焦：TextEdit 只占中间的文字区，点放大镜或
-    // Ctrl K 那一侧不该没反应。
-    let shell_id = search.make_persistent_id("search-shell");
-    let shell_resp = search.interact(search_rect, shell_id, egui::Sense::click());
-    if shell_resp.clicked() {
-        search.memory_mut(|m| m.request_focus(search_id));
-    }
-    // 输入区：无框、透明、尺寸固定，不参与圆角
-    let text_rect = egui::Rect::from_min_max(
-        egui::pos2(search_rect.left() + 32.0, search_rect.top()),
-        egui::pos2(search_rect.right() - 58.0, search_rect.bottom()),
-    );
-    let mut edit = search.new_child(
-        egui::UiBuilder::new()
-            .max_rect(text_rect)
-            .layout(Layout::left_to_right(Align::Center)),
-    );
-    // 无框 TextEdit 内边距为 0：焦点时光标正好压在 hint 第一个字上。
-    // 聚焦且还没输入时收起 hint，只留光标 + 右侧 Ctrl K 提示。
-    let hint = if focused { "" } else { "搜索设置…" };
-    edit.add_sized(
-        text_rect.size(),
-        egui::TextEdit::singleline(&mut state.nav_filter)
-            .hint_text(hint)
-            .id(search_id)
-            .frame(egui::Frame::NONE)
-            .desired_width(text_rect.width()),
+    minidock_settings::text_field::text_field(
+        &mut child,
+        search_rect,
+        search_id,
+        &mut state.nav_filter,
+        &minidock_settings::text_field::FieldOpts {
+            hint: "搜索设置…",
+            icon: minidock_settings::text_field::FieldIcon::Search,
+            trailing: Some("Ctrl K"),
+            clearable: true,
+        },
     );
 
     // ③ 右栏：状态 + 自绘关闭图标按钮（主题色 ×）。
