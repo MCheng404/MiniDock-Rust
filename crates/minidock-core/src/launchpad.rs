@@ -352,15 +352,21 @@ impl Launchpad {
         }
     }
 
-    /// 按分类 + 搜索词过滤出要显示的应用。
+    /// 按分类 + 搜索词过滤出要显示的应用，顺序跟着**用户摆的格子**走。
     ///
     /// `cat == 0` 表示"全部"。这两个条件任一为真时界面就进入"过滤视图"
     /// （只列应用、不列文件夹）—— 与原版 `LpFiltered` 一致：分类是给应用
     /// 分的，文件夹没有分类，混在过滤结果里只会让人困惑。
+    ///
+    /// 顺序很重要：应用表本身是**扫开始菜单扫出来的顺序**，跟用户在界面上
+    /// 看到的不一样。照应用表排会让"办公"一组里 Word 排在 Excel 后面这类
+    /// 事毫无道理；更要紧的是过滤视图里拖动排序会看不到任何变化
+    /// （改的是顶层次序，画出来的还是应用表次序）。
     #[must_use]
     pub fn visible_in(&self, cat: usize, query: &str) -> Vec<usize> {
         let q = query.to_lowercase();
-        self.apps
+        let mut out: Vec<usize> = self
+            .apps
             .iter()
             .enumerate()
             .filter(|(i, a)| {
@@ -369,7 +375,26 @@ impl Launchpad {
                     && (q.is_empty() || a.name.to_lowercase().contains(&q))
             })
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        out.sort_by_key(|ai| self.app_slot(*ai));
+        out
+    }
+
+    /// 应用在用户视野里的位置：顶层就取顶层下标，在文件夹里就取那个文件夹
+    /// 的下标（同夹内按夹内顺序）。不在任何格子里（比如被隐藏）排到最后。
+    fn app_slot(&self, ai: usize) -> (usize, usize) {
+        for (ti, t) in self.top.iter().enumerate() {
+            match *t {
+                Top::App(a) if a == ai => return (ti, 0),
+                Top::Folder(fi) => {
+                    if let Some(k) = self.folders[fi].apps.iter().position(|a| *a == ai) {
+                        return (ti, k + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (usize::MAX, 0)
     }
 
     /// 按名字给顶层格子排序（大小写不敏感的插入排序，稳定）。
@@ -461,6 +486,27 @@ impl Launchpad {
         let dst = if src < target { target - 1 } else { target };
         let dst = dst.min(self.top.len());
         self.top.insert(dst, t);
+        true
+    }
+
+    /// 把某个应用在顶层里的位置挪到另一个应用**前面**。
+    ///
+    /// 过滤视图里的拖拽走这条：那边格子是应用、不是顶层格，落点用应用下标。
+    /// 只重排、不合并文件夹 —— 过滤结果里相邻的两个应用在完整视图里未必
+    /// 相邻，就地合成文件夹会让人回头找不到。任一方不在顶层（在文件夹里）
+    /// 时不动，返回 `false`。
+    pub fn move_app_before(&mut self, src_ai: usize, dst_ai: usize) -> bool {
+        if src_ai == dst_ai {
+            return false;
+        }
+        let slot = |lp: &Self, ai: usize| lp.top.iter().position(|t| *t == Top::App(ai));
+        let (Some(src), Some(dst)) = (slot(self, src_ai), slot(self, dst_ai)) else {
+            return false;
+        };
+        let t = self.top.remove(src);
+        // 移除源之后，目标的位置可能左移一格。
+        let dst = if src < dst { dst - 1 } else { dst };
+        self.top.insert(dst.min(self.top.len()), t);
         true
     }
 
@@ -947,6 +993,76 @@ mod tests {
         let first = lp.apps()[0].path.clone();
         lp.hidden.push(first);
         assert_eq!(lp.visible_in(0, "").len(), 3, "隐藏的不出现");
+    }
+
+    /// 过滤视图的顺序跟着**顶层格子**走，不跟应用表走。
+    ///
+    /// 应用表是扫开始菜单扫出来的顺序（这里用 `absorb` 的顺序模拟），
+    /// 跟用户摆出来的顺序可以完全不同。照应用表排的话，过滤视图里
+    /// 拖动排序永远看不到变化（改的是顶层次序）。
+    #[test]
+    fn filtered_view_follows_top_order() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Word"), entry("Excel"), entry("Code"), entry("Zoom")]);
+        // 用户把 Excel 拖到了最前面。
+        lp.drop_at(1, 0, false);
+        let names: Vec<&str> = lp
+            .visible_in(0, "")
+            .iter()
+            .map(|ai| lp.apps()[*ai].name.as_str())
+            .collect();
+        assert_eq!(names, ["Excel", "Word", "Code", "Zoom"]);
+        let office: Vec<&str> = lp
+            .visible_in(1, "")
+            .iter()
+            .map(|ai| lp.apps()[*ai].name.as_str())
+            .collect();
+        assert_eq!(office, ["Excel", "Word"], "组内顺序也跟顶层走");
+    }
+
+    /// 文件夹里的应用排在文件夹所在的那一格，夹内按夹内顺序。
+    #[test]
+    fn filtered_view_orders_folder_members_at_the_folder_slot() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Word"), entry("Excel"), entry("Code")]);
+        // Word 拖到 Excel 图标上 → 合成文件夹，占 0 号格。
+        assert!(lp.drop_at(0, 1, true));
+        let names: Vec<&str> = lp
+            .visible_in(0, "")
+            .iter()
+            .map(|ai| lp.apps()[*ai].name.as_str())
+            .collect();
+        assert_eq!(names, ["Excel", "Word", "Code"], "夹内顺序：目标在前");
+    }
+
+    /// `move_app_before`：把应用挪到另一个应用前面，只动顶层顺序。
+    #[test]
+    fn move_app_before_reorders_top() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("A"), entry("B"), entry("C"), entry("D")]);
+        // 把 D（3）挪到 A（0）前面。
+        assert!(lp.move_app_before(3, 0));
+        let names: Vec<&str> = lp.top().iter().map(|t| lp.name_of(*t)).collect();
+        assert_eq!(names, ["D", "A", "B", "C"]);
+        // 往后挪：A（现在 1）挪到 C（3）前面 → 落在 B 之后、C 之前。
+        assert!(lp.move_app_before(0, 2));
+        let names: Vec<&str> = lp.top().iter().map(|t| lp.name_of(*t)).collect();
+        assert_eq!(names, ["D", "B", "A", "C"]);
+        // 自己到自己、或在文件夹里 → 不动。
+        assert!(!lp.move_app_before(1, 1));
+        assert!(!lp.move_app_before(0, 9), "越界返回 false");
+    }
+
+    /// 在文件夹里的应用不能被顶层重排挪走。
+    #[test]
+    fn move_app_before_refuses_folder_members() {
+        let mut lp = Launchpad::new();
+        lp.absorb(&[entry("Word"), entry("Excel"), entry("Code")]);
+        assert!(lp.drop_at(0, 1, true)); // Word / Excel 进文件夹
+        let (w, c) = (lp.top.len(), lp.folders().len());
+        assert!(!lp.move_app_before(0, 2), "Word 在文件夹里，挪不动");
+        assert_eq!(lp.top.len(), w);
+        assert_eq!(lp.folders().len(), c);
     }
 
     /// A–Z 排序改的是**格子顺序**，不是应用表。

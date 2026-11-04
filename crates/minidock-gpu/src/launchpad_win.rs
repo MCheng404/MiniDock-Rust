@@ -74,6 +74,20 @@ enum MenuState {
     App(usize),
     /// 二级菜单：给这个应用选标签组。
     Category(usize),
+    /// 标签栏某一组的菜单。存的是**组下标**（从 0 起），不是界面上的 1 起编号。
+    Tag(usize),
+}
+
+/// 重命名作用于谁。
+///
+/// 重命名输入框只有一套，但目标有两种：格子名与标签组名。用枚举区分，
+/// 免得再加一个平行字段（那样 ESC / 提交 / 点击别处三条路径都要各写两遍）。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum RenameTarget {
+    /// 顶层格下标。
+    Cell(usize),
+    /// 标签组下标（从 0 起）。
+    Tag(usize),
 }
 
 /// 画在网格之上的东西：右键菜单与重命名框。
@@ -87,8 +101,8 @@ struct Overlay<'a> {
     sel: Option<usize>,
     /// 当前分类筛选。`0` = 全部，`1..=tags.len()` = 第几组标签。
     cat: usize,
-    /// 正在重命名哪一格。
-    renaming: Option<usize>,
+    /// 重命名作用于谁。`None` = 没在改名；开着时**搜索框就地变成改名框**。
+    renaming: Option<RenameTarget>,
     /// 重命名缓冲。
     rename_buf: &'a str,
 }
@@ -161,8 +175,8 @@ pub struct LaunchpadWindow {
     sel: Option<usize>,
     /// 当前分类筛选。`0` = 全部，`1..=tags.len()` = 第几组标签。
     cat: usize,
-    /// 正在重命名哪一格。
-    renaming: Option<usize>,
+    /// 正在重命名谁。`None` = 重命名框没开。
+    renaming: Option<RenameTarget>,
     /// 重命名缓冲。
     rename_buf: String,
     /// 待主循环处理的命令。
@@ -688,6 +702,12 @@ impl LaunchpadWindow {
             WM_LBUTTONUP => {
                 let (x, y) = client_pos(lparam, self.ppp);
                 let released = self.hit_at(x, y);
+                if std::env::var("MINIDOCK_LP_TRACE").is_ok() {
+                    eprintln!(
+                        "[lp] LBUTTONUP ({x:.0},{y:.0}) press={:?} released={:?} menu={:?}",
+                        self.press, released, self.menu
+                    );
+                }
                 // 菜单开着时，这一下点击只用于"选菜单项"或"点外面关掉"。
                 if self.menu.is_some() {
                     // 只有"点在菜单外面"才关；点到某一项由 `run_menu_item`
@@ -787,6 +807,16 @@ impl LaunchpadWindow {
                     );
                 }
                 if self.open_folder.is_none() {
+                    // 标签栏右键 = 这一组的菜单（改名 / 删除）。
+                    // 第 0 个是「全部」、最后一个是「＋」，都没有菜单。
+                    if let Some(Hit::Tab(t)) = self.hit_at(x, y) {
+                        if t >= 1 && t <= self.lp.tags().len() {
+                            self.menu = Some(MenuState::Tag(t - 1));
+                            self.menu_at = (x.min(self.size.0 - 200.0).max(8.0), y);
+                            self.next_repaint = Instant::now();
+                            return Some(LRESULT(0));
+                        }
+                    }
                     if let Some(Hit::Cell(k)) = self.hit_at(x, y) {
                         let idx = self.page * self.per() + k;
                         // 过滤视图里格子是应用；未过滤时是顶层格。
@@ -1037,11 +1067,22 @@ impl LaunchpadWindow {
     /// 松手：算落点，合并或重排。
     fn drop(&mut self, x: f32, y: f32) {
         let Some(src) = self.drag_src else { return };
-        // 过滤视图里格子是"应用"，与顶层格的下标不是一回事，拖拽先不做。
-        if !self.filtered() {
-            // 只在同一页内算落点。
-            if let Some(Hit::Cell(k)) = self.hit_at(x, y) {
-                if self.page == self.drag_page {
+        // 只在同一页内算落点：翻页后格子的含义已经变了，原来的下标对不上。
+        if let Some(Hit::Cell(k)) = self.hit_at(x, y) {
+            if self.page == self.drag_page {
+                if self.filtered() {
+                    // 过滤视图：格子是**应用**，不是顶层格。落点语义是
+                    // "插到这个应用前面"，不合并文件夹 —— 过滤结果里相邻的
+                    // 两个应用在完整视图里未必相邻，就地合成文件夹会让人
+                    // 回头找不到。
+                    let (si, ti) = (self.page * self.per() + src, self.page * self.per() + k);
+                    let shown = self.shown();
+                    if let (Some(&sa), Some(&ta)) = (shown.get(si), shown.get(ti)) {
+                        if self.lp.move_app_before(sa, ta) {
+                            self.dirty_save = true;
+                        }
+                    }
+                } else {
                     let on_icon = self
                         .icon_rects
                         .iter()
@@ -1086,15 +1127,23 @@ impl LaunchpadWindow {
             Some(MenuState::Category(ai)) => {
                 let cur = self.lp.category_of(ai);
                 for (i, t) in self.lp.tags().iter().enumerate() {
-                    // 当前所在组打勾，省得用户猜"现在在哪一组"。
+                    // 标出当前所在组。用中文后缀而不是 "✓"：字体里没有那个
+                    // 勾，画出来是个豆腐块（ADR-045 之后同一个坑又踩了一次）。
                     out.push(if i + 1 == cur {
-                        format!("✓ {t}")
+                        format!("{t}（当前）")
                     } else {
                         t.to_string()
                     });
                 }
                 out.push("自动分类（清除）".into());
                 out.push("（返回）".into());
+            }
+            Some(MenuState::Tag(_)) => {
+                out.push("重命名…".into());
+                // 只剩一组时不给删：删完起动台就没有分类栏了，没有意义。
+                if self.lp.tags().len() > 1 {
+                    out.push("删除这一组".into());
+                }
             }
             None => {}
         }
@@ -1111,6 +1160,33 @@ impl LaunchpadWindow {
         let Some(label) = labels.get(i).map(String::as_str) else {
             return;
         };
+        // 标签组自己的菜单。
+        if let MenuState::Tag(ti) = state {
+            match label {
+                "重命名…" => {
+                    self.rename_buf = self.lp.tags().get(ti).cloned().unwrap_or_default();
+                    self.renaming = Some(RenameTarget::Tag(ti));
+                }
+                // clippy collapsible-match：守卫与 if 体等价（false 时同样
+                // 落到 _ 分支），remove_tag 都只在匹配到本臂时执行一次。
+                "删除这一组" if self.lp.remove_tag(ti) => {
+                    self.dirty_save = true;
+                    // 分类号是 1 起的，删掉第 `ti+1` 组之后要跟着前移；
+                    // 正停在被删那组就退回"全部"，否则会指到隔壁组去。
+                    if self.cat == ti + 1 {
+                        self.cat = 0;
+                    } else if self.cat > ti + 1 {
+                        self.cat -= 1;
+                    }
+                    self.page = 0;
+                    self.sel = None;
+                }
+                _ => {}
+            }
+            self.menu = None;
+            self.next_repaint = Instant::now();
+            return;
+        }
         // 二级菜单：给应用挑一组标签。
         if let MenuState::Category(ai) = state {
             match label {
@@ -1162,7 +1238,7 @@ impl LaunchpadWindow {
             "打开" => self.activate_top(idx),
             "重命名…" => {
                 self.rename_buf = self.lp.name_of(self.lp.top()[idx]).to_owned();
-                self.renaming = Some(idx);
+                self.renaming = Some(RenameTarget::Cell(idx));
             }
             "添加到 Dock 栏" => {
                 if let Some(Top::App(ai)) = self.lp.top().get(idx).copied() {
@@ -1197,12 +1273,20 @@ impl LaunchpadWindow {
         self.next_repaint = Instant::now();
     }
 
-    /// 提交重命名。
+    /// 提交重命名（格子名或标签组名）。
     fn commit_rename(&mut self) {
-        if let Some(idx) = self.renaming.take() {
+        if let Some(target) = self.renaming.take() {
             let name = self.rename_buf.trim().to_owned();
-            if !name.is_empty() && idx < self.lp.len() && self.lp.rename(idx, &name) {
-                self.dirty_save = true;
+            // 空名一律当取消：`rename` / `set_tag` 都会拒绝空串，但把缓冲
+            // 留着不清会让人以为改成功了。
+            if !name.is_empty() {
+                let ok = match target {
+                    RenameTarget::Cell(idx) => idx < self.lp.len() && self.lp.rename(idx, &name),
+                    RenameTarget::Tag(i) => self.lp.set_tag(i, &name),
+                };
+                if ok {
+                    self.dirty_save = true;
+                }
             }
         }
         self.rename_buf.clear();
@@ -1306,6 +1390,11 @@ fn draw(
     let mut icon_rects: HitList = Vec::new();
 
     // ---- 搜索框 ----
+    //
+    // 改名时就地变成改名框：位置固定、不和标签栏打架，也省掉一块浮层的绘制。
+    // 原来在 y=96 另画一个框，正好压在标签栏上（标签栏 92..120），两个字叠在
+    // 一起谁也看不清。
+    let renaming = ov.renaming.is_some();
     let search = EguiRect::from_min_size(
         Pos2::new((w - SEARCH_W) * 0.5, 40.0),
         egui::vec2(SEARCH_W, SEARCH_H),
@@ -1319,10 +1408,44 @@ fn draw(
             Color32::from_rgba_unmultiplied(255, 255, 255, 150)
         },
     );
+    if renaming {
+        // 描一圈 accent：这是"输入态"，跟筛选用的搜索框区分开。
+        painter.rect_stroke(
+            search,
+            CornerRadius::same((SEARCH_H * 0.5) as u8),
+            Stroke::new(1.6, accent),
+            egui::StrokeKind::Inside,
+        );
+    }
     // 搜索框：已上屏的文字 + 正在组合的拼音（拼音加下划线，让用户看得出来
     // "还在输入法里"，而不是以为程序没反应）。
-    let text = format!("{query}{composing}");
-    if text.is_empty() {
+    let text = if renaming {
+        // 光标用竖线画：这里没有系统输入框，拿不到真实的光标闪烁。
+        format!("{}|", ov.rename_buf)
+    } else {
+        format!("{query}{composing}")
+    };
+    if renaming {
+        // 名字可能很长（上限 40 字），装不下就整行缩字号 —— 溢出圆角比字小
+        // 更难看。
+        let size = fit_size(ui, &text, SEARCH_W - 28.0, 14.0);
+        let full = measure(ui, &text, size);
+        painter.text(
+            egui::pos2(search.center().x - full * 0.5, search.center().y),
+            Align2::LEFT_CENTER,
+            &text,
+            FontId::proportional(size),
+            tc,
+        );
+        // 提示放在框**外面**右侧：框内已经被名字占满，塞进去必然打架。
+        painter.text(
+            egui::pos2(search.right() + 14.0, search.center().y),
+            Align2::LEFT_CENTER,
+            "回车确认 · Esc 取消",
+            FontId::proportional(11.5),
+            sub,
+        );
+    } else if text.is_empty() {
         painter.text(
             search.center(),
             Align2::CENTER_CENTER,
@@ -1387,6 +1510,15 @@ fn draw(
             FontId::proportional(12.5),
             if on { Color32::WHITE } else { sub },
         );
+        // 正在改名的组：描一圈，告诉用户"改的是这一个"。
+        if t >= 1 && t <= lp.tags().len() && ov.renaming == Some(RenameTarget::Tag(t - 1)) {
+            painter.rect_stroke(
+                r,
+                CornerRadius::same(9),
+                Stroke::new(2.0, accent),
+                egui::StrokeKind::Inside,
+            );
+        }
         hits.push((Hit::Tab(t), r));
     }
 
@@ -1476,6 +1608,19 @@ fn draw(
                 ),
                 CornerRadius::same(16),
                 hover_bg,
+            );
+        }
+        // 正在改名的那一格：描一圈。改的是应用 / 文件夹名，没有这圈的话
+        // 用户只看到顶上多了个输入框，不知道在改谁。
+        if !filtering && ov.renaming == Some(RenameTarget::Cell(idx)) {
+            painter.rect_stroke(
+                EguiRect::from_min_max(
+                    cell.min + egui::vec2(4.0, 2.0),
+                    cell.max - egui::vec2(4.0, 8.0),
+                ),
+                CornerRadius::same(16),
+                Stroke::new(2.0, accent),
+                egui::StrokeKind::Inside,
             );
         }
 
@@ -1572,7 +1717,26 @@ fn draw(
     // 拖动时图标跟手。
     if let Some(k) = drag_src {
         let idx = page * per + k;
-        if !filtering {
+        if filtering {
+            // 过滤视图：格子直接是应用，画它的图标就行。
+            if let Some(&ai) = filtered.get(idx) {
+                let s = icon_s * 1.1;
+                let r = EguiRect::from_min_size(
+                    Pos2::new(cur.0 - s * 0.5, cur.1 - s * 0.5),
+                    egui::vec2(s, s),
+                );
+                if let Some(tex) = icons.get(&ai) {
+                    painter.image(
+                        tex.id(),
+                        r,
+                        EguiRect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+                    );
+                } else {
+                    draw_letter_tile(&painter, &r, &lp.apps()[ai].name, dark);
+                }
+            }
+        } else {
             if let Some(t) = lp.top().get(idx).copied() {
                 let s = icon_s * 1.1;
                 let r = EguiRect::from_min_size(
@@ -1698,34 +1862,6 @@ fn draw(
             overlay_hits.push((Hit::MenuItem(i), r));
         }
     }
-    if ov.renaming.is_some() {
-        let rw = 260.0;
-        let rx = (w - rw) * 0.5;
-        let ry = 96.0;
-        let box_r = EguiRect::from_min_size(Pos2::new(rx, ry), egui::vec2(rw, 30.0));
-        painter.rect_filled(box_r, CornerRadius::same(8), hover_bg);
-        painter.rect_stroke(
-            box_r,
-            CornerRadius::same(8),
-            Stroke::new(1.0, accent),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            egui::pos2(rx + 8.0, box_r.center().y),
-            Align2::LEFT_CENTER,
-            format!("{}|", ov.rename_buf),
-            FontId::proportional(12.5),
-            tc,
-        );
-        painter.text(
-            egui::pos2(w * 0.5, ry + 38.0),
-            Align2::CENTER_TOP,
-            "回车确认 · Esc 取消",
-            FontId::proportional(10.5),
-            sub,
-        );
-    }
-
     // 菜单/重命名框的命中区排在前面：它们浮在网格之上。
     overlay_hits.extend(hits);
     (overlay_hits, icon_rects)
@@ -1973,6 +2109,19 @@ fn measure(ui: &egui::Ui, text: &str, size: f32) -> f32 {
             .size()
             .x
     })
+}
+
+/// 找一个能把 `text` 塞进 `max_w` 的字号（下限 9 点）。
+///
+/// 改名框里不截断名字：名字是用户正在看的东西，少一个字都可能改错。
+/// 缩字号比截断安全。
+fn fit_size(ui: &egui::Ui, text: &str, max_w: f32, size: f32) -> f32 {
+    let w = measure(ui, text, size);
+    if w <= max_w || w <= 0.0 {
+        size
+    } else {
+        (size * max_w / w).max(9.0)
+    }
 }
 
 /// 超宽就截断加省略号。egui 的 `Painter::text` 不会自己裁，长名字会压到隔壁格子。
