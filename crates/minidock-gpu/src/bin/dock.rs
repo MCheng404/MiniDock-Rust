@@ -1037,7 +1037,8 @@ impl App {
         for result in self.disk.drain() {
             match result {
                 Ok(()) => {
-                    self.status("已保存");
+                    // 不再提示"已保存"：每次改动都闪一次是噪音，失败才有
+                    // 提示的价值（Err 分支保留）。
                     if trace::geom() {
                         eprintln!("[disk] 已写回 {}", self.paths.ini.display());
                     }

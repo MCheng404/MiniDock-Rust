@@ -301,6 +301,44 @@ fn 点击气泡外收起() {
     );
 }
 
+/// 点当前项**之上**的项，必须停在所点的页。
+///
+/// 回归：切页在导航循环中途改 `state.page`，"旧页是否可见"的判断跟着
+/// 遍历顺序漂 —— 点上面的项时旧页排在后面、匹配不上，循环后被自动跳页
+/// 覆盖回第一页（常规）。点下面的项恰好不触发，所以只在向上切换时踩到。
+#[test]
+fn 点击上一项不会跳回第一页() {
+    let mut h = new_harness();
+    h.state_mut().ui.page = Page::Effect; // 第 7 项
+    h.run();
+
+    h.get_by_role_and_label(egui::Role::Tab, "外观").click(); // 第 2 项
+    h.run();
+
+    assert_eq!(
+        h.state().ui.page,
+        Page::Appearance,
+        "点当前项之上的项应停在所点页，而不是跳回常规"
+    );
+}
+
+/// 过滤态下点一个非首个命中页：点击同样要赢过自动跳页。
+#[test]
+fn 过滤态点击优先于自动跳页() {
+    let mut h = new_harness();
+    h.state_mut().ui.nav_filter = "图".to_owned(); // 可见：图标、图标库
+    h.run();
+    assert_eq!(h.state().ui.page, Page::Icons); // 常规被滤掉 → 自动跳
+
+    h.get_by_role_and_label(egui::Role::Tab, "图标库").click();
+    h.run();
+    assert_eq!(
+        h.state().ui.page,
+        Page::Library,
+        "点击的页不能被自动跳页盖掉"
+    );
+}
+
 /// 顶栏搜索：只显示命中的导航标签；当前页被过滤掉时自动跳到第一个命中页。
 #[test]
 fn 搜索过滤导航并自动切页() {

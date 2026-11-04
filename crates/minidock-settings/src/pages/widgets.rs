@@ -589,8 +589,14 @@ pub(crate) fn color_row(ctx: &mut Ctx<'_>, ui: &mut Ui, key: Key, label: &str) {
 /// 第一个命中页 —— 否则左栏和右栏会对不上。
 pub(crate) fn sidebar(ui: &mut Ui, state: &mut SettingsState) {
     let filter = state.nav_filter.trim().to_lowercase();
+    // 当前页必须在**进循环前**快照：点击会在循环中途改 `state.page`，
+    // 边遍历边读会让"旧页是否可见"的判断依赖遍历顺序 —— 点当前项
+    // 之上的一项时，旧页排在点击项之后、轮到它时页已被改成新页，
+    // 匹配不上 → 循环后被自动跳页覆盖回第一页（常规）。
+    let current = *page_ref(state);
     let mut first_visible: Option<Page> = None;
     let mut current_visible = false;
+    let mut clicked: Option<Page> = None;
 
     for p in Page::ALL {
         if !filter.is_empty() && !p.title().to_lowercase().contains(&filter) {
@@ -599,18 +605,21 @@ pub(crate) fn sidebar(ui: &mut Ui, state: &mut SettingsState) {
         if first_visible.is_none() {
             first_visible = Some(p);
         }
-        if *page_ref(state) == p {
+        if current == p {
             current_visible = true;
         }
-        if nav_item(ui, p.title(), *page_ref(state) == p).clicked() {
-            state.page = p;
+        if nav_item(ui, p.title(), current == p).clicked() {
+            // 只记录，循环外统一落账：自动跳页不能盖掉本帧的点击。
+            clicked = Some(p);
             // 切页后气泡的锚点属于旧页面，留着会飘在半空
             state.tip = None;
             state.tip_hover = None;
         }
     }
 
-    if !current_visible {
+    if let Some(p) = clicked {
+        state.page = p;
+    } else if !current_visible {
         if let Some(p) = first_visible {
             state.page = p;
         }
