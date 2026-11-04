@@ -446,7 +446,7 @@ bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
 | 1 | **顶部状态栏**（`Sb*` 9 个函数，约 165 行） | `SbGeom/SbDraw/SbShow/SbHide/SbTick/SbAppBar/SbAnchor/SbBattery/SbNetState`（L6896-7115） | ❌ 完全没有 |
 | 2 | **系统托盘小组件**（`W_TRAY`，第 7 个 widget） | `DrawTray` / `TrayOpen`（L6845），`ord[7]` | ✅ 卡片 + 点击打开通知区域（只做热键那半段，ADR-047） |
 | 3 | **小组件合并胶囊**（`WMerge`） | `RenderFrame` L3023 | ✅ 只改绘制，布局未动（ADR-047） |
-| 4 | **分割线拖动缩放**（`SepScale`） | `DockProc` L9884 / L9959：16 ms 节流、步长 0.6、夹 24..128、`IDC_SIZENS` | ❌ 无（我们只有拖动排序） |
+| 4 | **分割线拖动缩放**（`SepScale`） | `DockProc` L9884 / L9959：16 ms 节流、步长 0.6、夹 24..128、`IDC_SIZENS` | ✅ 16 ms 节流 / 0.6 步长 / 夹紧 / 只在尺寸真变时重建 / IDC_SIZENS / 防抖写盘（ADR-056）；设置页「交互」有开关 |
 | 5 | **HPad** 左右内边距独立 | `CalcMetrics` L1883 | ✅ 已接；默认 12 使栏体宽 +4 px（ADR-047） |
 | 6 | **三处毛玻璃**（设置 / 菜单 / 起动台） | `FrostSnap*` + `SetFrostGrab`（WM_MOVE 重抓）、起动台开窗前抓一次 | ❌ 全无模糊实现（`Blur` 键未使用） |
 | 7 | **起动台分类 / 标签 / A-Z 排序** | `LpCat` 启发式分类、`[LpCat]` 每项覆盖、`[LpTags]` 最多 8 组、`LpSortAZ`、右键"移动到标签组…" | ✅ 启发式分类 + 8 组标签 + 右键改分类 / 改名 / 删除 + A–Z + 过滤视图拖动排序（`launchpad.dat`，ADR-053/054） |

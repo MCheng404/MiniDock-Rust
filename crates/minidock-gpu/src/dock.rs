@@ -14,7 +14,7 @@
 //! 不含：图标加载（M2）、拖拽重排（M2）、倒影、磨砂（需要桌面捕获）。
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect as EguiRect, Stroke, StrokeKind};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::worker::ReadyIcon;
 use minidock_core::clock::ClockLine;
@@ -95,6 +95,22 @@ pub struct DragState {
 
 /// 起拖阈值（物理像素）。
 const DRAG_THRESHOLD: f32 = 6.0;
+
+/// 分割线缩放的节流：与上游 `sepTick` 一致，16 ms 内只算一次。
+const SEP_THROTTLE: Duration = Duration::from_millis(16);
+
+/// 一次「拖分割线改尺寸」的状态。
+#[derive(Clone, Copy, Debug)]
+struct SepDrag {
+    /// 按下时的客户区 y（物理像素）。
+    y0: f32,
+    /// 按下时的图标尺寸。缩放比例始终以它为准。
+    icon0: i32,
+    /// 按下时的放大尺寸。
+    zoom0: i32,
+    /// 上次真正算过尺寸的时刻。
+    last: Instant,
+}
 
 /// 一条 Dock 条目的运行时状态。
 #[derive(Clone, Debug)]
@@ -239,6 +255,10 @@ pub struct Dock {
     dirty: bool,
     /// 左键按下时命中的条目下标（拖拽判定与"按下抬起同一图标"都靠它）。
     press: Option<usize>,
+    /// 正在拖分割线改尺寸（`SepScale`）。`None` = 没在拖。
+    sep: Option<SepDrag>,
+    /// 分割线拖动改过 `IconSize` / `ZoomSize`，主循环要标脏写盘。
+    sep_dirty: bool,
     /// 显示模式。`Always` 常显、`AutoHide` 离开即收起、`SmartHide` 被遮挡才收起。
     ///
     /// 曾经单独存过一个 `auto_hide: bool`，但它表达不了"智能隐藏"：
@@ -316,6 +336,8 @@ impl Dock {
             force_hide: false,
             last_near_ms: 0,
             drag: None,
+            sep: None,
+            sep_dirty: false,
             moved: false,
             order_changed: false,
             pending_move: None,
@@ -424,7 +446,23 @@ impl Dock {
 
     /// 左键按下：记下命中项，并准备拖拽。返回是否需要 `SetCapture`。
     pub fn press_at(&mut self, u: f32, v: f32, force: bool) -> bool {
-        self.press = self.hit_at(u, v);
+        let hit = self.hit_at(u, v);
+        // 分割线拖动缩放要**早于**普通拖拽接管：否则这一下会被当成
+        // "拖动分割线重排"，而分割线本来就不该被拖走。
+        let on_sep = hit.is_some_and(|i| self.items[i].kind == ItemKind::Separator);
+        if on_sep && self.cfg.get_i32(Key::SEP_SCALE) != 0 {
+            self.press = None;
+            self.drag = None;
+            self.sep = Some(SepDrag {
+                y0: v,
+                icon0: self.cfg.icon_size,
+                zoom0: self.cfg.zoom_size,
+                // 减掉一个节流窗口：第一次移动就能生效，不必先空等 16 ms。
+                last: Instant::now() - SEP_THROTTLE,
+            });
+            return true; // 需要 SetCapture，否则拖出窗口就收不到抬起。
+        }
+        self.press = hit;
         self.press_force = force;
         self.drag = self.press.map(|index| DragState {
             index,
@@ -436,11 +474,45 @@ impl Dock {
         self.press.is_some()
     }
 
+    /// 光标是不是该显示成上下双箭头（分割线可缩放）。
+    #[must_use]
+    pub fn sep_cursor(&self, u: f32, v: f32) -> bool {
+        if self.sep.is_some() {
+            return true;
+        }
+        if self.cfg.get_i32(Key::SEP_SCALE) == 0 {
+            return false;
+        }
+        self.hit_at(u, v)
+            .is_some_and(|i| self.items[i].kind == ItemKind::Separator)
+    }
+
+    /// 取走"分割线拖动改过配置"的标记（主循环据此标脏写盘）。
+    pub fn take_sep_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.sep_dirty)
+    }
+
     /// 拖动中：更新位置，必要时重排。
     ///
     /// 阈值 6 px：没有它，手指/鼠标的微小抖动会让每次点击
     /// 都先"拖"一下再松手，观感很差。
     pub fn drag_to(&mut self, u: f32, v: f32) {
+        if let Some(sep) = self.sep.as_mut() {
+            if sep.last.elapsed() < SEP_THROTTLE {
+                return;
+            }
+            sep.last = Instant::now();
+            let (icon, zoom) = layout::sep_scale(v - sep.y0, sep.icon0, sep.zoom0);
+            // **只在尺寸真变时**改配置：鼠标停着不动还反复重建窗口，
+            // 就是上游注释里那句 "holding still cannot flicker"。
+            if icon != self.cfg.icon_size {
+                self.cfg.apply_i32(Key::IconSize, icon);
+                self.cfg.apply_i32(Key::ZoomSize, zoom);
+                self.sep_dirty = true;
+                self.mark_dirty();
+            }
+            return;
+        }
         let Some(mut d) = self.drag.take() else {
             return;
         };
@@ -522,6 +594,10 @@ impl Dock {
     /// 判据是按下与抬起命中同一条目。
     /// 少了它，从图标上按下、拖到别处松手也会误启动。
     pub fn release_at(&mut self, u: f32, v: f32) -> Option<usize> {
+        if self.sep.take().is_some() {
+            // 缩放不是点击；尺寸改动已在 drag_to 里落到 cfg。
+            return None;
+        }
         // 拖过就不算点击：这条必须先判断，否则每次重排都会顺带启动一次应用。
         let was_dragging = self.drag.take().is_some_and(|d| d.active);
         let pressed = self.press.take();
@@ -544,6 +620,9 @@ impl Dock {
     /// 不清掉 `press` 的话，下一次点击会带着上一次的"按下"状态，
     /// 表现为"点一下启动了上一个图标"。
     pub fn cancel_drag(&mut self) {
+        // 捕获被抢走时缩放也要停。已经改过的尺寸留在 cfg 里，
+        // `sep_dirty` 不清 —— 那次改动仍该写盘。
+        self.sep = None;
         let was = self.drag.take().is_some_and(|d| d.active);
         self.press = None;
         // **不能清 `click`。** 这个函数在 `WM_CAPTURECHANGED` 里被调用，而
@@ -2673,5 +2752,83 @@ mod tests {
             .unwrap();
         assert!(leftmost.color.r() > 240, "左端应当接近白色");
         assert!(rightmost.color.r() < 15, "右端应当接近黑色");
+    }
+
+    // ---- 分割线拖动缩放 ----
+
+    /// 造一条中间带分割线的 Dock（下标 1），返回它和分割线的命中坐标。
+    fn dock_with_sep(enabled: bool) -> (Dock, f32, f32) {
+        let mut cfg = Config::defaults(96);
+        cfg.apply_i32(Key::SEP_SCALE, i32::from(enabled));
+        let kinds = [ItemKind::File, ItemKind::Separator, ItemKind::File];
+        let items: Vec<DockItem> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let it = Item::new(*k, format!("第{i}项"), format!("C:/x{i}.exe"));
+                let mut d = DockItem::from_item(&it);
+                d.cur = cfg.icon_size as f32;
+                d
+            })
+            .collect();
+        let mut dock = Dock::new(cfg, items, LRect::new(0, 0, 2560, 1400));
+        dock.update(96);
+        let u = (dock.geom.slot_l[1] + dock.geom.slot_r[1]) * 0.5;
+        let v = dock.geom.bar_top + dock.metrics.bar_h * 0.5;
+        assert_eq!(dock.hit_at(u, v), Some(1), "测试坐标要真的落在分割线上");
+        (dock, u, v)
+    }
+
+    /// 开关打开时，按下分割线走缩放，不是拖动重排；抬起也不产出点击。
+    #[test]
+    fn sep_scale_takes_over_the_press() {
+        let (mut dock, u, v) = dock_with_sep(true);
+        let icon0 = dock.cfg.icon_size;
+        assert!(dock.press_at(u, v, false), "需要 SetCapture");
+        assert!(dock.dragging().is_none(), "不该进入条目拖拽");
+        assert!(dock.sep_cursor(u, v), "光标应当是上下双箭头");
+        assert!(!dock.take_sep_dirty());
+
+        dock.drag_to(u, v - 100.0);
+        assert!(dock.cfg.icon_size > icon0, "上拖应当放大图标");
+        assert!(dock.cfg.zoom_size > 96);
+        assert!(dock.take_sep_dirty(), "改过配置要通知主循环写盘");
+
+        assert_eq!(dock.release_at(u, v - 100.0), None, "缩放不是点击");
+    }
+
+    /// 开关关掉时，分割线仍然是普通条目（可拖动重排），尺寸不变。
+    #[test]
+    fn sep_scale_disabled_keeps_normal_behaviour() {
+        let (mut dock, u, v) = dock_with_sep(false);
+        let icon0 = dock.cfg.icon_size;
+        assert!(!dock.sep_cursor(u, v));
+        assert!(dock.press_at(u, v, false));
+        dock.drag_to(u, v - 100.0);
+        assert_eq!(dock.cfg.icon_size, icon0);
+        assert!(!dock.take_sep_dirty());
+    }
+
+    /// 尺寸没变就不再标脏：鼠标停着不动时不该反复重建窗口。
+    #[test]
+    fn sep_scale_only_marks_dirty_when_size_changes() {
+        let (mut dock, u, v) = dock_with_sep(true);
+        dock.press_at(u, v, false);
+        dock.drag_to(u, v - 100.0);
+        assert!(dock.take_sep_dirty());
+        dock.drag_to(u, v - 100.0);
+        assert!(!dock.take_sep_dirty(), "同样的位移不该再改一次配置");
+    }
+
+    /// 捕获被抢走时缩放也要停，但改过的尺寸不回滚。
+    #[test]
+    fn losing_capture_stops_sep_scale() {
+        let (mut dock, u, v) = dock_with_sep(true);
+        let icon0 = dock.cfg.icon_size;
+        dock.press_at(u, v, false);
+        dock.drag_to(u, v - 100.0);
+        dock.cancel_drag();
+        assert!(dock.cfg.icon_size > icon0, "尺寸改动保留");
+        assert!(!dock.sep_cursor(u + 400.0, v), "已经不在拖拽态");
     }
 }

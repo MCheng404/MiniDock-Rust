@@ -523,6 +523,11 @@ impl App {
             need_frame |= self.step_relayout()?;
             // ④ 拖拽重排同步到配置副本（写盘走防抖，不在这里做）。
             self.step_reorder();
+            // ④.5 分割线拖动改了 IconSize / ZoomSize：标脏，交给同一个防抖窗口。
+            // 一次拖动会连着改几十次，逐次写盘等于每帧一次 UTF-16 全量回写。
+            if self.dock.take_sep_dirty() {
+                self.touch_cfg();
+            }
             // ⑤ 点击启动：交给工作线程，`ShellExecuteW` 不再阻塞 UI。
             self.step_click();
             // ⑥ 右键菜单（模态）。
@@ -1953,6 +1958,18 @@ fn dock_on_item(dock: &Dock, u: f32, v: f32) -> bool {
     dock.hit_at(u, v).is_some() || dock.widget_at(u, v).is_some()
 }
 
+/// 光标形状：分割线上给上下双箭头（可拖动缩放），其余可点的是手型。
+///
+/// 必须和 `WM_MOUSEMOVE` / `WM_SETCURSOR` 共用这一处 —— 按住拖动时系统
+/// 不发 `WM_SETCURSOR`，两条路径各写一遍就会在拖拽中退回箭头。
+fn dock_cursor(dock: &Dock, u: f32, v: f32) {
+    if dock.sep_cursor(u, v) {
+        minidock_gpu::cursor::set(minidock_gpu::cursor::size_ns());
+    } else {
+        minidock_gpu::cursor::set_hand_if(dock_on_item(dock, u, v));
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -1975,7 +1992,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 // 光标也要在这里设一次：**按住时（SetCapture）系统不发
                 // `WM_SETCURSOR`**，只靠那条的话整段拖拽期间都是忙光标。
-                minidock_gpu::cursor::set_hand_if(dock_on_item(&*ptr, u, v));
+                dock_cursor(&*ptr, u, v);
                 // 让系统在鼠标离开时发 `WM_MOUSELEAVE`：不装这个钩子，
                 // `hover` 会永远是 true，Dock 停在放大状态不回去。
                 arm_mouse_leave(hwnd);
@@ -1999,13 +2016,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // 实测那个默认是**忙光标**（沙漏），也就是这个 bug 的成因。
         WM_SETCURSOR => {
             let ptr = dock_ptr(hwnd);
-            let mut on_item = false;
             if !ptr.is_null() {
                 if let Some((u, v)) = minidock_gpu::cursor::client_pos(hwnd) {
-                    on_item = dock_on_item(&*ptr, u, v);
+                    dock_cursor(&*ptr, u, v);
                 }
             }
-            minidock_gpu::cursor::set_hand_if(on_item);
             LRESULT(1)
         }
         WM_LBUTTONDOWN => {

@@ -16,6 +16,13 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             "点击文件夹时弧形堆叠展开",
             "像 macOS 一样列出最近的文件，点击即可打开",
         );
+        toggle(
+            ctx,
+            ui,
+            Key::SEP_SCALE,
+            "上下拖动分割线缩放 Dock",
+            "按住图标之间的竖线上下拖，按比例调整图标与放大尺寸",
+        );
     });
 
     card(ctx, ui, "动画", "", |ctx, ui| {

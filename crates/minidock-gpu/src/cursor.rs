@@ -40,7 +40,7 @@ use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, LoadCursorW, SetCursor, HCURSOR, IDC_APPSTARTING, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    IDC_SIZEALL, IDC_WAIT,
+    IDC_SIZEALL, IDC_SIZENS, IDC_WAIT,
 };
 
 /// 系统光标的缓存。
@@ -54,6 +54,7 @@ static ARROW_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static HAND_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static IBEAM_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static SIZEALL_HANDLE: AtomicUsize = AtomicUsize::new(0);
+static SIZENS_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static APPSTARTING_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static WAIT_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
@@ -76,6 +77,7 @@ fn load(id: windows::core::PCWSTR) -> HCURSOR {
         IDC_HAND => cached(&HAND_HANDLE, IDC_HAND),
         IDC_IBEAM => cached(&IBEAM_HANDLE, IDC_IBEAM),
         IDC_SIZEALL => cached(&SIZEALL_HANDLE, IDC_SIZEALL),
+        IDC_SIZENS => cached(&SIZENS_HANDLE, IDC_SIZENS),
         IDC_APPSTARTING => cached(&APPSTARTING_HANDLE, IDC_APPSTARTING),
         IDC_WAIT => cached(&WAIT_HANDLE, IDC_WAIT),
         other => unsafe { LoadCursorW(None, other) }.unwrap_or_default(),
@@ -102,6 +104,11 @@ pub fn hand() -> HCURSOR {
 /// 文本插入符。
 pub fn i_beam() -> HCURSOR {
     load(IDC_IBEAM)
+}
+
+/// 上下双箭头：拖分割线改 Dock 尺寸时用。
+pub fn size_ns() -> HCURSOR {
+    load(IDC_SIZENS)
 }
 
 /// 把光标设成指定形状。空句柄时什么都不做（避免把光标"设没了"）。

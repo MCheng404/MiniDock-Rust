@@ -894,6 +894,29 @@ pub fn hit_test(m: &Metrics, bars: &Bars, slots: &Slots, cur: &[f32], view: View
     )
 }
 
+/// 拖动分割线缩放时的新尺寸（`SepScale`）。
+///
+/// `dy` 是鼠标相对按下时的**物理像素**位移：往上拖为负 → 图标变大。
+/// `0.6` 是上游的细步长（一次 `WM_MOUSEMOVE` 不会跳一整格）；16 ms 节流
+/// 在窗口层做，这里只管算。
+///
+/// 返回 `(icon, zoom)`：图标夹在 `24..128`，放大尺寸按**初始比例**同比缩放
+/// 后夹在 `32..220`。两个数还会被 [`crate::config::Config::apply_i32`] 再夹
+/// 一次（那层夹的是配置本身的取值范围）。
+///
+/// 为什么用 `zoom0 / icon0` 而不是每帧的当前值：以拖动起点为基准，
+/// 来回拖不会累积取整误差，松手回到原位时尺寸也回到原值。
+#[must_use]
+pub fn sep_scale(dy: f32, icon0: i32, zoom0: i32) -> (i32, i32) {
+    // 截断而不是四舍五入：与上游 `(int)(dy * 0.6f)` 一致，慢速拖动时
+    // 不会因为浮点抖动在同一格上反复 ±1。
+    let delta = (dy * 0.6) as i32;
+    let icon = (icon0 - delta).clamp(24, 128);
+    let base = icon0.max(1) as f32;
+    let zoom = (zoom0 as f32 * icon as f32 / base).round() as i32;
+    (icon, zoom.clamp(32, 220))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1754,5 +1777,38 @@ mod tests {
         let b = bars(&m);
         assert!((b.bottom - b.top - m.bar_h).abs() < 0.01);
         assert!((b.bottom - b.icon_bottom - m.pad - 2.0).abs() < 0.01);
+    }
+
+    // ---- 分割线拖动缩放 ----
+
+    /// 往上拖变大、往下拖变小，步长 0.6；放大尺寸按初始比例同比缩放。
+    #[test]
+    fn sep_scale_follows_drag_direction() {
+        assert_eq!(sep_scale(0.0, 64, 96), (64, 96));
+        assert_eq!(sep_scale(-100.0, 64, 96), (124, 186), "上拖 100px → +60");
+        assert_eq!(
+            sep_scale(100.0, 64, 96),
+            (24, 36),
+            "下拖 100px → -60，触底夹紧"
+        );
+    }
+
+    /// 两个方向都夹得住，图标 24..128、放大 32..220。
+    #[test]
+    fn sep_scale_clamps_both_bounds() {
+        assert_eq!(sep_scale(-1000.0, 64, 96), (128, 192));
+        assert_eq!(sep_scale(1000.0, 64, 96), (24, 36));
+        // 放大尺寸自己也要夹：起点图标很大、放大很小时，同比算出来会低于 32。
+        assert_eq!(sep_scale(1000.0, 128, 32), (24, 32));
+        assert_eq!(sep_scale(-1000.0, 24, 220), (128, 220));
+    }
+
+    /// 以拖动起点为基准：来回拖回原位，尺寸也回到原值（不累积取整误差）。
+    #[test]
+    fn sep_scale_roundtrip_returns_to_start() {
+        let (icon, zoom) = sep_scale(-137.0, 64, 96);
+        assert!(icon > 64 && zoom > 96);
+        // 回到起点只需 dy=0 —— 基准始终是 icon0/zoom0。
+        assert_eq!(sep_scale(0.0, 64, 96), (64, 96));
     }
 }

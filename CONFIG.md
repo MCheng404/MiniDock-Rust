@@ -114,6 +114,7 @@ cargo run -q -p minidock-core --example config_table
 | `ClickToggle` | 1 | 0/1 | 点击运行中的应用 = 最小化 / 恢复 |
 | `SepGap` | 4 | 0–64 | 分割线间距（px，默认随 DPI 缩放） |
 | `SepWidth` | 2 | 0–16 | 分割线宽度（px） |
+| `SepScale` | 0 | 0/1 | 按住分割线上下拖动，按比例调整 `IconSize` / `ZoomSize`（设置页「交互」里可开） |
 | `ClockSec` | 0 | 0/1 | 时间显示秒数 |
 | `ClockWeek` | 1 | 0/1 | 日期显示周几 |
 | `DateFmt` | 0 | 0–2 | 日期格式：0 中文 / 1 斜杠 / 2 横杠 |
