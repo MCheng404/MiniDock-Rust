@@ -1090,6 +1090,15 @@ pub struct Config {
     /// 那些键与 ini 行序一一对应，是刻意保留的对应关系，
     /// 这个键是 Rust 版独有的，混进去会破坏这条不变式。
     pub adapter: String,
+    /// 控制中心磁贴顺序（`[widgets] Order`，逗号分隔的磁贴 id）。
+    ///
+    /// 和其它键一样是裸字符串：id 表的合法性由 `control::parse_order`
+    /// 判（未知 id 直接跳过），这里不重复校验 —— 两处各判一遍只会
+    /// 出现"这里认、那里不认"的偏差。
+    ///
+    /// 空串 = 没拖过，按默认顺序排。**不写回默认值**：一长串
+    /// `0,1,2,3,4,5,6,7` 只会让 ini 多出一行噪声。
+    pub cc_order: String,
     /// 运行时主题色（RGB 0..255）。由窗口层按 `UiAccent` 解析后写入，
     /// 不参与 ini 读写 —— 系统强调色是环境值，不该被保存到配置里。
     /// `None` = 使用主题默认配色。
@@ -1155,6 +1164,7 @@ impl Config {
                 .collect(),
 
             adapter: String::new(),
+            cc_order: String::new(),
             runtime_accent: None,
         }
     }
@@ -1334,6 +1344,7 @@ impl Config {
             }
         }
         cfg.adapter = Self::sanitize_adapter(ini.get("Graphics", "Adapter").unwrap_or_default());
+        cfg.cc_order = ini.get("widgets", "Order").unwrap_or_default().to_owned();
         cfg.clamp();
         cfg
     }
@@ -1349,6 +1360,11 @@ impl Config {
         // 自动时写空串而不是删键：删掉会让"手动改成自动"在文件里看不出痕迹，
         // 排查用户配置时容易误判成"从没设置过"。
         ini.set("Graphics", "Adapter", &self.adapter);
+        // 磁贴顺序相反：没拖过就不写。它的默认值是"空"，写一行空值
+        // 只会让每个用户的 ini 都多一行噪声。
+        if !self.cc_order.is_empty() {
+            ini.set("widgets", "Order", &self.cc_order);
+        }
     }
 
     /// 把旧格式就地升级为当前格式，返回是否发生了升级。
@@ -2308,6 +2324,32 @@ mod tests {
 
         let back = Config::from_ini(&Ini::parse(&ini.to_text()), 96);
         assert_eq!(back.adapter, c.adapter);
+    }
+
+    /// 磁贴顺序：拖过才写，没拖过不留空行。
+    ///
+    /// 空行不是"多余"，是**有害**：`[widgets] Order=` 会让排查配置的人
+    /// 以为这个用户调过顺序，而实际上是默认值。
+    #[test]
+    fn cc_order_only_written_when_set() {
+        let c = Config::defaults(96);
+        assert!(c.cc_order.is_empty());
+        let mut ini = Ini::default();
+        c.write_ini(&mut ini);
+        assert!(
+            ini.get("widgets", "Order").is_none(),
+            "没拖过就不该有这一行"
+        );
+
+        let mut c2 = Config::defaults(96);
+        c2.cc_order = "5,0,1,2,3,4,6,7".to_owned();
+        let mut ini2 = Ini::default();
+        c2.write_ini(&mut ini2);
+        assert_eq!(
+            Config::from_ini(&ini2, 96).cc_order,
+            "5,0,1,2,3,4,6,7",
+            "拖过之后要原样读回来"
+        );
     }
 
     #[test]

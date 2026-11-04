@@ -89,7 +89,18 @@ pub struct CcWindow {
     hover: Option<Hit>,
     hits: Vec<EguiRect>,
     slider: EguiRect,
+    /// 正在拖音量滑块。
     dragging: bool,
+    /// 按下时落在第几个磁贴（还没确定是点击还是拖动）。
+    press: Option<usize>,
+    /// 正在被拖动的磁贴现在在第几格。
+    drag_tile: Option<usize>,
+    /// 按下时的客户区坐标，用来算"有没有动起来"。
+    down: (f32, f32),
+    /// 这次按下之后真的换过位置。
+    moved: bool,
+    /// 拖动结束后待交给主循环的新顺序。
+    pending_order: Option<Vec<Tile>>,
     next_repaint: Instant,
 }
 
@@ -110,6 +121,7 @@ impl CcWindow {
         dark: bool,
         energy_on: bool,
         hotspot_on: bool,
+        order: &[Tile],
     ) -> Result<Pin<Box<Self>>, GpuError> {
         let hinst =
             unsafe { GetModuleHandleW(None) }.map_err(|_| GpuError::Win32("GetModuleHandleW"))?;
@@ -125,7 +137,8 @@ impl CcWindow {
             RegisterClassW(&raw const wc);
         }
 
-        let tiles = control::tiles(energy_on, hotspot_on, false);
+        // 顺序来自 `[widgets] Order`；没拖过就是空表 → 默认顺序。
+        let tiles = control::tiles_ordered(order, energy_on, hotspot_on, false);
         let (pw, ph) = physical_size(ppp, tiles.len());
         let hwnd = unsafe {
             CreateWindowExW(
@@ -171,6 +184,11 @@ impl CcWindow {
             hits: Vec::new(),
             slider: EguiRect::NOTHING,
             dragging: false,
+            press: None,
+            drag_tile: None,
+            down: (0.0, 0.0),
+            moved: false,
+            pending_order: None,
             next_repaint: Instant::now(),
         });
         win.attach();
@@ -259,6 +277,14 @@ impl CcWindow {
         Ok(())
     }
 
+    /// 取走"磁贴顺序变了"的通知。拖动结束产生一次。
+    ///
+    /// 面板自己不写配置：`Config` 归主循环所有，写盘还要走防抖队列。
+    /// 这里只把结果交出去。
+    pub fn take_order(&mut self) -> Option<Vec<Tile>> {
+        self.pending_order.take()
+    }
+
     /// 设音量（拖动时每帧调一次）。
     fn set_volume(&mut self, v: u32) {
         let v = v.min(100);
@@ -331,6 +357,26 @@ impl CcWindow {
                     }
                     return None;
                 }
+                // 磁贴拖动：超过阈值才开始，落在别的格上就**即时**换位
+                // （与上游 CcMove 一致）。拖影那套在 3 列小格子里反而更乱：
+                // 用户要的是"看着它挪过去"。
+                if self.press.is_some() && self.drag_tile.is_none() {
+                    let dx = x - self.down.0;
+                    let dy = y - self.down.1;
+                    if dx.abs() > 6.0 || dy.abs() > 6.0 {
+                        self.drag_tile = self.press;
+                    }
+                }
+                if let Some(cur) = self.drag_tile {
+                    if let Some(to) = self.hits.iter().position(|r| r.contains(p)) {
+                        if to != cur && to < self.tiles.len() && cur < self.tiles.len() {
+                            self.tiles.swap(cur, to);
+                            self.drag_tile = Some(to);
+                            self.moved = true;
+                            self.next_repaint = Instant::now();
+                        }
+                    }
+                }
                 let h = if self.slider.contains(p) {
                     Some(Hit::Slider)
                 } else {
@@ -361,6 +407,13 @@ impl CcWindow {
                         let f = ((x - left) / (right - left)).clamp(0.0, 1.0);
                         self.set_volume((f * 100.0).round() as u32);
                     }
+                } else {
+                    // 磁贴上按下：先只记位置，动起来才算拖动 —— 否则普通
+                    // 点击会被当成"拖了一下没动"，点击就没反应了。
+                    self.down = (x, y);
+                    self.press = self.hits.iter().position(|r| r.contains(p));
+                    self.drag_tile = None;
+                    self.moved = false;
                 }
                 Some(LRESULT(0))
             }
@@ -370,6 +423,17 @@ impl CcWindow {
                     unsafe {
                         let _ = ReleaseCapture();
                     }
+                    return Some(LRESULT(0));
+                }
+                let moved = self.moved;
+                self.press = None;
+                self.drag_tile = None;
+                self.moved = false;
+                // 拖过一次就别再当成点击：否则每次重排都会顺带触发一次
+                // "打开系统面板 / 切开关"，那个面板会盖住刚排好的磁贴。
+                if moved {
+                    self.pending_order = Some(self.tiles.clone());
+                    self.next_repaint = Instant::now();
                     return Some(LRESULT(0));
                 }
                 let (x, y) = client_pos(lparam, self.ppp);

@@ -33,7 +33,7 @@
 | `[behavior]` | 缩放、指示点、标签、弹跳、时钟、文件夹扇面 |
 | `[behavior.group]` | 应用组与扇面参数（多数功能待实现） |
 | `[theme]` | Dock / 设置界面主题、底盘圆角、指示点样式 |
-| `[widgets]` | 小组件条带：位置、顺序、各卡片开关（Rust 版新增 `PanelDismiss`） |
+| `[widgets]` | 小组件条带：位置、顺序、各卡片开关；`Order` 存控制中心磁贴顺序（Rust 版新增 `PanelDismiss` / `Order`） |
 | `[widgets.clock]` | 时钟显示与格式 |
 | `[menu]` | 右键菜单项开关 |
 | `[advanced]` | 浏览器路径、全局热键 |
@@ -128,6 +128,7 @@ cargo run -q -p minidock-core --example config_table
 | `MnNotes` | 1 | 0/1 | 右键菜单显示速记开关 |
 | `MnAdd` | 1 | 0/1 | 空白处右键显示新建项 |
 | `PanelDismiss` | 1 | 0/1 | 点小组件面板外面任意位置就收起（Rust 版独有） |
+| `Order` | *（空）* | 逗号分隔的 id | 控制中心磁贴顺序，拖动面板上的磁贴即写入；空 = 默认顺序（Rust 版独有） |
 
 ## 三、`[effect.smoke]` 段（Rust 版独有）
 

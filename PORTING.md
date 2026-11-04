@@ -450,7 +450,7 @@ bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
 | 5 | **HPad** 左右内边距独立 | `CalcMetrics` L1883 | ✅ 已接；默认 12 使栏体宽 +4 px（ADR-047） |
 | 6 | **三处毛玻璃**（设置 / 菜单 / 起动台） | `FrostSnap*` + `SetFrostGrab`（WM_MOVE 重抓）、起动台开窗前抓一次 | ❌ 全无模糊实现（`Blur` 键未使用） |
 | 7 | **起动台分类 / 标签 / A-Z 排序** | `LpCat` 启发式分类、`[LpCat]` 每项覆盖、`[LpTags]` 最多 8 组、`LpSortAZ`、右键"移动到标签组…" | ✅ 启发式分类 + 8 组标签 + 右键改分类 / 改名 / 删除 + A–Z + 过滤视图拖动排序（`launchpad.dat`，ADR-053/054） |
-| 8 | **控制中心磁贴拖动排序** + `[CcOrder]` 持久化 | `CcOrderLoad/Save`、`CcMove` L6321 | ❌ 顺序写死 |
+| 8 | **控制中心磁贴拖动排序** + `[CcOrder]` 持久化 | `CcOrderLoad/Save`、`CcMove` L6321 | ✅ 拖动即时换位 + `[widgets] Order`（ADR-055）；键名/段名与上游不同 |
 | 9 | 控制中心细节修 | 有线网卡图标（id 8）、WiFi 优先于有线、月亮用两段弧 | 部分（我们无有线检测） |
 | 10 | 启动应用后 1.5 s 内不做全屏判定（防 Dock 闪出闪回） | `g_launchTick`（L2488 设置 / L2358 `FsWatch` 判定） | ❓ 待核（见 §8.7） |
 | 11 | 最小化动画的"最大化窗口"取整屏 | `WindowShownRect` 用 `mi.rcMonitor` | 待核（我们有自己的实现） |

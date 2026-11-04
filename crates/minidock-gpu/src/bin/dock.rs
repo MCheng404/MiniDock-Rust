@@ -1402,7 +1402,11 @@ impl App {
                             .get_i32(minidock_core::config::Key::CC_HOTSPOT)
                             != 0;
                         if self.cc_slot.is_none() {
-                            let win = CcWindow::new(&self.gpu, self.ppp, dark, energy, hotspot)?;
+                            // 磁贴顺序是用户拖出来的，存在 `[widgets] Order`。
+                            let order =
+                                minidock_core::control::parse_order(&self.dock.cfg.cc_order);
+                            let win =
+                                CcWindow::new(&self.gpu, self.ppp, dark, energy, hotspot, &order)?;
                             self.cc_slot = Some(win);
                         }
                         let anchor = self.dock.widget_screen_rect(
@@ -1479,6 +1483,7 @@ impl App {
             }
         }
         // 控制中心：只在交互后重绘；改过主题就通知主循环重读一次。
+        let mut cc_order: Option<Vec<minidock_core::control::Tile>> = None;
         if let Some(win) = self.cc_slot.as_mut() {
             if win.due() {
                 win.render(&self.gpu)?;
@@ -1490,6 +1495,16 @@ impl App {
                 win.dirty_theme = false;
                 need = true;
             }
+            cc_order = win.take_order();
+        }
+        if let Some(order) = cc_order {
+            // 只改内存副本 + 标脏：写盘走防抖队列（一次拖拽会连着换好几次位）。
+            self.dock.cfg.cc_order = minidock_core::control::order_text(&order);
+            self.touch_cfg();
+            if trace::geom() {
+                eprintln!("[cc] 磁贴顺序 -> {}", self.dock.cfg.cc_order);
+            }
+            need = true;
         }
         // 日历弹层：只在交互后重绘一次，不跑定时器。
         if let Some(win) = self.calendar_slot.as_mut() {
