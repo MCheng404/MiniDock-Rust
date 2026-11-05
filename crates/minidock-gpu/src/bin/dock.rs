@@ -12,6 +12,12 @@
 //!
 //! 按 Esc 退出。鼠标移上去会触发悬停放大与标签气泡。
 
+// 双击 exe 不该弹出一个黑色控制台窗口：那是 console 子系统的默认行为。
+// 声明成 GUI 子系统后，从终端启动时仍然继承父进程的 stdout/stderr
+// （`eprintln!` 的诊断照常可见），双击启动时则不分配控制台。
+// debug 构建保留控制台：panic 与工作线程的日志得看得见。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::time::{Duration, Instant};
 
 use minidock_core::clock;
@@ -28,6 +34,7 @@ use minidock_gpu::calendar_win::CalendarWindow;
 use minidock_gpu::cc_win::CcWindow;
 use minidock_gpu::dock::{Dock, DockItem};
 use minidock_gpu::frame::FrameRenderer;
+use minidock_gpu::frost::Spec as FrostSpec;
 use minidock_gpu::gpu::Gpu;
 use minidock_gpu::launchpad_win::LaunchpadWindow;
 use minidock_gpu::menu::{Menu, MenuCmd};
@@ -37,6 +44,7 @@ use minidock_gpu::smoke::{SmokeFx, View as SmokeView};
 use minidock_gpu::tool_win::ToolWindow;
 use minidock_gpu::worker::{
     DiskWriter, IconLoader, IconRequest, OpenJob, Opener, ScanInput, Scanner, Waker, WriteJob,
+    WM_APP_WAKE,
 };
 use minidock_platform::app_window;
 use minidock_platform::appbar::AppBar;
@@ -51,9 +59,7 @@ use minidock_settings::{Command, SettingsState};
 use std::pin::Pin;
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, ScreenToClient, UpdateWindow, PAINTSTRUCT,
-};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, UpdateWindow, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
@@ -238,6 +244,9 @@ struct App {
     fake_mouse: Option<(f32, f32)>,
     /// `MINIDOCK_FAKE_COVERED=0/1`：覆盖遮挡判定结果。
     fake_covered: Option<bool>,
+    /// 上一次"靠近"判定的结果。只在 `MINIDOCK_GEOM=1` 下用来打变化日志 ——
+    /// "为什么没展开/没收起"要能看出是判定翻没翻。
+    last_near: Option<bool>,
     start: Instant,
     /// 单实例互斥体。**必须是字段**：它是 RAII 锁，放成 `boot` 的局部变量
     /// 会在 `boot` 返回时立刻释放，第二个实例就能起来了。
@@ -482,6 +491,7 @@ impl App {
             fs_hidden: false,
             fake_mouse: fake_mouse_from_env(),
             fake_covered: fake_covered_from_env(),
+            last_near: None,
             start,
             _guard: guard,
         };
@@ -647,7 +657,7 @@ impl App {
             self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
             self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
         );
-        lw.open();
+        lw.open(frost_spec(&self.dock.cfg, Key::LP_FROST, 0.0));
         Ok(())
     }
 
@@ -740,6 +750,7 @@ impl App {
             dark,
             self.ppp,
             self.start,
+            frost_spec(&self.dock.cfg, Key::MENU_FROST, minidock_gpu::menu::RADIUS),
         ) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -770,7 +781,7 @@ impl App {
                 )?;
                 // 每次打开都重读：用户可能刚在任务管理器里改过它。
                 sw.state.auto_start = theme::get_autostart();
-                sw.show();
+                sw.show(frost_spec(&self.dock.cfg, Key::UI_FROST, 20.0));
             } else {
                 self.run_menu_cmd(cmd, hit);
             }
@@ -1182,7 +1193,7 @@ impl App {
     ///
     /// 面板是懒建的：第一次点卡片才建窗口（建窗口要编译渲染管线，
     /// 几十毫秒，不能记在启动时间上）。
-    /// 调试用：`MINIDOCK_DEBUG_OPEN=cc|launchpad|calendar|tool|resmon`
+    /// 调试用：`MINIDOCK_DEBUG_OPEN=cc|launchpad|calendar|tool|resmon|settings`
     /// 时，启动后直接把那个面板打开。
     ///
     /// 为什么需要它：无人值守验收要点击卡片，而前台常常压着一个浏览器窗口
@@ -1218,7 +1229,18 @@ impl App {
                     self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
                     self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
                 );
-                lw.open();
+                lw.open(frost_spec(&self.dock.cfg, Key::LP_FROST, 0.0));
+                return Ok(true);
+            }
+            "settings" => {
+                let sw = ensure_settings(
+                    &self.gpu,
+                    &mut self.settings_slot,
+                    &self.paths,
+                    settings_win::effective_ppp(&self.dock.cfg),
+                )?;
+                sw.state.auto_start = minidock_platform::theme::get_autostart();
+                sw.show(frost_spec(&self.dock.cfg, Key::UI_FROST, 20.0));
                 return Ok(true);
             }
             other => {
@@ -1247,6 +1269,22 @@ impl App {
     /// 有面板开着吗。
     fn panel_open(&self) -> bool {
         self.panels().iter().flatten().any(|(visible, _)| *visible)
+    }
+
+    /// 现在有没有"正在操作 Dock"的事。这类状态下自动隐藏一律保持展开。
+    ///
+    /// 比"拖动中"多三件，都是实测出来的：
+    ///
+    /// - **面板开着**：光标在面板里，按几何已经离开 Dock —— 可面板就是
+    ///   Dock 的一部分，收起会让它凭空悬在半空。
+    /// - **设置窗口开着**：用户常一边调参数一边看栏体变化，收起等于把
+    ///   正在预览的东西藏起来。
+    /// - **起动台开着**：全屏盖住了 Dock，收起再展开只是白做一段动画。
+    fn dock_busy(&self) -> bool {
+        self.dock.dragging().is_some()
+            || self.panel_open()
+            || self.settings_slot.as_ref().is_some_and(|w| w.visible())
+            || self.launchpad_slot.as_ref().is_some_and(|w| w.visible())
     }
 
     /// 这个屏幕点是否落在某个**可见**面板里。
@@ -1561,18 +1599,17 @@ impl App {
         }
     }
 
-    /// 栏体在**屏幕**坐标下的矩形。
+    /// 停靠带在**屏幕**坐标下的矩形（图标条 + 小组件条带 + 投影留白）。
+    ///
+    /// 遮挡判定必须覆盖整条带子：只看图标条的话，一个盖住时钟的窗口不会被
+    /// 当成"挡住"，智能隐藏就不会让位，Dock 与窗口叠在一起。
     fn bar_screen_rect(&self) -> LRect {
-        let left = self.dock.geom.bar_l.round() as i32;
-        let top = self.dock.geom.bar_top.round() as i32;
-        let right = (self.dock.geom.bar_l + self.dock.geom.bar_w).round() as i32;
-        // 算到 `barH + margin`，把下方的留白也算进去。
-        let bottom = (self.dock.geom.bar_bottom + self.dock.metrics.margin).round() as i32;
+        let (x, y, w, h) = self.dock.hot_phys();
         LRect::new(
-            self.pos.0 + left,
-            self.pos.1 + top,
-            self.pos.0 + right,
-            self.pos.1 + bottom,
+            self.pos.0 + x.round() as i32,
+            self.pos.1 + y.round() as i32,
+            self.pos.0 + (x + w).round() as i32,
+            self.pos.1 + (y + h).round() as i32,
         )
     }
 
@@ -1624,7 +1661,7 @@ impl App {
         }
         let now_ms = self.now_ms();
         let near = cursor_near(&self.dock, self.hwnd);
-        let busy = self.dock.dragging().is_some();
+        let busy = self.dock_busy();
         // 智能隐藏才需要枚举窗口。按需调用：`EnumWindows` 要遍历桌面上
         // 所有顶层窗口，100 ms 一次也吃不住白跑的代价。
         // `MINIDOCK_FAKE_COVERED=0/1` 覆盖遮挡判定结果：桌面环境不可控，
@@ -1634,7 +1671,14 @@ impl App {
         let covered =
             self.dock.mode == DockMode::SmartHide && self.fake_covered.unwrap_or(self.covered);
         let before = self.dock.hide_target;
-        self.dock.tick_auto_hide(near, busy, covered, now_ms);
+        self.dock.tick_auto_hide(near.hit, busy, covered, now_ms);
+        if trace::geom() && self.last_near != Some(near.hit) {
+            self.last_near = Some(near.hit);
+            eprintln!(
+                "[near] {} cursor=({},{}) hot=({:.0},{:.0},{:.0}x{:.0}) busy={busy} covered={covered}",
+                near.hit, near.cursor.0, near.cursor.1, near.hot.0, near.hot.1, near.hot.2, near.hot.3
+            );
+        }
         if before == self.dock.hide_target {
             return false;
         }
@@ -1642,27 +1686,24 @@ impl App {
             // 智能隐藏时点名盖住者："为什么躲起来"要能一眼看出，
             // 否则只能对着一个 bool 猜是哪个窗口。
             let by = if self.dock.mode == DockMode::SmartHide {
-                let left = self.dock.geom.bar_l.round() as i32;
-                let top = self.dock.geom.bar_top.round() as i32;
-                let right = (self.dock.geom.bar_l + self.dock.geom.bar_w).round() as i32;
-                let bottom = (self.dock.geom.bar_bottom + self.dock.metrics.margin).round() as i32;
-                occlusion::covering_window(
-                    LRect::new(
-                        self.pos.0 + left,
-                        self.pos.1 + top,
-                        self.pos.0 + right,
-                        self.pos.1 + bottom,
-                    ),
-                    &[self.hwnd],
-                )
-                .1
-                .map_or_else(String::new, |t| format!(" by {t:?}"))
+                occlusion::covering_window(self.bar_screen_rect(), &[self.hwnd])
+                    .1
+                    .map_or_else(String::new, |t| format!(" by {t:?}"))
             } else {
                 String::new()
             };
             eprintln!(
-                "[hide] target={} near={near} busy={busy} covered={covered}{by} cur={:.3}",
-                self.dock.hide_target, self.dock.hide_cur
+                "[hide] target={} near={} busy={busy} covered={covered}{by} cur={:.3} \
+                 cursor=({},{}) hot=({:.0},{:.0},{:.0}x{:.0})",
+                self.dock.hide_target,
+                near.hit,
+                self.dock.hide_cur,
+                near.cursor.0,
+                near.cursor.1,
+                near.hot.0,
+                near.hot.1,
+                near.hot.2,
+                near.hot.3
             );
         }
         true
@@ -2226,51 +2267,49 @@ fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
     }
 }
 
-/// 光标是否算"靠近 Dock"。
+/// 一次"靠近"判定的输入与结论。
 ///
-/// - **已收起时**只认屏幕边缘的那条窄带：此时 Dock 是看不见的，
-///   若按"靠近栏体"判断，光标永远够不着它，就再也弹不出来了。
-/// - **已显示时**按栏体外扩一圈判断，鼠标在图标上方（放大溢出区）也算靠近。
-fn cursor_near(dock: &Dock, hwnd: HWND) -> bool {
+/// 带上光标与热区是为了诊断：只打一个 `near=false` 说明不了是光标没到、
+/// 还是热区算错了 —— 这两种情况在这个项目里都真实发生过。
+#[derive(Clone, Copy, Debug)]
+struct Near {
+    hit: bool,
+    cursor: (i32, i32),
+    /// 热区在屏幕坐标下的外接矩形。
+    hot: (f32, f32, f32, f32),
+}
+
+/// 光标是否算"贴着 Dock"。
+///
+/// 这里只负责取屏幕/窗口坐标，**判定本身在
+/// [`layout::near_dock`]** —— 纯函数才能用单元测试把"光标在时钟上"这类
+/// 情况钉死，而不是靠人挪鼠标看它抖不抖。
+fn cursor_near(dock: &Dock, hwnd: HWND) -> Near {
     let mut p = POINT::default();
-    if unsafe { GetCursorPos(&raw mut p) }.is_err() {
-        return false;
-    }
-
-    if dock.hide_target {
-        // 收起态：光标贴住 Dock 所在的那条屏幕边，且横向落在窗口范围内。
-        let mut wr = RECT::default();
-        if unsafe { GetWindowRect(hwnd, &raw mut wr) }.is_err() {
-            return false;
-        }
-        let work = dock.work;
-        let on_edge = match dock.cfg.edge {
-            Edge::Top => p.y <= work.top + 1,
-            Edge::Left => p.x <= work.left + 1,
-            Edge::Right => p.x >= work.right - 2,
-            Edge::Bottom => p.y >= work.bottom - 2,
+    let mut wr = RECT::default();
+    if unsafe { GetCursorPos(&raw mut p) }.is_err()
+        || unsafe { GetWindowRect(hwnd, &raw mut wr) }.is_err()
+    {
+        return Near {
+            hit: false,
+            cursor: (p.x, p.y),
+            hot: (0.0, 0.0, 0.0, 0.0),
         };
-        let along = if dock.cfg.edge.is_horizontal() {
-            p.x >= wr.left && p.x < wr.right
-        } else {
-            p.y >= wr.top && p.y < wr.bottom
-        };
-        return on_edge && along;
     }
-
-    // 显示态：把屏幕坐标转成客户区，再按栏体外扩一圈判断。
-    let mut c = p;
-    // SAFETY: `c` 是本地 POINT；失败只会让坐标保持屏幕值，不影响安全性。
-    unsafe {
-        let _ = ScreenToClient(hwnd, &raw mut c);
+    let (hx, hy, hw, hh) = dock.hot_phys();
+    let hot = (wr.left as f32 + hx, wr.top as f32 + hy, hw, hh);
+    Near {
+        hit: layout::near_dock(
+            dock.cfg.edge,
+            (p.x, p.y),
+            hot,
+            dock.work,
+            dock.inner_reach(),
+            !dock.hide_target,
+        ),
+        cursor: (p.x, p.y),
+        hot,
     }
-    let (u, v) = (c.x as f32, c.y as f32);
-    let m = &dock.metrics;
-    let top_margin = if dock.cfg.zoom { m.z } else { m.s };
-    u >= dock.geom.bar_l - 10.0
-        && u <= dock.geom.bar_l + dock.geom.bar_w + 10.0
-        && v >= dock.geom.bar_top - top_margin - 12.0
-        && v <= m.lh as f32 + 4.0
 }
 
 /// 把 `.lnk` 条目解析成真实 exe 路径，缓存在 `Item.target`。
@@ -2307,6 +2346,8 @@ struct MenuWindow {
     cmd: Option<MenuCmd>,
     /// DPI 缩放。物理尺寸按它算，命中也要用它换算回逻辑坐标。
     ppp: f32,
+    /// 实时背景来了新帧，下一轮重绘一次。
+    wake: bool,
 }
 
 fn menu_ptr(hwnd: HWND) -> *mut MenuWindow {
@@ -2333,6 +2374,14 @@ unsafe extern "system" fn menu_proc(
             // 与 Dock 一样不抢焦点：菜单是工具窗，抢焦点会让用户原本正在
             // 用的窗口失焦，关闭菜单后还得再点一次才能继续。
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            // 实时背景线程有新帧：标一下，下一轮画一帧。
+            WM_APP_WAKE => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    (*ptr).wake = true;
+                }
+                LRESULT(0)
+            }
             WM_MOUSEMOVE => {
                 let ptr = menu_ptr(hwnd);
                 if !ptr.is_null() {
@@ -2438,6 +2487,24 @@ type MenuSlot = Option<(HWND, FrameRenderer)>;
 /// 用 `SetCapture` 而不是激活窗口来实现"点外面关闭" —— 菜单不抢焦点，
 /// 关闭后用户原来在用的窗口仍是前台。
 #[allow(clippy::too_many_arguments)]
+/// 按配置键决定这一处要不要毛玻璃，以及模糊半径 / 圆角。
+///
+/// `Blur` 的取值范围是 1..14，`frost::blur_rgba` 会再夹到 1..12。
+/// 圆角由各面板自己的几何给出：起动台方角 0，设置 20，菜单 `RADIUS`。
+fn frost_spec(cfg: &Config, key: Key, corner_pt: f32) -> Option<FrostSpec> {
+    if cfg.get_i32(key) == 0 {
+        return None;
+    }
+    Some(FrostSpec {
+        radius: cfg.get_i32(Key::Blur).max(1) as u32,
+        corner_pt,
+    })
+}
+
+// 参数多是这条路径的固有形状（GPU / 窗口槽 / 菜单 / 位置 / 主题 / 缩放 /
+// 起始时间 / 毛玻璃）；与 `launchpad_win::draw` 一样，拆成 struct 只会把
+// 同一个参数列表换个地方放。
+#[allow(clippy::too_many_arguments)]
 fn show_menu(
     gpu: &Gpu,
     slot: &mut MenuSlot,
@@ -2447,6 +2514,7 @@ fn show_menu(
     dark: bool,
     ppp: f32,
     start: Instant,
+    frost: Option<FrostSpec>,
 ) -> Result<Option<MenuCmd>, Box<dyn std::error::Error>> {
     let (lw, lh) = menu.logical_size();
     // 向上取整：少一个像素会把最后一行的圆角裁掉。
@@ -2502,12 +2570,26 @@ fn show_menu(
                 .collect::<Vec<_>>()
         );
     }
+    // 位置尺寸刚设好、窗口还没显示 —— 这时抓桌面不会抓到自己。
+    if let Some(spec) = frost {
+        spec.apply(renderer, *hwnd, ppp);
+        // 显示后由抓取线程持续更新背景；先把自己排除出屏幕捕获，
+        // 否则它抓到的就是菜单本身。
+        minidock_gpu::frost::exclude_from_capture(*hwnd);
+        renderer.start_live_frost(*hwnd, spec, ppp);
+    } else {
+        renderer.clear_frost();
+        renderer.stop_live_frost();
+    }
+    let frost_on = renderer.frost_on();
+
     let mut state = Box::new(MenuWindow {
         menu,
         dark,
         done: false,
         cmd: None,
         ppp,
+        wake: false,
     });
     unsafe {
         SetWindowLongPtrW(*hwnd, GWLP_USERDATA, (&raw mut *state) as isize);
@@ -2530,8 +2612,10 @@ fn show_menu(
             break;
         }
         // 高亮变了才重绘。菜单很小，但没必要鼠标每动一像素就跑一遍 GPU。
-        if painted != Some(state.menu.hover) {
+        // 毛玻璃的实时背景来了也要重绘一次（`wake` 由窗口过程置起）。
+        if painted != Some(state.menu.hover) || state.wake {
             painted = Some(state.menu.hover);
+            state.wake = false;
             let menu = &state.menu;
             let dark = state.dark;
             renderer.render(
@@ -2539,7 +2623,7 @@ fn show_menu(
                 raw_input(renderer.size(), ppp, start),
                 *hwnd,
                 (px, py),
-                |ui| menu.paint(ui, dark),
+                |ui| menu.paint(ui, dark, frost_on),
             )?;
         }
         unsafe {
@@ -2550,6 +2634,8 @@ fn show_menu(
     if trace::geom() {
         eprintln!("[menu] 关闭 cmd={:?}", state.cmd);
     }
+    renderer.stop_live_frost();
+    minidock_gpu::frost::allow_capture(*hwnd);
     unsafe {
         if GetCapture() == *hwnd {
             let _ = ReleaseCapture();

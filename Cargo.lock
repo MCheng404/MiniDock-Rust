@@ -395,6 +395,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-backdrop"
+version = "0.1.0"
+source = "git+https://github.com/MCheng404/glass-backdrop-rs?rev=747457c8290cc4c38e8ee4ac1b3cfaeb3cbd59ac#747457c8290cc4c38e8ee4ac1b3cfaeb3cbd59ac"
+dependencies = [
+ "bytemuck",
+ "naga",
+ "windows-sys",
+]
+
+[[package]]
 name = "glifo"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -654,6 +664,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "egui-wgpu",
+ "glass-backdrop",
  "minidock-core",
  "minidock-platform",
  "minidock-settings",

@@ -41,6 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::frame::FrameRenderer;
 use crate::gpu::{Gpu, GpuError};
 use crate::input::{map_vk, Input};
+use crate::worker::WM_APP_WAKE;
 
 /// 窗口类名。`minidock-platform::single_instance` 不用它，留着是给今后
 /// "已经有设置窗口就激活它"用的。
@@ -237,6 +238,8 @@ impl SettingsWindow {
             return Ok(());
         }
         let (pw, ph) = physical_size(ppp);
+        // 新渲染器没有背景层，也没有实时抓取线程：先把参数捞出来。
+        let frost = self.renderer.frost_spec();
         self.renderer = FrameRenderer::new(gpu, pw as u32, ph as u32, ppp)?;
         self.ppp = ppp;
         // 渲染器换新 = egui 上下文换新（默认深色 visuals）。`ui_theme` 里
@@ -247,10 +250,30 @@ impl SettingsWindow {
         self.pos = (x, y);
         unsafe { SetWindowPos(self.hwnd, None, x, y, pw, ph, SWP_NOACTIVATE | SWP_NOZORDER) }
             .map_err(|_| GpuError::Win32("SetWindowPos（设置窗口缩放）"))?;
+        // 挪完位置再抓：抓的是新窗口矩形背后那块桌面。窗口此刻已被排除出
+        // 屏幕捕获（见 `show`），所以这里同步抓也不会抓到自己。
+        if let Some(spec) = frost {
+            spec.apply(&mut self.renderer, self.hwnd, self.ppp);
+            self.renderer.start_live_frost(self.hwnd, spec, self.ppp);
+        }
         Ok(())
     }
 
-    pub fn show(&mut self) {
+    pub fn show(&mut self, frost: Option<crate::frost::Spec>) {
+        match frost {
+            Some(spec) => {
+                // 抓背景必须在 ShowWindow 之前：窗口还没上屏，不会递归抓到自己。
+                spec.apply(&mut self.renderer, self.hwnd, self.ppp);
+                // 之后由抓取线程持续更新背景，它读到的是"窗口背后"的内容 ——
+                // 前提是本窗口已被排除出屏幕捕获。
+                crate::frost::exclude_from_capture(self.hwnd);
+                self.renderer.start_live_frost(self.hwnd, spec, self.ppp);
+            }
+            None => {
+                self.renderer.clear_frost();
+                self.renderer.stop_live_frost();
+            }
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             if GetForegroundWindow() != self.hwnd {
@@ -262,6 +285,8 @@ impl SettingsWindow {
     }
 
     pub fn hide(&mut self) {
+        self.renderer.stop_live_frost();
+        crate::frost::allow_capture(self.hwnd);
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -291,10 +316,11 @@ impl SettingsWindow {
         }
         let pos = self.pos;
         let hwnd = self.hwnd;
+        let frost = self.renderer.frost_on();
         let state = &mut self.state;
         let mut outcome = Outcome::default();
         let out = self.renderer.render(gpu, raw, hwnd, pos, |ui| {
-            shell(ui, state, cfg, &mut outcome);
+            shell_with_frost(ui, state, cfg, &mut outcome, frost);
         })?;
 
         self.outcome = outcome;
@@ -383,6 +409,12 @@ impl SettingsWindow {
             eprintln!("[settings-proc] msg=0x{msg:04X} wparam=0x{:X}", wparam.0);
         }
         match msg {
+            // 实时背景线程有新帧了：催一次重绘。不催的话窗口在没人操作时
+            // 一直睡着，模糊层会停在上一次交互时的那张图上。
+            WM_APP_WAKE => {
+                self.next_repaint = Some(Instant::now());
+                None
+            }
             WM_MOUSEMOVE => {
                 let (x, y) = client_pos(lparam, self.ppp);
                 let first = !self.input.hovering();
@@ -481,12 +513,27 @@ impl SettingsWindow {
 /// 公开是因为离屏截图（`examples/settings_shot.rs`）要画**同一份**外壳 ——
 /// 自己再拼一个近似版，截出来的图就不能代表真实窗口了。
 pub fn shell(ui: &mut egui::Ui, state: &mut SettingsState, cfg: &mut Config, out: &mut Outcome) {
+    shell_with_frost(ui, state, cfg, out, false);
+}
+
+/// 带毛玻璃开关的 [`shell`]。离屏截图用前者（没有可抓的桌面），真实窗口
+/// 用后者；两者共用同一份外壳，截图才代表真实窗口。
+pub fn shell_with_frost(
+    ui: &mut egui::Ui,
+    state: &mut SettingsState,
+    cfg: &mut Config,
+    out: &mut Outcome,
+    frost: bool,
+) {
     // 主题色必须在建任何子 Ui 之前灌进 Visuals：子 Ui 继承创建时的样式。
     crate::accent::apply_visuals(ui, cfg);
     let rect = ui.max_rect();
     let dark = ui.visuals().dark_mode;
     // 250/255：圆角外侧留一点透明让边缘融进桌面，又不至于让壁纸干扰阅读。
-    let bg = if dark {
+    // 毛玻璃开着时降到 140/255，让模糊桌面透上来。
+    let bg = if frost {
+        crate::frost::panel_bg(dark, true)
+    } else if dark {
         Color32::from_rgba_unmultiplied(24, 25, 30, 250)
     } else {
         Color32::from_rgba_unmultiplied(246, 247, 250, 250)

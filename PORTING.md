@@ -448,7 +448,7 @@ bl = (LW - baseW - g_ce) / 2 + (cfg.wSide ? g_ce : 0);
 | 3 | **小组件合并胶囊**（`WMerge`） | `RenderFrame` L3023 | ✅ 只改绘制，布局未动（ADR-047） |
 | 4 | **分割线拖动缩放**（`SepScale`） | `DockProc` L9884 / L9959：16 ms 节流、步长 0.6、夹 24..128、`IDC_SIZENS` | ✅ 16 ms 节流 / 0.6 步长 / 夹紧 / 只在尺寸真变时重建 / IDC_SIZENS / 防抖写盘（ADR-056）；设置页「交互」有开关 |
 | 5 | **HPad** 左右内边距独立 | `CalcMetrics` L1883 | ✅ 已接；默认 12 使栏体宽 +4 px（ADR-047） |
-| 6 | **三处毛玻璃**（设置 / 菜单 / 起动台） | `FrostSnap*` + `SetFrostGrab`（WM_MOVE 重抓）、起动台开窗前抓一次 | ❌ 全无模糊实现（`Blur` 键未使用） |
+| 6 | **三处毛玻璃**（设置 / 菜单 / 起动台） | `FrostSnap*` + `SetFrostGrab`（WM_MOVE 重抓）、起动台开窗前抓一次 | ✅ 三处共用 `gpu::frost`：GDI 抓背景 + CPU 可分离高斯 + 圆角 SDF + 半透明 tint（ADR-057）；只在开窗前抓一次，未做 WM_MOVE 重抓 / 30 Hz worker |
 | 7 | **起动台分类 / 标签 / A-Z 排序** | `LpCat` 启发式分类、`[LpCat]` 每项覆盖、`[LpTags]` 最多 8 组、`LpSortAZ`、右键"移动到标签组…" | ✅ 启发式分类 + 8 组标签 + 右键改分类 / 改名 / 删除 + A–Z + 过滤视图拖动排序（`launchpad.dat`，ADR-053/054） |
 | 8 | **控制中心磁贴拖动排序** + `[CcOrder]` 持久化 | `CcOrderLoad/Save`、`CcMove` L6321 | ✅ 拖动即时换位 + `[widgets] Order`（ADR-055）；键名/段名与上游不同 |
 | 9 | 控制中心细节修 | 有线网卡图标（id 8）、WiFi 优先于有线、月亮用两段弧 | 部分（我们无有线检测） |

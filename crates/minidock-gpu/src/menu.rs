@@ -79,7 +79,7 @@ const PAD_X: f32 = 12.0;
 /// 菜单最小宽度。太窄会让"在资源管理器中打开"这种长标签挤在一起。
 const MIN_W: f32 = 190.0;
 /// 菜单背景圆角（逻辑像素）。
-const RADIUS: f32 = 10.0;
+pub const RADIUS: f32 = 10.0;
 
 /// 一次打开的菜单。
 #[derive(Debug, Clone)]
@@ -293,14 +293,22 @@ impl Menu {
     ///
     /// 尺寸必须与 [`Menu::logical_size`] 及 [`Menu::hit`] 完全一致 ——
     /// 三者任何一处偏差都表现为"看到的位置和点到的位置不一样"。
-    pub fn paint(&self, ui: &egui::Ui, dark: bool) {
+    pub fn paint(&self, ui: &egui::Ui, dark: bool, frost: bool) {
         let (w, h) = self.logical_size();
         let c = Colors::for_theme(dark);
         let painter = ui.painter();
         let rect = EguiRect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
         let radius = CornerRadius::same(RADIUS as u8);
 
-        painter.rect_filled(rect, radius, c.bg);
+        painter.rect_filled(
+            rect,
+            radius,
+            if frost {
+                crate::frost::panel_bg(dark, true)
+            } else {
+                c.bg
+            },
+        );
         painter.rect_stroke(rect, radius, Stroke::new(1.0, c.border), StrokeKind::Inside);
 
         let mut top = PAD_Y;

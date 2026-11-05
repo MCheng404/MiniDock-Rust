@@ -318,7 +318,24 @@ impl LaunchpadWindow {
     }
 
     /// 打开（抢焦点，收键盘）。
-    pub fn open(&mut self) {
+    ///
+    /// `frost` 为 `Some` 时：在 `ShowWindow` **之前**抓一次背景（窗口还没
+    /// 上屏，GDI 不会把我们自己也抓进去），并把窗口排除出屏幕捕获 —— 之后
+    /// 实时抓取线程才能读到"窗口背后"的桌面而不是面板自己。抓失败就自动
+    /// 退回实心底色。
+    pub fn open(&mut self, frost: Option<crate::frost::Spec>) {
+        match frost {
+            Some(spec) => {
+                spec.apply(&mut self.renderer, self.hwnd, self.ppp);
+                // 必须在 ShowWindow 之前：晚一帧就会抓到自己的镜像。
+                crate::frost::exclude_from_capture(self.hwnd);
+                self.renderer.start_live_frost(self.hwnd, spec, self.ppp);
+            }
+            None => {
+                self.renderer.clear_frost();
+                self.renderer.stop_live_frost();
+            }
+        }
         unsafe {
             // 全屏覆盖层必须压住别的窗口（包括别的 TOPMOST 窗口）：
             // 不这么做，从 Dock 打开它时常被前台窗口盖住，看起来像没反应。
@@ -355,6 +372,10 @@ impl LaunchpadWindow {
             return;
         }
         self.visible = false;
+        // 先停抓取再藏窗：反过来的话，隐藏与线程退出之间会多抓一帧
+        // （无害，但没必要），而且 `allow_capture` 要在窗口不可见时恢复。
+        self.renderer.stop_live_frost();
+        crate::frost::allow_capture(self.hwnd);
         unsafe {
             let _ = ShowWindow(self.hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
         }
@@ -565,6 +586,7 @@ impl LaunchpadWindow {
             rename_buf: &rename_buf,
         };
 
+        let frost = self.renderer.frost_on();
         let raw = self.input.take(self.renderer.size(), self.ppp);
         self.renderer.render(gpu, raw, hwnd, pos, |ui| {
             let ctx = ui.ctx().clone();
@@ -599,6 +621,7 @@ impl LaunchpadWindow {
                 cur,
                 &icons,
                 ov,
+                frost,
             );
             hits = out.0;
             icons_rects = out.1;
@@ -1353,16 +1376,17 @@ fn draw(
     cur: (f32, f32),
     icons: &HashMap<usize, egui::TextureHandle>,
     ov: Overlay<'_>,
+    frost: bool,
 ) -> (HitList, HitList) {
     let painter = ui.painter().clone();
     let rect = EguiRect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
 
-    // 背板：深色下 91% 的深灰，浅色下 91% 的浅灰。在磨砂可用时用磨砂，
-    // 我们这里不拍窗口快照，用不透明度换观感。
-    // 不透明度取 246/255（约 96%）：我们没有那种"磨砂快照"可用，
-    // 半透明会让背后的窗口轮廓透进来，看起来像没画完。留一点点透，
-    // 只为让它在切换时不像一块实心板。
-    let bg = if dark {
+    // 背板：毛玻璃开着时只盖一层半透明 tint，让 `frost` 模块画的模糊桌面
+    // 透上来；没开（或捕获失败）时维持原来的 246/255 近实心底色 ——
+    // 那时候透出真实桌面只会看到窗口轮廓，像没画完。
+    let bg = if frost {
+        crate::frost::panel_bg(dark, true)
+    } else if dark {
         Color32::from_rgba_unmultiplied(12, 13, 18, 246)
     } else {
         Color32::from_rgba_unmultiplied(238, 241, 248, 246)

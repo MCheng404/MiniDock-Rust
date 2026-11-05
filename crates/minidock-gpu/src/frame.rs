@@ -46,6 +46,12 @@ pub struct FrameRenderer {
     offscreen: Offscreen,
     presenter: LayeredPresenter,
     pixels_per_point: f32,
+    /// 毛玻璃背景层，画在 UI 最底层（见 `crate::frost`）。
+    frost: Option<egui::TextureHandle>,
+    /// 面板可见期间的实时抓取线程。`None` = 只在开窗时抓过一次。
+    live: Option<crate::frost::Live>,
+    /// 上一个 [`crate::frost::Spec`]，`rescale` 重建渲染器后据此重启实时抓取。
+    frost_spec: Option<crate::frost::Spec>,
 }
 
 impl std::fmt::Debug for FrameRenderer {
@@ -108,6 +114,9 @@ impl FrameRenderer {
             offscreen,
             presenter,
             pixels_per_point,
+            frost: None,
+            live: None,
+            frost_spec: None,
         })
     }
 
@@ -132,6 +141,67 @@ impl FrameRenderer {
         );
         self.presenter = LayeredPresenter::new(width as i32, height as i32)?;
         Ok(())
+    }
+
+    /// 换上一张毛玻璃背景层。
+    ///
+    /// `LINEAR` 而不是 `NEAREST`：捕获图只有窗口的 1/4 分辨率，靠线性
+    /// 采样放大才不会看到马赛克。
+    ///
+    /// 尺寸没变时走 `TextureHandle::set` 原地改写：实时背景每 100 ms 来一帧，
+    /// 每帧都 `load_texture` 建一张新纹理再释放旧的就是每秒十次显存分配。
+    pub fn set_frost(&mut self, image: egui::ColorImage) {
+        if let Some(tex) = &mut self.frost {
+            if tex.size() == image.size {
+                tex.set(image, egui::TextureOptions::LINEAR);
+                return;
+            }
+        }
+        let tex = self
+            .ctx
+            .load_texture("minidock-frost", image, egui::TextureOptions::LINEAR);
+        self.frost = Some(tex);
+    }
+
+    /// 撤掉背景层（毛玻璃关掉、或捕获失败时调用）。
+    pub fn clear_frost(&mut self) {
+        self.frost = None;
+    }
+
+    /// 开始实时抓取背景。
+    ///
+    /// 调用方必须**先**把窗口排除出屏幕捕获（`frost::exclude_from_capture`），
+    /// 否则线程抓到的是面板自己。
+    pub fn start_live_frost(&mut self, hwnd: HWND, spec: crate::frost::Spec, ppp: f32) {
+        self.frost_spec = Some(spec);
+        self.live = crate::frost::Live::start(hwnd, spec, ppp);
+    }
+
+    /// 停掉实时抓取。背景层留在原地，面板照常显示上一帧。
+    pub fn stop_live_frost(&mut self) {
+        self.live = None;
+        self.frost_spec = None;
+    }
+
+    /// 当前毛玻璃参数。缩放重建渲染器时用它把背景层与实时抓取接回来。
+    #[must_use]
+    pub const fn frost_spec(&self) -> Option<crate::frost::Spec> {
+        self.frost_spec
+    }
+
+    /// 取走实时背景的新帧（有就换上）。返回是否换过。
+    fn poll_frost(&mut self) -> bool {
+        let Some(image) = self.live.as_ref().and_then(crate::frost::Live::latest) else {
+            return false;
+        };
+        self.set_frost(image);
+        true
+    }
+
+    /// 当前有没有背景层。面板据此决定底色用不透明还是半透明 tint。
+    #[must_use]
+    pub const fn frost_on(&self) -> bool {
+        self.frost.is_some()
     }
 
     /// egui 用的 `Context`（需要 `request_repaint` 之类时用）。
@@ -183,9 +253,26 @@ impl FrameRenderer {
         &mut self,
         gpu: &Gpu,
         raw: egui::RawInput,
-        build: impl FnMut(&mut egui::Ui),
+        mut build: impl FnMut(&mut egui::Ui),
     ) -> Result<(Vec<u8>, FrameOutcome), GpuError> {
-        let full = self.ctx.run_ui(raw, build);
+        // 实时背景的新帧必须在 `run` 之前换上：纹理增量是在 `run` 里认领
+        // 并上传的，晚一步就得再等一帧。
+        self.poll_frost();
+        // 只把 TextureId 拷进闭包：TextureHandle 借的是 `self`，而 `run_ui`
+        // 之后还要动 `self.renderer`。
+        let frost = self.frost.as_ref().map(|t| t.id());
+        let full = self.ctx.run_ui(raw, |ui| {
+            if let Some(id) = frost {
+                let rect = ui.max_rect();
+                ui.painter().image(
+                    id,
+                    rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            build(ui);
+        });
 
         let delay = full
             .viewport_output

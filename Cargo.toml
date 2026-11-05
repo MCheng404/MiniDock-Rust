@@ -39,6 +39,13 @@ rayon = "1.12"
 
 pollster = "1.0"
 
+# glass-backdrop：毛玻璃的桌面捕获 + 高斯模糊模型 + WGSL/SPIR-V。
+# 固定 rev，避免上游改了 uniform 布局却没同步到我们这边。
+# 只用到 capture（GDI BitBlt）、blur 的 CPU 权重、glass 的 SDF 数学；
+# 我们自己的渲染链路是「egui → 离屏纹理 → DIB → UpdateLayeredWindow」，
+# 没有 swapchain，所以不用它的 SPIR-V / GPU 管线（见 ADR-057）。
+glass-backdrop = { git = "https://github.com/MCheng404/glass-backdrop-rs", rev = "747457c8290cc4c38e8ee4ac1b3cfaeb3cbd59ac" }
+
 # windows crate：只用官方绑定，不引入第三方 Win32 封装。
 #
 # 为什么是 0.62：本机 cargo 缓存里已有 0.62.2，可离线构建；且该版本

@@ -1071,6 +1071,60 @@ impl Dock {
         )
     }
 
+    /// 整条停靠带（图标条 + 小组件条带）在**窗口物理坐标**里的外接矩形。
+    ///
+    /// 三处判定共用它：光标是否靠近、遮挡检测的矩形、以及命中测试的兜底。
+    /// 各算一套的后果是真实存在的 —— 早先"靠近"只看图标条（`bar_l..bar_l+bar_w`），
+    /// 光标挪到时钟上就被判成离开，Dock 在鼠标底下收起又弹出。
+    ///
+    /// 小组件顺序在 `on_left` 时是反的，所以这里对每个成员都取一次
+    /// `left_of` 再求并集，不假设第一个就是最左。
+    #[must_use]
+    pub fn hot_phys(&self) -> (f32, f32, f32, f32) {
+        let m = &self.metrics;
+        let mut lo = self.geom.bar_l;
+        let mut hi = self.geom.bar_l + self.geom.bar_w;
+        for (i, (_, w)) in m.widgets.iter().enumerate() {
+            if let Some(left) = m
+                .widgets
+                .left_of(i, self.geom.bar_l, self.geom.bar_w, m.gap)
+            {
+                lo = lo.min(left);
+                hi = hi.max(left + w as f32);
+            }
+        }
+        // 条带与栏体之间那个 6 px 的视觉缝也算进来：缝里既没图标也没卡片，
+        // 但用户眼里它就在 Dock 上。
+        let (x, y, w, h) = layout::map_rect(
+            self.cfg.edge,
+            lo - 6.0,
+            self.geom.bar_top,
+            (hi - lo + 12.0).max(1.0),
+            m.bar_h,
+            m.lh as f32,
+        );
+        // 再朝停靠边外扩一圈投影留白：那是栏体的影子，光标停在那里同样
+        // 不该判成"离开"（实测过：贴到屏幕边还差 4 px 就收起，很怪）。
+        let margin = m.margin;
+        match self.cfg.edge {
+            Edge::Bottom => (x, y, w, h + margin),
+            Edge::Top => (x, y - margin, w, h + margin),
+            Edge::Left => (x - margin, y, w + margin, h),
+            Edge::Right => (x, y, w + margin, h),
+        }
+    }
+
+    /// 朝屏幕里的伸展量（物理像素）：图标放大后比栏体高出这么多，
+    /// 光标落在放大后的图标上仍然算"在 Dock 上"。
+    #[must_use]
+    pub fn inner_reach(&self) -> f32 {
+        if self.cfg.zoom {
+            self.metrics.z
+        } else {
+            self.metrics.s
+        }
+    }
+
     /// 栏体。返回画布上的矩形（空状态提示要用它的中心）。
     fn paint_bar_area(&self, painter: &egui::Painter, p: Proj, dark: bool) -> EguiRect {
         let m = &self.metrics;
@@ -2257,6 +2311,85 @@ mod tests {
         );
         // 栏体中央（图标区）不该命中卡片。
         assert_eq!(dock.widget_at(dock.geom.bar_l + 10.0, y), None);
+    }
+
+    /// 热区必须包住小组件条带，而不只是图标条。
+    ///
+    /// 这条是"光标停在时钟上 Dock 却反复收起"的回归测试：只要热区退化成
+    /// 图标条，`near_dock` 就会把小组件那一段判成离开了 Dock。
+    #[test]
+    fn hot_zone_covers_the_widget_strip() {
+        let mut c = Config::defaults(96);
+        c.clock = true;
+        c.apply_i32(Key::RES_MON, 1);
+        let mut dock = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
+        dock.update(96);
+        assert!(dock.metrics.widgets.len >= 2, "时钟 + 资源卡片应当都在");
+
+        let (bx, by, bw, bh) = dock.bar_phys();
+        let (hx, hy, hw, hh) = dock.hot_phys();
+        // 最右一张卡片的右缘。
+        let mut right = bx + bw;
+        for (i, (_, w)) in dock.metrics.widgets.iter().enumerate() {
+            let left = dock
+                .metrics
+                .widgets
+                .left_of(i, dock.geom.bar_l, dock.geom.bar_w, dock.metrics.gap)
+                .expect("条带成员必有位置");
+            let (wx, _, ww, _) = layout::map_rect(
+                dock.cfg.edge,
+                left,
+                dock.geom.bar_top,
+                w as f32,
+                dock.metrics.bar_h,
+                dock.metrics.lh as f32,
+            );
+            right = right.max(wx + ww);
+        }
+
+        assert!(hx <= bx, "热区左缘不该比栏体靠里");
+        assert!(
+            hx + hw >= right - 0.5,
+            "热区右缘应当覆盖到最后一张小组件卡片（{hx}+{hw} < {right}）"
+        );
+        // 高度：栏体 + 朝停靠边的投影留白，必须把栏体整个包住。
+        assert!(hy <= by, "热区上缘不该裁掉栏体");
+        assert!(hy + hh >= by + bh, "热区下缘要含投影留白");
+    }
+
+    /// 底停靠时，光标落在时钟上必须算"靠近"（回归：早先只认图标条）。
+    #[test]
+    fn cursor_on_clock_counts_as_near() {
+        let mut c = Config::defaults(96);
+        c.apply_i32(Key::RES_MON, 1);
+        c.edge = Edge::Bottom;
+        let mut dock = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
+        dock.update(96);
+
+        let (hx, hy, hw, hh) = dock.hot_phys();
+        // 热区右端往内一点：那里一定在小组件条带上。
+        let cursor = ((hx + hw - 20.0) as i32, (hy + hh / 2.0) as i32);
+        assert!(
+            layout::near_dock(
+                dock.cfg.edge,
+                cursor,
+                (hx, hy, hw, hh),
+                dock.work,
+                0.0,
+                false
+            ),
+            "光标在小组件上应当算靠近"
+        );
+        // 同一行的左边空白处（热区外）不算。
+        let far = ((hx - 200.0) as i32, (hy + hh / 2.0) as i32);
+        assert!(!layout::near_dock(
+            dock.cfg.edge,
+            far,
+            (hx, hy, hw, hh),
+            dock.work,
+            0.0,
+            false
+        ));
     }
 
     /// 点击必须"按下与抬起在同一个图标上"，否则从图标拖到别处松手会误启动。

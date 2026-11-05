@@ -72,7 +72,7 @@ impl Waker {
         Self(hwnd.0 as isize)
     }
 
-    fn wake(self) {
+    pub(crate) fn wake(self) {
         // 失败只说明窗口已销毁（进程正在退出），不必处理。
         let hwnd = HWND(self.0 as *mut core::ffi::c_void);
         // SAFETY: `PostMessageW` 对已销毁的句柄返回错误而不是崩溃；

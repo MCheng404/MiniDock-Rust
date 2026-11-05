@@ -589,6 +589,70 @@ pub fn to_logical(edge: Edge, px: f32, py: f32, lh: f32) -> (f32, f32) {
     }
 }
 
+/// 光标是否算"贴着 Dock"。
+///
+/// `hot` 是整条停靠带（图标 + 小组件）在**屏幕**物理坐标下的外接矩形，
+/// `inner` 是朝屏幕里的伸展量（图标放大后的高度、气泡探出去的部分）。
+/// `work` 是当前显示器的工作区 —— `Reserve=1` 时它的边界就是 Dock 的内缘，
+/// `Reserve=0` 时是屏幕边。`keep` 表示 Dock 当前是展开的。
+///
+/// ## 为什么必须只有一套判定
+///
+/// 早先按状态各用一套：收起态"贴边 + 落在窗口宽度内"，展开态"落在图标条
+/// 内"。两者在小组件那一段不重合 —— 光标挪到时钟上时展开态判"不靠近"、
+/// 收起态立刻判"靠近"，于是 Dock 每 450 ms 收起又弹出一次（实测日志
+/// `target=false near=true` / `target=true near=false` 交替）。
+///
+/// 现在两态共用这一个函数，差别只有容差：展开态的容差更大（[`HYSTERESIS`]），
+/// 也就是施密特触发器 —— 光标在边界附近慢慢挪不会让 Dock 反复抽搐。
+#[must_use]
+pub fn near_dock(
+    edge: Edge,
+    cursor: (i32, i32),
+    hot: (f32, f32, f32, f32),
+    work: Rect,
+    inner: f32,
+    keep: bool,
+) -> bool {
+    /// 光标与停靠带之间的容差（物理像素）。图标放大是渐变的，边缘那几
+    /// 个像素判进判出会让人以为 Dock "抖"。
+    const SLACK: f32 = 8.0;
+    /// 已经展开时额外放宽的量：收起要"真的走远了"才算数。
+    const HYSTERESIS: f32 = 32.0;
+    /// 贴边判定的容差：屏幕边沿本身只有一两个像素好点。
+    const EDGE_REVEAL: f32 = 2.0;
+
+    let slack = if keep { SLACK + HYSTERESIS } else { SLACK };
+    let (x, y, w, h) = hot;
+    // 朝屏幕里伸展：底停靠往上、顶停靠往下、左停靠往右、右停靠往左。
+    let (x, y, w, h) = match edge {
+        Edge::Bottom => (x, y - inner, w, h + inner),
+        Edge::Top => (x, y, w, h + inner),
+        Edge::Left => (x, y, w + inner, h),
+        Edge::Right => (x - inner, y, w + inner, h),
+    };
+    let (cx, cy) = (cursor.0 as f32, cursor.1 as f32);
+
+    // ① 落在停靠带（含伸展量与容差）里。
+    if cx >= x - slack && cx <= x + w + slack && cy >= y - slack && cy <= y + h + slack {
+        return true;
+    }
+
+    // ② 贴住工作区边沿、且沿停靠方向落在带子跨度内 —— 收起态的"探头"。
+    let (along, at_edge) = match edge {
+        Edge::Bottom => (
+            cx >= x && cx <= x + w,
+            cy >= work.bottom as f32 - EDGE_REVEAL,
+        ),
+        Edge::Top => (cx >= x && cx <= x + w, cy <= work.top as f32 + EDGE_REVEAL),
+        Edge::Left => (cy >= y && cy <= y + h, cx <= work.left as f32 + EDGE_REVEAL),
+        Edge::Right => (
+            cy >= y && cy <= y + h,
+            cx >= work.right as f32 - EDGE_REVEAL,
+        ),
+    };
+    along && at_edge
+}
 /// 鼠标放大的权重曲线：中心 1.0，半径外 0.0，中间为余弦过渡。
 ///
 /// 权重 = `0.5 * (1 + cos(PI * d / R))`。用余弦而不是线性，
@@ -1810,5 +1874,59 @@ mod tests {
         assert!(icon > 64 && zoom > 96);
         // 回到起点只需 dy=0 —— 基准始终是 icon0/zoom0。
         assert_eq!(sep_scale(0.0, 64, 96), (64, 96));
+    }
+
+    /// 底停靠：光标在整条带上都算"靠近"，包括图标条右边那一大段小组件。
+    #[test]
+    fn near_dock_bottom_covers_the_whole_strip() {
+        // 图标条 400..1000，小组件接到 1700（热区是两者的并集）。
+        let hot = (400.0, 1487.0, 1300.0, 88.0);
+        let work = Rect::new(0, 0, 2560, 1600);
+        let near = |x, y| near_dock(Edge::Bottom, (x, y), hot, work, 129.0, false);
+        let keep = |x, y| near_dock(Edge::Bottom, (x, y), hot, work, 129.0, true);
+
+        assert!(near(700, 1520), "图标上算靠近");
+        assert!(near(1500, 1520), "时钟上也算靠近（早先这里判成离开）");
+        assert!(near(1690, 1520), "带子右端仍在带内");
+        assert!(near(400, 1560), "左边缘");
+        // 朝屏幕里伸展 129 px：光标落在放大后的图标上仍算靠近。
+        assert!(near(700, 1360), "伸展区里算靠近");
+        assert!(!near(700, 1300), "伸展区外不算");
+        // 贴边探头：沿停靠方向在跨度内才算。
+        assert!(near(1500, 1599), "贴底边 + 在带子跨度内");
+        assert!(!near(200, 1599), "贴底边但在带子左边，不算");
+        assert!(!near(700, 1200), "离得远不算");
+        // 回滞：展开态容差更大 —— 光标在 1358-32 那一圈里，收起态判"离开"、
+        // 展开态仍判"在"，于是不会在边界上反复抽搐。
+        assert!(keep(700, 1330), "展开时 1330 仍在保留区内");
+        assert!(!near(700, 1330), "收起时同一位置算离开");
+    }
+
+    /// 上停靠：伸展方向朝下，贴边判定用工作区上沿。
+    #[test]
+    fn near_dock_top_reaches_downward() {
+        let hot = (400.0, 0.0, 1300.0, 88.0);
+        let work = Rect::new(0, 0, 2560, 1600);
+        let near = |x, y| near_dock(Edge::Top, (x, y), hot, work, 129.0, false);
+
+        assert!(near(700, 40), "栏体上");
+        assert!(near(700, 200), "往下伸展的放大区");
+        assert!(!near(700, 300), "再往下就离开了");
+        // 收起态探头：贴住工作区上沿。
+        assert!(near(700, 1), "贴上沿");
+    }
+
+    /// 左停靠：横向伸展，贴边用左沿；纵向跨度按热区高度算。
+    #[test]
+    fn near_dock_left_is_axis_swapped() {
+        let hot = (0.0, 400.0, 88.0, 700.0);
+        let work = Rect::new(0, 0, 2560, 1600);
+        let near = |x, y| near_dock(Edge::Left, (x, y), hot, work, 129.0, false);
+
+        assert!(near(40, 700), "栏体上");
+        assert!(near(200, 700), "往右伸展的放大区");
+        assert!(!near(300, 700), "太远");
+        assert!(near(1, 700), "贴左边");
+        assert!(!near(1, 200), "贴左边但不在跨度内");
     }
 }
