@@ -369,7 +369,7 @@ fn 控件右边缘对齐() {
     h.state_mut().ui.page = Page::Extras;
     h.run();
 
-    let toggle = h.get_by_role_and_label(egui::Role::CheckBox, "通知").rect();
+    let toggle = h.get_by_role_and_label(egui::Role::Switch, "通知").rect();
     let combo = h
         .get_by_role_and_label(egui::Role::ComboBox, "小组件位置")
         .rect();

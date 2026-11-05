@@ -131,6 +131,46 @@ release 是 GUI 子系统（实测 `Subsystem=2`），debug 保留控制台看 p
 
 ---
 
+## 0.9.12 — 控件重构：胶囊开关 / Fluent 滑条 / 自绘按钮（2026-11-04）
+
+设置页三个最"工具味"的元素整体重构，视觉基准 Windows 11 Fluent，
+色板与 [`text_field`] 完全同源（field 半透明叠层 / accent = selection）。
+
+### 胶囊开关（替换裸 Checkbox）
+
+- 之前 `toggle` / `toggle_derived` 全是 `egui::Checkbox` 空方框打勾 ——
+  勾选框表达"状态"，开关表达"模式"，观感也是全页最旧的。
+- 新 `switch_widget`：40×22 全胶囊（圆角 = 半高），**开 = 主题色填充 +
+  白色圆钮靠右，关 = field 灰底 + 描边 + 圆钮靠左**；圆钮位置走 egui
+  布尔动画（0.12s 滑动），悬停叠 tonal 层，聚焦画主题色外圈。
+- 键盘可达：`Sense::CLICK | focusable_noninteractive()`，聚焦后空格 /
+  回车切换；`Role::Switch` 自报可访问性。**accessible name 交给
+  labelled_by 关联的中文标签** —— widget_info 自报键名会把标签覆盖掉，
+  kittest / 读屏按名字查就找不到了（点击开关写入配置测试当场抓住）。
+
+### Fluent 滑条（替换裸 Slider）
+
+- egui 原生 Slider 的轨道和圆钮共用 `widgets.inactive.bg_fill`，配不出
+  "灰轨道 + 白圆钮 + 描边"，圆钮描边完全改不了 —— 自绘。
+- 5px 粗圆角轨道（命中区 ±9px 比轨道大一圈，窄轨道好点）、实心主题色
+  已填充段、白色圆钮带 2px 主题色描边（悬停/拖动放大到 9）；
+  拖动时圆钮上方浮出数值气泡，右侧常驻弱色数值（拖动中变主题色）。
+- 键盘：←/→ 按（全程 20 步）步进，Home/End 归零打满；点击/拖动都是
+  指针 x → 值映射。ASCI 网格核验：填充段 / 白钮 / 描边 / 灰轨道逐项正确。
+
+### 自绘按钮（替换裸 ui.button）
+
+- 30px 高、圆角 10、宽度随文字（±22 padding、最小 72）；
+  三态 = field 底叠 0/1/2 层 hover tonal —— 半透明叠层在卡片白上形成
+  渐进台阶，不用为深浅主题各配实色；聚焦画主题色细描边；
+  空格/回车可触发（触发收敛到一个分支 —— `Command` 不是 Copy）。
+
+### 测试
+
+设置 crate 16 条全过（`控件右边缘对齐` 的角色查询随 Switch 更新）。
+
+---
+
 ## 0.9.11 — 代码审查：跟进 egui 0.37 官方 API（2026-11-04）
 
 系统审查了弃用豁免、自绘控件、样式与 tessellation 用法，对照

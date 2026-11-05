@@ -14,7 +14,10 @@
 
 use std::time::Instant;
 
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, RichText, Ui};
+use egui::{
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Response, RichText, Sense, Stroke, Ui,
+    WidgetInfo,
+};
 use minidock_core::color;
 use minidock_core::config::{Config, Key};
 
@@ -41,13 +44,29 @@ const CTL_RESERVE: f32 = 232.0;
 /// 行与行之间的留白。
 const ROW_GAP: f32 = 7.0;
 
+/// 胶囊开关的尺寸（Windows 11 Fluent 比例 40×22，圆钮直径 14）。
+const SWITCH_W: f32 = 40.0;
+const SWITCH_H: f32 = 22.0;
+
+/// 控件底色：按钮 / 滑条轨道 / 开关关态共用的"浅灰面板"，与
+/// [`crate::text_field`] 的 field 同源 —— 半透明叠在卡片白上，浅色
+/// 显灰、深色显亮，正好是 Fluent 的tonal 层。
+fn field_bg(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 16)
+    } else {
+        Color32::from_rgba_unmultiplied(23, 26, 35, 14)
+    }
+}
+
+/// 两色按 t 线性混合（t=0 取 a）。
+fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
 /// 卡片与卡片之间的留白（雏形 12–18px，取中值）。
 const CARD_GAP: f32 = 14.0;
-
-/// 开关占位。不写死的话复选框会贴着文字内边距缩进，右边缘比下拉框少 9 px，
-/// 一列开关与一列下拉摆在同一张卡片里能看出来。
-const CTL_TOGGLE_W: f32 = 22.0;
-const CTL_TOGGLE_H: f32 = 18.0;
 
 /// 悬停多久后自动展开说明气泡（雏形定为 3 秒）。
 const TIP_HOVER_MS: u128 = 3000;
@@ -467,11 +486,7 @@ pub(crate) fn toggle(ctx: &mut Ctx<'_>, ui: &mut Ui, key: Key, label: &str, note
     let before = ctx.cfg.get_i32(key);
     let mut v = before != 0;
     row(ui, ctx.state, label, note, |ui, id| {
-        ui.add_sized(
-            [CTL_TOGGLE_W, CTL_TOGGLE_H],
-            egui::Checkbox::new(&mut v, ""),
-        )
-        .labelled_by(id);
+        switch_widget(ui, id, &mut v);
     });
     if v != (before != 0) {
         ctx.cfg.apply_i32(key, i32::from(v));
@@ -495,16 +510,76 @@ pub(crate) fn toggle_derived(
 ) {
     let mut v = value;
     row(ui, ctx.state, label, note, |ui, id| {
-        ui.add_sized(
-            [CTL_TOGGLE_W, CTL_TOGGLE_H],
-            egui::Checkbox::new(&mut v, ""),
-        )
-        .labelled_by(id);
+        switch_widget(ui, id, &mut v);
     });
     if v != value {
         apply(ctx.cfg, v);
         ctx.out.changed = true;
     }
+}
+
+/// 胶囊开关（Windows 11 Fluent 风格）：开启 = 主题色填充 + 白色圆钮
+/// 靠右；关闭 = 灰底圆钮靠左。圆钮位置走 egui 布尔动画（0.12s 滑动），
+/// 悬停浮一层 tonal，聚焦画主题色外圈。
+///
+/// 之前是裸 `Checkbox` 空方框 —— 勾选框表达"模式"而非"开关"，也是
+/// 整个设置页里最工具味的一个元素。
+fn switch_widget(ui: &mut Ui, label_id: egui::Id, checked: &mut bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(SWITCH_W, SWITCH_H),
+        Sense::CLICK | Sense::focusable_noninteractive(),
+    );
+    let mut resp = resp.labelled_by(label_id);
+    resp.widget_info(|| WidgetInfo::selected(egui::Role::Switch, true, *checked, ""));
+
+    if resp.clicked() {
+        *checked = !*checked;
+        resp.request_focus();
+    }
+    if resp.has_focus()
+        && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter))
+    {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+
+    let vis = ui.visuals();
+    let accent = vis.selection.stroke.color;
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(label_id.with("switch-on"), *checked, 0.12);
+
+    // 底：关态灰、开态主题色，中间随动画过渡；悬停叠 tonal。
+    let bg = blend(field_bg(ui), accent, t);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(SWITCH_H as u8 / 2), bg);
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(SWITCH_H as u8 / 2), hover(ui));
+    }
+    // 关态给一圈描边，灰底在白卡片上不至于没有边界。
+    if t < 0.5 {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(SWITCH_H as u8 / 2),
+            Stroke::new(1.0, vis.weak_text_color().linear_multiply(0.6)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    // 圆钮：白色，从左滑到右。
+    let r = SWITCH_H / 2.0 - 3.0;
+    let cx = egui::emath::lerp((rect.left() + r + 3.0)..=(rect.right() - r - 3.0), t);
+    ui.painter()
+        .circle_filled(egui::pos2(cx, rect.center().y), r, Color32::WHITE);
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            CornerRadius::same(SWITCH_H as u8 / 2 + 2),
+            Stroke::new(1.5, accent.linear_multiply(0.5)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    resp
 }
 
 /// 滑杆行。取值范围来自 `core::config`（`slider_range` 优先）。
@@ -513,16 +588,130 @@ pub(crate) fn slider(ctx: &mut Ctx<'_>, ui: &mut Ui, key: Key, label: &str, suff
     let before = ctx.cfg.get_i32(key);
     let mut v = before;
     row(ui, ctx.state, label, "", |ui, id| {
-        ui.add_sized(
-            [SLIDER_W, 20.0],
-            egui::Slider::new(&mut v, lo..=hi).suffix(suffix),
-        )
-        .labelled_by(id);
+        slider_line(ui, id, &mut v, lo, hi, suffix);
     });
     if v != before {
         ctx.cfg.apply_i32(key, v);
         ctx.out.changed = true;
     }
+}
+
+/// Fluent 风格滑条：5px 粗圆角轨道、实心主题色已填充段、白色圆钮带
+/// 主题色描边（拖动 / 悬停放大），拖动时圆钮上方浮出数值气泡。
+///
+/// 不用 egui 原生 Slider：它的轨道和圆钮共用 `widgets.inactive.bg_fill`，
+/// 配不出"灰轨道 + 白圆钮"，圆钮描边也改不了。自绘交互并不复杂 ——
+/// 指针映射 + ←/→/Home/End，都显式写在下面。
+fn slider_line(ui: &mut Ui, label_id: egui::Id, value: &mut i32, lo: i32, hi: i32, suffix: &str) {
+    let value_w = 48.0;
+    let rail_w = SLIDER_W - value_w;
+    let (area, _) = ui.allocate_exact_size(egui::vec2(SLIDER_W, 24.0), Sense::hover());
+    let rail = egui::Rect::from_center_size(
+        egui::pos2(area.left() + rail_w / 2.0, area.center().y),
+        egui::vec2(rail_w, 5.0),
+    );
+    // 命中区比轨道大一圈，窄轨道直接点很难命中。
+    let resp = ui.interact(
+        rail.expand(9.0),
+        egui::Id::unique("slider").with(label_id),
+        Sense::click_and_drag(),
+    );
+    resp.widget_info(|| WidgetInfo::selected(egui::Role::Slider, true, false, ""));
+    let mut resp = resp.labelled_by(label_id);
+
+    // 指针设值：点击 / 拖动都把指针 x 映射到轨道区间。
+    if let Some(pos) = resp.interact_pointer_pos() {
+        if resp.dragged() || resp.clicked() {
+            let p = ((pos.x - rail.left()) / rail.width()).clamp(0.0, 1.0);
+            let nv = (lo as f32 + p * (hi - lo) as f32).round() as i32;
+            if nv != *value {
+                *value = nv;
+                resp.mark_changed();
+            }
+        }
+    }
+    // 键盘：全程 20 步为基准步长，Home/End 归零打满。
+    if resp.has_focus() {
+        let step = ((hi - lo) / 20).clamp(1, 10);
+        let mut nv = *value;
+        for (key, d) in [(egui::Key::ArrowLeft, -step), (egui::Key::ArrowRight, step)] {
+            if ui.input(|i| i.key_pressed(key)) {
+                nv = (*value + d).clamp(lo, hi);
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+            nv = lo;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::End)) {
+            nv = hi;
+        }
+        if nv != *value {
+            *value = nv;
+            resp.mark_changed();
+        }
+    }
+    if resp.clicked() {
+        resp.request_focus();
+    }
+
+    let vis = ui.visuals();
+    let accent = vis.selection.stroke.color;
+    let p = (*value - lo) as f32 / (hi - lo) as f32;
+    let active = resp.dragged() || resp.is_pointer_button_down_on();
+
+    // 轨道 + 已填充段（实心主题色）。
+    ui.painter()
+        .rect_filled(rail, CornerRadius::same(2), field_bg(ui));
+    if p > 0.0 {
+        let fill = egui::Rect::from_min_max(
+            rail.min,
+            egui::pos2(rail.left() + rail.width() * p, rail.max.y),
+        );
+        ui.painter()
+            .rect_filled(fill, CornerRadius::same(2), accent);
+    }
+    // 圆钮：白底 + 主题色描边；拖动 / 悬停放大，同时浮出数值气泡。
+    let r = if active || resp.hovered() { 9.0 } else { 7.5 };
+    let cx = rail.left() + rail.width() * p.clamp(0.0, 1.0);
+    let knob = egui::pos2(cx, rail.center().y);
+    ui.painter().circle_filled(knob, r, Color32::WHITE);
+    ui.painter()
+        .circle_stroke(knob, r, Stroke::new(if active { 2.5 } else { 2.0 }, accent));
+    if resp.has_focus() {
+        ui.painter()
+            .circle_stroke(knob, r + 2.5, Stroke::new(1.5, accent.linear_multiply(0.5)));
+    }
+    if active {
+        let text = format!("{}{}", value, suffix);
+        let font = FontId::proportional(11.0);
+        let galley = ui.painter().layout_no_wrap(text, font, Color32::WHITE);
+        let tip_w = galley.size().x + 14.0;
+        let tip = egui::Rect::from_center_size(
+            egui::pos2(knob.x, rail.top() - 16.0),
+            egui::vec2(tip_w, 17.0),
+        );
+        ui.painter().rect_filled(tip, CornerRadius::same(5), accent);
+        ui.painter().galley(
+            egui::Align2::CENTER_CENTER
+                .align_size_within_rect(galley.size(), tip)
+                .min,
+            galley,
+            Color32::WHITE,
+        );
+    }
+    // 右侧常驻数值。
+    let vtext = format!("{}{}", value, suffix);
+    ui.painter().text(
+        egui::pos2(area.right(), area.center().y),
+        Align2::RIGHT_CENTER,
+        vtext,
+        FontId::proportional(12.0),
+        if active {
+            accent
+        } else {
+            vis.weak_text_color()
+        },
+    );
 }
 
 /// 下拉行。选项表是 `(整数码, 显示文本)`。
@@ -553,9 +742,57 @@ pub(crate) fn combo(ctx: &mut Ctx<'_>, ui: &mut Ui, key: Key, label: &str, opts:
 
 /// 按钮。点了就产出一条命令，UI 层不自己执行。
 pub(crate) fn button(ctx: &mut Ctx<'_>, ui: &mut Ui, label: &str, cmd: Command) {
-    if ui.button(label).clicked() {
+    let font = FontId::new(
+        ui.style().text_styles[&egui::TextStyle::Body].size,
+        egui::FontFamily::Proportional,
+    );
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+    let size = egui::vec2((galley.size().x + 44.0).max(72.0), 30.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::CLICK);
+    resp.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, label));
+
+    // 点击或（聚焦后）空格 / 回车都触发；`Command` 不是 Copy，触发
+    // 收敛到一个分支才能 move。
+    let activated = resp.clicked()
+        || (resp.has_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)));
+    if activated {
         ctx.out.command = Some(cmd);
+        resp.mark_changed();
+        resp.request_focus();
     }
+
+    // 三态：底色上叠 hover 层（按下叠两层更深）。半透明叠层在卡片白上
+    // 正好形成渐进的 tonal 台阶，不用为深浅两套各配实色。
+    let vis = ui.visuals();
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(10), field_bg(ui));
+    if resp.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), hover(ui));
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), hover(ui));
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), hover(ui));
+    }
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(10),
+            Stroke::new(1.5, vis.selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().galley(
+        egui::Align2::CENTER_CENTER
+            .align_size_within_rect(galley.size(), rect)
+            .min,
+        galley,
+        vis.text_color(),
+    );
 }
 
 /// 主题色：来源下拉（跟随系统 / 自定义）+ 自定义时的取色器。
