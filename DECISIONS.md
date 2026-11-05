@@ -2971,8 +2971,17 @@ if saw { Pumped::Frames } else { Pumped::Idle }
 3. `step_smoke` 同样按 `fully_hidden()` 停摆 —— 粒子位置是纯时间函数，
    隐藏期间算出来也没人看得见。
 
+4. `wait()` 里的烟雾节拍同样要按 `fully_hidden()` 关掉。
+
+**为什么第 4 条比第 2 条更致命**：`step_smoke` 在收起时直接 `return false`，
+**没有推进 `next_smoke`**。而 `wait()` 用 `next_smoke` 算还要睡多久 ——
+`next_smoke` 停在过去，`left` 恒为 0，`timeout = max(0,1) = 1 ms`。于是
+收起状态下主循环以 ~1000 Hz 空转，每一步都跑一遍（只是不出帧）。这条在
+日志里完全看不出来，只有 CPU 占用降不下去。
+
 **代价**：收起状态下，主循环仍按 100 ms 醒一次（要轮询光标才能"探头"弹出），
 但每次醒来只做几次只读判定，不产生 GPU / `UpdateLayeredWindow` 工作。
+实测收起 8 秒 0 帧、CPU 0.26% 单核。
 
 **验收方式**：`MINIDOCK_FPS=1` 每秒打一行帧率。收起后应当**一行都没有**。
 

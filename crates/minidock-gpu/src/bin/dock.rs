@@ -1896,7 +1896,12 @@ impl App {
         }
         // 烟雾按自己的节奏睡：睡满 16 ms 再发现"还差 17 ms"是每秒白醒
         // 30 次，而每次醒来都要过一遍消息队列与全部 step。
-        if Tuning::from_config(&self.dock.cfg, self.accent).enabled && !self.fs_hidden {
+        // 收起后烟雾不推进（见 `step_smoke`），这里也不能再按它的节拍醒 ——
+        // 否则 `next_smoke` 永远停在过去，等待被压到 1 ms，主循环变成空转。
+        let smoke_on = Tuning::from_config(&self.dock.cfg, self.accent).enabled
+            && !self.fs_hidden
+            && !self.dock.fully_hidden();
+        if smoke_on {
             let left = self
                 .next_smoke
                 .saturating_duration_since(Instant::now())
