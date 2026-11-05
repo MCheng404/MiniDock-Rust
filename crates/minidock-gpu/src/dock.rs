@@ -255,6 +255,11 @@ pub struct Dock {
     dirty: bool,
     /// 左键按下时命中的条目下标（拖拽判定与"按下抬起同一图标"都靠它）。
     press: Option<usize>,
+    /// 按下那一项的路径。抬起来时用它核对"还是不是同一项"，
+    /// 不再依赖抬起点的命中测试 —— 悬停放大/收缩会让图标在按下与抬起
+    /// 之间移动，按坐标复查会把一次正常点击丢掉（未运行的应用没有窗口
+    /// 反馈，用户看到的是"点了没反应"）。
+    press_path: Option<String>,
     /// 正在拖分割线改尺寸（`SepScale`）。`None` = 没在拖。
     sep: Option<SepDrag>,
     /// 分割线拖动改过 `IconSize` / `ZoomSize`，主循环要标脏写盘。
@@ -342,6 +347,7 @@ impl Dock {
             order_changed: false,
             pending_move: None,
             press: None,
+            press_path: None,
             click: None,
             press_force: false,
             look_epoch: 0,
@@ -463,6 +469,7 @@ impl Dock {
             return true; // 需要 SetCapture，否则拖出窗口就收不到抬起。
         }
         self.press = hit;
+        self.press_path = hit.map(|i| self.items[i].path.clone());
         self.press_force = force;
         self.drag = self.press.map(|index| DragState {
             index,
@@ -604,11 +611,18 @@ impl Dock {
         if was_dragging {
             return None;
         }
-        let up = self.hit_at(u, v);
-        let hit = match (pressed, up) {
-            (Some(a), Some(b)) if a == b => Some((a, self.press_force)),
+        // **按下的是哪一项就启动哪一项**，不再按抬起点重新命中：放大动画
+        // 会让图标在按下与抬起之间移动，`hit_at` 复查失败就等于吞掉这次
+        // 点击。同一性用路径核对（扫描插入临时条目会改变下标）。
+        let key = self.press_path.take();
+        let hit = match (pressed, key) {
+            (Some(a), Some(path)) if self.items.get(a).is_some_and(|it| it.path == path) => {
+                Some((a, self.press_force))
+            }
             _ => None,
         };
+        let _ = u;
+        let _ = v;
         self.click = hit;
         hit.map(|(i, _)| i)
     }
@@ -625,6 +639,7 @@ impl Dock {
         self.sep = None;
         let was = self.drag.take().is_some_and(|d| d.active);
         self.press = None;
+        self.press_path = None;
         // **不能清 `click`。** 这个函数在 `WM_CAPTURECHANGED` 里被调用，而
         // "自己交还捕获"（`ReleaseCapture`）同样会同步触发那条消息 ——
         // 清掉 `click` 就等于把刚结算好的点击一起抹了。真正丢失捕获时
@@ -2416,8 +2431,12 @@ mod tests {
         assert_eq!(dock.release_at(c0, y), Some(0));
         assert_eq!(dock.take_click(), Some((0, false)));
 
-        // 在图标 0 按下、移到图标 1 松手 → 不算点击。
+        // 在图标 0 按下、**真正拖到**图标 1 再松手 → 不算点击。
+        // 注意要先喂一次 `drag_to`：真实的抬起前一定有 WM_MOUSEMOVE，
+        // 这一下才把状态从"按下"推进到"拖拽"。只看坐标的话，点击语义
+        // 是"按下的是哪一项就启动哪一项"（见 `release_at`）。
         assert!(dock.press_at(c0, y, false));
+        dock.drag_to(c1, y);
         assert_eq!(dock.release_at(c1, y), None);
         assert_eq!(dock.take_click(), None);
 
