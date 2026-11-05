@@ -30,7 +30,7 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
         ctx,
         ui,
         "背景",
-        "磨砂需要桌面捕获与 GPU 模糊，尚未实现；当前会退化成渐变。",
+        "栏体背景是渐变 + 半透明板。三处弹层（起动台 / 设置 / 右键菜单）的磨砂在各自开关里，那个是真抓桌面再模糊。",
         |ctx, ui| {
             combo(ctx, ui, Key::Theme, "Dock 主题", THEME_OPTS);
             combo(ctx, ui, Key::BgMode, "背景材质", BG_OPTS);
