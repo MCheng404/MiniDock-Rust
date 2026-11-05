@@ -411,8 +411,11 @@ pub struct Fluid {
     w: usize,
     h: usize,
     seed: f32,
-    /// 左右 / 上下外边距（px），决定"胶囊"在网格里的位置。
-    margin: (f32, f32),
+    /// 栏体在网格里的矩形（格）：`(x0, y0, w, h)`。
+    ///
+    /// 掩码与染料源区都靠它定位。"胶囊"的两端半径取 `h/2`，所以栏体是
+    /// 圆角时掩码自然跟着圆。它**每帧**更新，不参与 `ensure` 的身份判定。
+    bar: (f32, f32, f32, f32),
     u: Vec<f32>,
     v: Vec<f32>,
     u0: Vec<f32>,
@@ -449,7 +452,7 @@ impl std::fmt::Debug for Fluid {
             .field("grid", &(self.w, self.h))
             .field("bitmap", &(self.pw, self.ph))
             .field("seed", &self.seed)
-            .field("margin", &self.margin)
+            .field("bar", &self.bar)
             .finish()
     }
 }
@@ -467,7 +470,7 @@ impl Fluid {
             w: 0,
             h: 0,
             seed: 0.0,
-            margin: (0.0, 0.0),
+            bar: (0.0, 0.0, 0.0, 0.0),
             u: Vec::new(),
             v: Vec::new(),
             u0: Vec::new(),
@@ -498,46 +501,47 @@ impl Fluid {
         w: usize,
         h: usize,
         seed: f32,
-        margin: (f32, f32),
+        bar: (f32, f32, f32, f32),
         thickness: f32,
     ) -> bool {
-        if self.w == w
-            && self.h == h
-            && self.margin == margin
-            && self.thick == thickness
-            && !self.u.is_empty()
-        {
-            return false;
+        // 身份只认网格尺寸与种子。`bar` **不能**算进来：悬停放大时栏体每帧
+        // 都在长，算进来就是每帧重建、每帧把速度场与染料清零 —— 画面上
+        // 表现为烟在闪。
+        let rebuild =
+            self.w != w.max(4) || self.h != h.max(4) || self.seed != seed || self.u.is_empty();
+        if rebuild {
+            self.w = w.max(4);
+            self.h = h.max(4);
+            self.seed = seed;
+            let n = self.w * self.h;
+            for f in [
+                &mut self.u,
+                &mut self.v,
+                &mut self.u0,
+                &mut self.v0,
+                &mut self.d,
+                &mut self.d0,
+                &mut self.tmp,
+                &mut self.div,
+                &mut self.ox,
+                &mut self.oy,
+                &mut self.ox0,
+                &mut self.oy0,
+                &mut self.al,
+            ] {
+                f.clear();
+                f.resize(n, 0.0);
+            }
+            self.px.clear();
+            self.pw = 0;
+            self.ph = 0;
         }
-        self.w = w.max(4);
-        self.h = h.max(4);
-        self.seed = seed;
-        self.margin = margin;
+        // 掩码跟着栏体走，所以每次都重算：一万多格的距离场约 0.1 ms，
+        // 比"每帧重建整张网格"便宜两个数量级。
         self.thick = thickness;
-        let n = self.w * self.h;
-        for f in [
-            &mut self.u,
-            &mut self.v,
-            &mut self.u0,
-            &mut self.v0,
-            &mut self.d,
-            &mut self.d0,
-            &mut self.tmp,
-            &mut self.div,
-            &mut self.ox,
-            &mut self.oy,
-            &mut self.ox0,
-            &mut self.oy0,
-            &mut self.al,
-        ] {
-            f.clear();
-            f.resize(n, 0.0);
-        }
-        self.edge = build_edge(self.w, self.h, margin, thickness);
-        self.px.clear();
-        self.pw = 0;
-        self.ph = 0;
-        true
+        self.bar = bar;
+        self.edge = build_edge(self.w, self.h, bar, thickness);
+        rebuild
     }
 
     #[must_use]
@@ -683,10 +687,8 @@ impl Fluid {
         //    若整块内部都发射，烟会被浮力顶到上沿、困在边界里，只看得见
         //    沿顶边的一条细线，漏到外面的部分还是断的。内部留空不影响观感
         //    （被栏体挡住），外面那圈才需要完整。
-        let ix0 = self.margin.0 / CELL;
-        let iy0 = self.margin.1 / CELL;
-        let ix1 = w as f32 - self.margin.0 / CELL;
-        let iy1 = h as f32 - self.margin.1 / CELL;
+        let (ix0, iy0) = (self.bar.0, self.bar.1);
+        let (ix1, iy1) = (self.bar.0 + self.bar.2, self.bar.1 + self.bar.3);
         let dk_top = tune.decay_top();
         let dk_side = tune.decay_side();
         for y in 0..h {
@@ -892,12 +894,14 @@ impl Fluid {
 /// 形状是跑道：两端半圆、中间直线。
 /// 用"到中轴线的距离减半径"求带符号距离，比矩形距离场更接近 D2D 的
 /// `DrawRoundedRectangle(rad + d)` 那一圈圈描边。
-fn build_edge(w: usize, h: usize, margin: (f32, f32), thickness: f32) -> Vec<f32> {
-    let iy0 = margin.1 / CELL;
-    let iy1 = h as f32 - margin.1 / CELL;
+fn build_edge(w: usize, h: usize, bar: (f32, f32, f32, f32), thickness: f32) -> Vec<f32> {
+    // `bar` 已经是格坐标，直接就是胶囊的矩形 —— 不再从"网格减 margin"
+    // 反推。反推意味着掩码只认一个居中矩形：栏体换成带圆角的主体、或旁边
+    // 多了小组件条带，四个角就只能给出直角。
+    let (ix0, iy0) = (bar.0, bar.1);
+    let ix1 = bar.0 + bar.2;
+    let iy1 = bar.1 + bar.3;
     let ih = (iy1 - iy0).max(1.0);
-    let ix0 = margin.0 / CELL;
-    let ix1 = w as f32 - margin.0 / CELL;
     let rr = ih * 0.5;
     let cyc = iy0 + rr;
     // 内侧衰减宽度（格）。3 格 = 15 px，正好是栏体圆角的一半左右：
@@ -995,6 +999,14 @@ mod tests {
         }
     }
 
+    /// 网格 `(w, h)` 里"网格减边距"的栏体矩形（格坐标）。
+    ///
+    /// 与 `SmokeFx` 早先的算法等价，用来让这批测试保持原来的初始条件。
+    fn bar_in(grid: (usize, usize), tune: &Tuning) -> (f32, f32, f32, f32) {
+        let (mx, my) = (tune.margin_x() / CELL, tune.margin_y() / CELL);
+        (mx, my, grid.0 as f32 - 2.0 * mx, grid.1 as f32 - 2.0 * my)
+    }
+
     /// 与真实栏体同量级的网格：48 px 高的栏体 + 默认边距（34 px 上下）
     /// 正好 24 格高。**不能图快用 12 格**：那样 `iy1 < iy0`（胶囊上下
     /// 颠倒），密度循环会把每一格都当"外部"，跑完一片透明 —— 这条
@@ -1005,13 +1017,7 @@ mod tests {
             ..Tuning::default()
         };
         let mut fl = Fluid::new();
-        fl.ensure(
-            52,
-            24,
-            0.0,
-            (tune.margin_x(), tune.margin_y()),
-            tune.thickness,
-        );
+        fl.ensure(52, 24, 0.0, bar_in((52, 24), &tune), tune.thickness);
         for i in 0..frames {
             fl.step(
                 noise,
@@ -1036,13 +1042,7 @@ mod tests {
             ..Tuning::default()
         };
         let mut fl = Fluid::new();
-        fl.ensure(
-            52,
-            24,
-            0.0,
-            (tune.margin_x(), tune.margin_y()),
-            tune.thickness,
-        );
+        fl.ensure(52, 24, 0.0, bar_in((52, 24), &tune), tune.thickness);
         for i in 0..120 {
             fl.step(
                 &noise,

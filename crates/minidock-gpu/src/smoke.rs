@@ -13,6 +13,19 @@
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 use minidock_core::smoke::{Fluid, Frame, Noise, Rgb, Tuning, CELL, RES};
 
+/// 网格尺寸的分档粒度（格）。
+///
+/// 悬停放大时 Dock 窗口自己会变宽（1496 px → 1720 px），若按实际宽高定
+/// 网格，`ensure()` 会在每次放大 / 缩回时重建一次 —— 状态清零，烟闪一下。
+/// 128 格 = 640 px，一次放大动画稳稳落在同一档里。
+const GRID_BUCKET: usize = 128;
+
+/// 物理像素宽高 → 网格格数，向上取整到 [`GRID_BUCKET`] 的整数倍。
+fn bucket(px: f32) -> usize {
+    let cells = (px / CELL).ceil().max(4.0) as usize;
+    cells.div_ceil(GRID_BUCKET) * GRID_BUCKET
+}
+
 /// 上升的小烟团：从栏体冒出的暗色小团，外圈带一层彩色辉光。
 ///
 /// 配置项叫 `clouds`，这里按形状叫 `Puff`。
@@ -166,16 +179,28 @@ impl SmokeFx {
         // 纹理漂移用的时间。取模是为了让 `f32` 在跑几天之后仍有小数精度。
         let t = ((now_s * f64::from(tune.speed)) % 3600.0) as f32;
 
-        // ② 模拟区域：栏体四边各外扩一个 margin。用理想矩形，**不夹到
-        //    窗口内** —— 超出的部分画的时候自然被离屏目标裁掉，而夹紧会
-        //    让网格尺寸随隐藏动画抖动（每帧重建 = 每帧清空状态）。
-        let (mx, my) = (tune.margin_x(), tune.margin_y());
+        // ② 模拟区域 = **整个窗口**，不取"栏体 + 边距"。
+        //
+        //    后者在悬停放大时每帧都在变尺寸（图标从 S 长到 Z），`ensure()`
+        //    一改尺寸就重建网格 —— 速度场、染料全部清零，画面上就是烟在
+        //    闪。窗口尺寸只在重排（条目增删 / 图标尺寸）时变，那本来就是
+        //    该重来的时候。
+        //
+        //    但**悬停时窗口自己也会变宽**（图标放大要把窗口撑开），所以还要
+        //    按 `GRID_BUCKET` 分档：1496 px 与 1720 px 落在同一档里，一次
+        //    放大动画不会跨档。多出来的格子掩码为 0，画面上看不出来。
         let (bx, by, bw, bh) = bar;
-        let gx0 = bx - mx;
-        let gy0 = by - my;
-        let w = ((bw + 2.0 * mx) / CELL).ceil().max(4.0) as usize;
-        let h = ((bh + 2.0 * my) / CELL).ceil().max(4.0) as usize;
-        self.fluid.ensure(w, h, 0.0, (mx, my), tune.thickness);
+        let (gx0, gy0) = (0.0, 0.0);
+        let win = ui.max_rect();
+        let w = bucket(win.width() * ppp);
+        let h = bucket(win.height() * ppp);
+        self.fluid.ensure(
+            w,
+            h,
+            0.0,
+            (bx / CELL, by / CELL, bw / CELL, bh / CELL),
+            tune.thickness,
+        );
 
         // ③ 鼠标：位置换算到网格单元，速度按"上一帧到这一帧的位移"算。
         //
@@ -432,7 +457,9 @@ mod tests {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(400.0, 200.0),
+                    // 画布要够大：网格按整窗取整并分档，400×200 会得到
+                    // 一张 320×320 的方图，下面"筛选长条位图"的判据就失效了。
+                    egui::vec2(800.0, 300.0),
                 )),
                 ..Default::default()
             };
@@ -462,13 +489,11 @@ mod tests {
         let alpha = last.expect("烟雾位图从未进入 textures_delta");
         let max = alpha.iter().copied().max().unwrap_or(0);
         assert!(max > 20, "上传的位图几乎全透明，max={max}");
-        // 发射区是一条**轮廓窄带**，所以亮像素只占一成左右：要求
-        // 8% 以上就够证明"烟真的画出来了"，又不至于被流量涨落打翻。
+        // 发射区是一条**轮廓窄带**：它的面积只由栏体周长决定，与画布大小
+        // 无关。网格按整窗取整并分档之后（见 `paint` 的 ②），"亮像素占比"
+        // 会随画布尺寸漂，所以这里改判**绝对数量** —— 一千出头是稳态值，
+        // 要求 400 足够证明"烟真的画出来了"，又不会被流量涨落打翻。
         let lit = alpha.iter().filter(|a| **a > 8).count();
-        assert!(
-            lit * 12 > alpha.len(),
-            "只有 {lit}/{} 个像素有内容",
-            alpha.len()
-        );
+        assert!(lit > 400, "只有 {lit}/{} 个像素有内容", alpha.len());
     }
 }

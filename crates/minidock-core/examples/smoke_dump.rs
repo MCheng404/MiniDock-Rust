@@ -64,7 +64,19 @@ fn main() {
     let w = ((bar_w as f32 + 2.0 * mx) / CELL).ceil() as usize;
     let h = ((bar_h as f32 + 2.0 * my) / CELL).ceil() as usize;
     let mut fl = Fluid::new();
-    fl.ensure(w, h, 0.0, (mx, my), tune.thickness);
+    // 栏体在网格里的矩形（格）：网格是"栏体 + 边距"，所以从边距反推。
+    fl.ensure(
+        w,
+        h,
+        0.0,
+        (
+            mx / CELL,
+            my / CELL,
+            bar_w as f32 / CELL,
+            bar_h as f32 / CELL,
+        ),
+        tune.thickness,
+    );
 
     let fps: f32 = std::env::var("SMOKE_FPS")
         .ok()

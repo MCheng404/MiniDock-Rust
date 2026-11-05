@@ -1815,7 +1815,9 @@ impl App {
         // `&mut SmokeFx`，再读 `self` 的其它字段就会撞借用。
         let tune = Tuning::from_config(&dock.cfg, self.accent);
         let view = SmokeView {
-            bar: dock.bar_phys(),
+            // 光晕要罩住**整条停靠带**（图标条 + 小组件条带），不只是图标条 ——
+            // 光标判定与遮挡判定用的也是这一条并集。
+            bar: dock.hot_phys(),
             offset: dock.hide_offset(),
             cursor: dock.hover.then_some(dock.mouse),
             now_s: self.start.elapsed().as_secs_f64(),
