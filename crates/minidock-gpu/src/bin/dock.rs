@@ -127,6 +127,14 @@ mod trace {
         static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_POPUP_TRACE"));
         *V
     }
+
+    /// 每秒打一行实际出帧数（`MINIDOCK_FPS=1`）。
+    ///
+    /// 空闲承诺靠它验收：Dock 完全收起时应当**一行都没有**。
+    pub fn fps() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("MINIDOCK_FPS"));
+        *V
+    }
 }
 
 // ============================ 应用状态 ============================
@@ -197,6 +205,9 @@ struct App {
     tool_save_at: Option<Instant>,
     /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
     widgets_dump: String,
+    /// `MINIDOCK_FPS=1` 的计数：本秒已画帧数与计时起点。
+    fps_frames: u32,
+    fps_at: Instant,
     /// 栏体周围的环境烟雾。
     smoke: SmokeFx,
     /// DWM 强调色。启动时读一次：它只在用户改主题时变，而改主题会发
@@ -255,8 +266,15 @@ struct App {
 
 /// 消息泵的结论。
 enum Pumped {
-    /// 处理过消息，需要重绘。
+    /// 处理过**会改变界面**的消息（鼠标、键盘、定时器、重绘请求……），
+    /// 需要出帧。
     Frames,
+    /// 只收到了后台线程的唤醒（`WM_APP_WAKE`）。
+    ///
+    /// 它只负责打断等待，**不强制出帧** —— 是否画由各步自己的脏标记决定。
+    /// 早先把它一并算成"要出帧"，于是扫描线程每 100 ms 一条唤醒就等于
+    /// 每秒白画 10 帧：Dock 收起、屏幕上什么都看不见的时候 CPU 也降不下来。
+    Wake,
     /// 队列已空。
     Idle,
     /// 收到 `WM_QUIT`。
@@ -474,6 +492,8 @@ impl App {
             last_launch_ms,
             tool_save_at,
             widgets_dump,
+            fps_frames: 0,
+            fps_at: Instant::now(),
             smoke: SmokeFx::new(),
             accent: theme::accent().unwrap_or(PALETTE[0]),
             look_epoch: 0,
@@ -521,7 +541,8 @@ impl App {
             match pump(&mut msg) {
                 Pumped::Quit => return Ok(()),
                 Pumped::Frames => need_frame = true,
-                Pumped::Idle => {}
+                // 后台唤醒只打断等待；要不要画由下面几步的脏标记决定。
+                Pumped::Wake | Pumped::Idle => {}
             }
 
             // ② 重布局。**两个条件缺一不可**：`dirty`（鼠标进出/按下抬起
@@ -563,7 +584,10 @@ impl App {
             // ⑬ 环境烟雾：自己控制帧率（见 `step_smoke`）。
             need_frame |= self.step_smoke();
 
-            if need_frame || self.dock.anim {
+            // ⑭ 出帧。**完全收起时一帧都不画**：内容全在窗口外，画了也看不见，
+            //    而智能隐藏的扫描线程每 100 ms 会唤醒一次主循环。
+            //    注意 `anim` 不受影响 —— 收起动画最后那一帧仍然会画出来。
+            if (need_frame || self.dock.anim) && !self.dock.fully_hidden() {
                 self.render()?;
             }
             self.wait();
@@ -1745,6 +1769,21 @@ impl App {
     }
 
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if trace::fps() {
+            self.fps_frames += 1;
+            let dt = self.fps_at.elapsed();
+            if dt >= Duration::from_secs(1) {
+                eprintln!(
+                    "[fps] {:.1} 帧/秒（hidden={} anim={}）",
+                    f32::from(u16::try_from(self.fps_frames).unwrap_or(u16::MAX))
+                        / dt.as_secs_f32(),
+                    self.dock.fully_hidden(),
+                    self.dock.anim
+                );
+                self.fps_frames = 0;
+                self.fps_at = Instant::now();
+            }
+        }
         // **Dock 主题**，不是设置窗口主题：`UiTheme` 与 `DockTheme` 的 0/1
         // 含义相反（见 `config.rs` 里那条防回归测试）。用错会把整个 Dock
         // 画成另一套配色，而且看起来"只是颜色不对"，很难察觉是取值取错了。
@@ -1802,7 +1841,9 @@ impl App {
     /// 60 fps 只是把回读次数翻倍。
     fn step_smoke(&mut self) -> bool {
         let tune = Tuning::from_config(&self.dock.cfg, self.accent);
-        if !tune.enabled || self.fs_hidden || self.dock.hide_cur > 0.999 {
+        // 收起后连粒子都不推进：位置是纯时间函数，隐藏期间算出来的东西
+        // 一帧也不会被看到，只是白烧 CPU。
+        if !tune.enabled || self.fs_hidden || self.dock.fully_hidden() {
             return false;
         }
         let now = Instant::now();
@@ -1875,6 +1916,8 @@ impl App {
 /// 少一层借用关系。
 fn pump(msg: &mut MSG) -> Pumped {
     let mut saw = false;
+    // 这一批里有没有"真消息"（非后台唤醒）。全是唤醒就只是打断等待。
+    let mut real = false;
     loop {
         let has = unsafe { PeekMessageW(msg, None, 0, 0, PM_REMOVE) };
         if !has.as_bool() {
@@ -1884,13 +1927,18 @@ fn pump(msg: &mut MSG) -> Pumped {
         if msg.message == WM_QUIT {
             return Pumped::Quit;
         }
+        if msg.message != WM_APP_WAKE {
+            real = true;
+        }
         unsafe {
             let _ = TranslateMessage(msg);
             DispatchMessageW(msg);
         }
     }
-    if saw {
+    if real {
         Pumped::Frames
+    } else if saw {
+        Pumped::Wake
     } else {
         Pumped::Idle
     }

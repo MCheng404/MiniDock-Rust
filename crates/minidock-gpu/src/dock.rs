@@ -930,6 +930,16 @@ impl Dock {
         self.auto_hide() || self.force_hide || self.hide_cur > 0.0
     }
 
+    /// 已经完全收起：动画走完，画出来的东西全在窗口外。
+    ///
+    /// 主循环据此**跳过出帧**。收起后屏幕上一个像素都看不到，再画就是纯烧
+    /// CPU/GPU —— 而智能隐藏的扫描线程每 100 ms 还会唤醒一次主循环，
+    /// 早先那次唤醒被当成"要出帧"，于是隐藏状态下每秒白画 10 帧。
+    #[must_use]
+    pub fn fully_hidden(&self) -> bool {
+        self.hide_cur > 0.999
+    }
+
     /// 推进自动隐藏。返回 true 表示这一帧需要出帧（动画或状态刚变化）。
     ///
     /// `covered` 只在 `SmartHide` 下有意义：Dock 区域是否被普通窗口盖住。
