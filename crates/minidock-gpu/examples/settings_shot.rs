@@ -176,7 +176,7 @@ fn raw_input(size: (u32, u32), ppp: f32, time: f64) -> egui::RawInput {
 ///
 /// 不用 PNG：那要引一个编码库，而这里只是给人看一眼。也不保留 alpha：
 /// 分层窗口的透明区域直接看是黑的，合成到灰底才能看清圆角。
-fn write_bmp(path: &str, w: u32, h: u32, bgra: &[u8], dark: bool) -> std::io::Result<()> {
+fn write_bmp(path: &str, w: u32, h: u32, rgba: &[u8], dark: bool) -> std::io::Result<()> {
     // 与 `settings_win::shell` 画的窗口底色一致：合成用的底必须跟着主题走，
     // 否则深色截图会得到"浅灰窗口 + 深色卡片"这种真实窗口里不存在的画面。
     let bg: [u8; 3] = if dark { [24, 25, 30] } else { [246, 247, 250] };
@@ -208,7 +208,9 @@ fn write_bmp(path: &str, w: u32, h: u32, bgra: &[u8], dark: bool) -> std::io::Re
         let mut written = 0;
         for x in 0..w {
             let i = ((y * w + x) * 4) as usize;
-            let (b, g, r, a) = (bgra[i], bgra[i + 1], bgra[i + 2], bgra[i + 3]);
+            // 回读缓冲是 RGBA（真窗口呈现时由 `upload_rgba` 的 swap_rb
+            // 转成 DIB 要的 BGRA）；这里直接按 RGBA 取，BMP 像素序 BGR。
+            let (r, g, b, a) = (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
             // 预乘 alpha：直接加上背景的 (1-a) 部分。
             let inv = 255 - a as u32;
             let blend = |c: u8, bg: u8| -> u8 { (c as u32 + bg as u32 * inv / 255).min(255) as u8 };

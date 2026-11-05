@@ -81,11 +81,27 @@ const TIP_HOVER_MS: u128 = 3000;
 mod palette {
     use egui::Color32;
 
-    pub(super) const LIGHT_SIDEBAR: Color32 = Color32::from_rgb(251, 251, 253);
-    pub(super) const LIGHT_CARD: Color32 = Color32::from_rgb(255, 255, 255);
+    // 侧栏与卡片都是**半透明**的：窗口底在毛玻璃开启时 alpha=140，模糊
+    // 桌面从底下透上来；侧栏/卡片用不透明纯色会把毛玻璃整块挡死，看起来
+    // 像贴上去的实心板（与透毛玻璃的内容缝隙严重割裂）。透明度按 Fluent
+    // acrylic 的 tonal 层次排：底最透 < 侧栏 < 卡片（可读性优先）。
+    // 毛玻璃关闭时窗口底 alpha=250 近实色，叠加后整体 ≈ 不透明，同一套
+    // 配色两态通用，不需要按 frost 切换。
+    //
+    // `from_rgba_unmultiplied` 不是 const，所以是函数而不是常量。
+    pub(super) fn light_sidebar() -> Color32 {
+        Color32::from_rgba_unmultiplied(251, 251, 253, 120)
+    }
+    pub(super) fn light_card() -> Color32 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 170)
+    }
     pub(super) const LIGHT_MENU: Color32 = Color32::from_rgb(255, 255, 255);
-    pub(super) const DARK_SIDEBAR: Color32 = Color32::from_rgb(28, 29, 34);
-    pub(super) const DARK_CARD: Color32 = Color32::from_rgb(33, 34, 40);
+    pub(super) fn dark_sidebar() -> Color32 {
+        Color32::from_rgba_unmultiplied(28, 29, 34, 130)
+    }
+    pub(super) fn dark_card() -> Color32 {
+        Color32::from_rgba_unmultiplied(33, 34, 40, 150)
+    }
     pub(super) const DARK_MENU: Color32 = Color32::from_rgb(38, 39, 47);
 }
 
@@ -103,12 +119,12 @@ fn hover(ui: &Ui) -> Color32 {
     }
 }
 
-/// 侧栏底色（外壳只画窗口底色，侧栏这块由这里铺）。
+/// 侧栏底色（外壳画窗口底色，侧栏这块半透明叠上去 —— 毛玻璃能透）。
 pub(crate) fn sidebar_fill(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
-        palette::DARK_SIDEBAR
+        palette::dark_sidebar()
     } else {
-        palette::LIGHT_SIDEBAR
+        palette::light_sidebar()
     }
 }
 
@@ -123,18 +139,27 @@ pub(crate) struct Ctx<'a> {
     pub(crate) out: &'a mut Outcome,
 }
 
-/// 卡片外框：无描边、大圆角、柔和投影 —— "无直线"靠这个成立。
+/// 卡片外框：半透明填充、大圆角、柔和投影 + 1px 微描边。
 ///
-/// 颜色不用 `visuals.panel_fill`（浅色下与窗口底色同值，卡片会消失），
-/// 投影代替 1px 描边把卡片从底色上托起来。
+/// 填充改半透明后卡片能透毛玻璃，但边界也会跟着融进底色 —— 补一条
+/// 极淡的描边（Fluent 卡片的 subtle border）负责"边界在哪"，
+/// 投影继续负责"浮起来"。
 fn card_frame(ui: &Ui) -> egui::Frame {
     let dark = ui.visuals().dark_mode;
     egui::Frame::new()
         .fill(if dark {
-            palette::DARK_CARD
+            palette::dark_card()
         } else {
-            palette::LIGHT_CARD
+            palette::light_card()
         })
+        .stroke(egui::Stroke::new(
+            1.0,
+            if dark {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 20)
+            } else {
+                Color32::from_rgba_unmultiplied(23, 26, 35, 16)
+            },
+        ))
         .corner_radius(egui::CornerRadius::same(18))
         .inner_margin(egui::Margin::symmetric(16, 12))
         // 投影参数是试出来的：`spread` 一旦 > 0，投影矩形外扩但圆角半径

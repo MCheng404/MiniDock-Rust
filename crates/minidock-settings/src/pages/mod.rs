@@ -236,12 +236,26 @@ pub fn settings_ui(ui: &mut Ui, cfg: &mut Config, state: &mut SettingsState) -> 
             egui::pos2(rect.right(), rect.bottom()),
         );
 
-        // 左栏底色：比窗口底色略深，形成"导航区"的分区感。窗口本身是分层
-        // 窗口，半透明底由外壳画，这里只叠一层不透明度很低的填充。
+        // 左栏底色：半透明叠在毛玻璃上（Fluent 侧栏），再加 1px 微描边
+        // 压出导航区的边界 —— 纯靠透明度差在毛玻璃上会显得没有形状。
+        let dark = ui.visuals().dark_mode;
         ui.painter().rect_filled(
             nav_rect,
             egui::CornerRadius::same(18),
             widgets::sidebar_fill(ui),
+        );
+        ui.painter().rect_stroke(
+            nav_rect,
+            egui::CornerRadius::same(18),
+            egui::Stroke::new(
+                1.0,
+                if dark {
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(23, 26, 35, 14)
+                },
+            ),
+            egui::StrokeKind::Inside,
         );
 
         // ① 左栏：导航。内缩 6 px，让选中块的圆角不贴边。
