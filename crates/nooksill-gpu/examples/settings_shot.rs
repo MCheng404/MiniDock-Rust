@@ -15,7 +15,8 @@
 //!
 //! 不需要窗口，也不需要显示器 —— 有可用的 DX12 适配器就行。
 
-use std::io::Write as _;
+#[path = "common/bmp.rs"]
+mod bmp;
 
 use nooksill_core::config::Config;
 use nooksill_core::config::Key;
@@ -140,7 +141,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shell_with_frost(ui, &mut state, &mut cfg, &mut out, frost)
     })?;
 
-    write_bmp(&out_path, w, h, &pixels, dark, frost)?;
+    // 毛玻璃模式：底换成"模拟壁纸"—— 左亮右暗的斜向渐变。真实桌面可能是
+    // 纯白照片，也可能是一片深色；同一个面板要在两端都读得清才算过关。
+    let wallpaper = |x: u32, y: u32| -> [u8; 3] {
+        let fx = x as f32 / w.max(1) as f32;
+        let fy = y as f32 / h.max(1) as f32;
+        let t = (fx * 0.75 + fy * 0.25).clamp(0.0, 1.0);
+        let lerp = |a: f32, b: f32| (a + (b - a) * t).round() as u8;
+        if dark {
+            [lerp(236.0, 26.0), lerp(232.0, 32.0), lerp(214.0, 46.0)]
+        } else {
+            [lerp(250.0, 22.0), lerp(238.0, 30.0), lerp(210.0, 44.0)]
+        }
+    };
+    let base = if dark { [24, 25, 30] } else { [246, 247, 250] };
+    bmp::write_bmp(&out_path, w, h, &pixels, |x, y| {
+        if frost {
+            wallpaper(x, y)
+        } else {
+            base
+        }
+    })?;
     println!(
         "已写出 {out_path}（{}×{}，{:?}，{}，MSAA {}x）",
         w,
@@ -175,81 +196,4 @@ fn raw_input(size: (u32, u32), ppp: f32, time: f64) -> egui::RawInput {
         },
     );
     raw
-}
-
-/// 24 位 BMP，把预乘 BGRA 合成到浅灰底上。
-///
-/// 不用 PNG：那要引一个编码库，而这里只是给人看一眼。也不保留 alpha：
-/// 分层窗口的透明区域直接看是黑的，合成到灰底才能看清圆角。
-fn write_bmp(
-    path: &str,
-    w: u32,
-    h: u32,
-    rgba: &[u8],
-    dark: bool,
-    frost: bool,
-) -> std::io::Result<()> {
-    // 与 `settings_win::shell` 画的窗口底色一致：合成用的底必须跟着主题走，
-    // 否则深色截图会得到"浅灰窗口 + 深色卡片"这种真实窗口里不存在的画面。
-    let bg: [u8; 3] = if dark { [24, 25, 30] } else { [246, 247, 250] };
-    // 毛玻璃模式：底换成"模拟壁纸"—— 左亮右暗的斜向渐变。真实桌面可能是
-    // 纯白照片，也可能是一片深色；同一个面板要在两端都读得清才算过关。
-    let wallpaper = |x: u32, y: u32| -> [u8; 3] {
-        let fx = x as f32 / w.max(1) as f32;
-        let fy = y as f32 / h.max(1) as f32;
-        let t = (fx * 0.75 + fy * 0.25).clamp(0.0, 1.0);
-        let lerp = |a: f32, b: f32| (a + (b - a) * t).round() as u8;
-        if dark {
-            // 深色主题压在白壁纸上才是最坏情况：左边给到近白。
-            [lerp(236.0, 26.0), lerp(232.0, 32.0), lerp(214.0, 46.0)]
-        } else {
-            [lerp(250.0, 22.0), lerp(238.0, 30.0), lerp(210.0, 44.0)]
-        }
-    };
-    // 行按 4 字节对齐（BMP 的 stride 规则）。
-    let row_stride = ((w as usize) * 3).div_ceil(4) * 4;
-    let data_len = row_stride * h as usize;
-    let mut buf = Vec::with_capacity(54 + data_len);
-
-    // BITMAPFILEHEADER
-    buf.extend_from_slice(b"BM");
-    buf.extend_from_slice(&(54 + data_len as u32).to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&54u32.to_le_bytes());
-    // BITMAPINFOHEADER
-    buf.extend_from_slice(&40u32.to_le_bytes());
-    buf.extend_from_slice(&(w as i32).to_le_bytes());
-    buf.extend_from_slice(&(h as i32).to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&24u16.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes()); // 无压缩
-    buf.extend_from_slice(&(data_len as u32).to_le_bytes());
-    buf.extend_from_slice(&2835i32.to_le_bytes()); // 72 DPI
-    buf.extend_from_slice(&2835i32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-
-    // BMP 是自下而上存的。
-    for y in (0..h).rev() {
-        let mut written = 0;
-        for x in 0..w {
-            let i = ((y * w + x) * 4) as usize;
-            // 回读缓冲是 RGBA（真窗口呈现时由 `upload_rgba` 的 swap_rb
-            // 转成 DIB 要的 BGRA）；这里直接按 RGBA 取，BMP 像素序 BGR。
-            let (r, g, b, a) = (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
-            // 预乘 alpha：直接加上背景的 (1-a) 部分。
-            let base = if frost { wallpaper(x, y) } else { bg };
-            let inv = 255 - a as u32;
-            let blend = |c: u8, bg: u8| -> u8 { (c as u32 + bg as u32 * inv / 255).min(255) as u8 };
-            buf.push(blend(b, base[2]));
-            buf.push(blend(g, base[1]));
-            buf.push(blend(r, base[0]));
-            written += 3;
-        }
-        // 行尾补齐到 4 字节边界（BMP 的 stride 规则）。
-        buf.extend(std::iter::repeat_n(0u8, row_stride - written));
-    }
-
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(&buf)
 }

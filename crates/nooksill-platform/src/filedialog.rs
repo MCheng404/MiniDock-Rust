@@ -90,7 +90,19 @@ fn finish(dialog: IFileOpenDialog, owner: Option<isize>) -> Option<PathBuf> {
     // SAFETY: `owner` 是调用方给的 HWND，`None` 表示无父窗口。
     unsafe {
         let parent = owner.map(|h| windows::Win32::Foundation::HWND(h as *mut _));
-        dialog.Show(parent).ok()?;
+        match dialog.Show(parent) {
+            Ok(()) => {}
+            // 用户按取消是**最常见**的返回，不是错误，别往日志里塞。
+            Err(e) if e.code() == windows::Win32::Foundation::ERROR_CANCELLED.to_hresult() => {
+                return None;
+            }
+            Err(e) => {
+                // 其它错误（COM 没初始化、shell 拒绝等）与"取消"在调用方
+                // 看来都是 None —— 至少留一行日志，否则"点了没反应"无从查起。
+                eprintln!("[dialog] 打开文件对话框失败：{e}");
+                return None;
+            }
+        }
         let item: IShellItem = dialog.GetResult().ok()?;
         let raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
         let text = raw.to_string().ok()?;

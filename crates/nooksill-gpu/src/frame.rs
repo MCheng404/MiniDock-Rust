@@ -301,16 +301,10 @@ impl FrameRenderer {
         self.offscreen.samples()
     }
 
-    /// 倒影参数（物理像素）。`None` = 不画。
+    /// 设置倒影参数，下一帧生效。`None` = 不画。
     ///
     /// 放在呈现层而不是 egui 里：倒影是"同一帧的镜像像素"，只有拿到回读
     /// 缓冲才可能画得准；用 egui 再画一遍图标是另一套代码，必然漂移。
-    #[must_use]
-    pub const fn reflection(&self) -> Option<Reflection> {
-        self.reflection
-    }
-
-    /// 设置倒影参数，下一帧生效。
     pub const fn set_reflection(&mut self, spec: Option<Reflection>) {
         self.reflection = spec;
     }

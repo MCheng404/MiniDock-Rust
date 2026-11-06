@@ -504,7 +504,7 @@ pub fn apply_and_restart(staged: &Path) -> Result<(), UpdateError> {
          :wait\r\n\
          tasklist /FI \"IMAGENAME eq {exe_name}\" 2>nul | find /I \"{exe_name}\" >nul\r\n\
          if not errorlevel 1 (\r\n\
-         \ttimeout /t 1 /nobreak >nul\r\n\
+         \tping -n 2 127.0.0.1 >nul\r\n\
          \tgoto wait\r\n\
          )\r\n\
          move /Y \"{staged}\" \"{current}\" >nul\r\n\

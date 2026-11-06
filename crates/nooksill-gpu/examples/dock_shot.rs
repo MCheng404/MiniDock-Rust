@@ -12,7 +12,8 @@
 //! 离屏没有 DIB，所以这里对回读缓冲做同一件事 —— 用的是同一个函数，
 //! 只是每像素 RGBA 而不是 BGRA；四通道同乘衰减，通道顺序不影响结果。
 
-use std::io::Write;
+#[path = "common/bmp.rs"]
+mod bmp;
 
 use nooksill_core::config::{Config, Key};
 use nooksill_core::layout::Rect as LRect;
@@ -87,7 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spec.src_top, spec.src_h, spec.gap, spec.height, spec.opacity
         );
     }
-    write_bmp(&path, w, h, &pixels, dark)?;
+    let bg = if dark { [18, 19, 23] } else { [238, 239, 243] };
+    bmp::write_bmp(&path, w, h, &pixels, move |_, _| bg)?;
     println!("已写出 {path}（{w}×{h}）");
     Ok(())
 }
@@ -109,45 +111,4 @@ fn raw_input(w: u32, h: u32, ppp: f32) -> egui::RawInput {
         },
     );
     raw
-}
-
-/// 24 位 BMP，预乘 alpha 合成到主题底色上（与 `settings_shot` 同一套规则）。
-fn write_bmp(path: &str, w: u32, h: u32, rgba: &[u8], dark: bool) -> std::io::Result<()> {
-    let bg: [u8; 3] = if dark { [18, 19, 23] } else { [238, 239, 243] };
-    let row_stride = ((w as usize) * 3).div_ceil(4) * 4;
-    let data_len = row_stride * h as usize;
-    let mut buf = Vec::with_capacity(54 + data_len);
-    buf.extend_from_slice(b"BM");
-    buf.extend_from_slice(&(54 + data_len as u32).to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&54u32.to_le_bytes());
-    buf.extend_from_slice(&40u32.to_le_bytes());
-    buf.extend_from_slice(&(w as i32).to_le_bytes());
-    buf.extend_from_slice(&(h as i32).to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&24u16.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&(data_len as u32).to_le_bytes());
-    buf.extend_from_slice(&2835i32.to_le_bytes());
-    buf.extend_from_slice(&2835i32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-
-    for y in (0..h).rev() {
-        let mut written = 0;
-        for x in 0..w {
-            let i = ((y * w + x) * 4) as usize;
-            let (r, g, b, a) = (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
-            let inv = 255 - a as u32;
-            let blend =
-                |c: u8, back: u8| -> u8 { (c as u32 + back as u32 * inv / 255).min(255) as u8 };
-            buf.push(blend(b, bg[2]));
-            buf.push(blend(g, bg[1]));
-            buf.push(blend(r, bg[0]));
-            written += 3;
-        }
-        buf.extend(std::iter::repeat_n(0u8, row_stride - written));
-    }
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(&buf)
 }

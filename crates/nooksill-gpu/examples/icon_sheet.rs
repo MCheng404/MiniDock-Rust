@@ -11,7 +11,8 @@
 //! 线宽分档、圆头与像素网格对齐在非整数 DPI 下是否依然清晰。
 //! ```
 
-use std::io::Write as _;
+#[path = "common/bmp.rs"]
+mod bmp;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect};
 use nooksill_core::control::Tile;
@@ -72,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pixels = px;
     }
     let bg = if dark { [24, 25, 30] } else { [246, 247, 250] };
-    write_bmp(&out, &pixels, bg, pw, ph)?;
+    bmp::write_bmp(&out, pw, ph, &pixels, move |_, _| bg)?;
     println!(
         "已写出 {out}（逻辑 {W}×{H} / 物理 {pw}×{ph}，{}，{}% DPI）",
         if dark { "深色" } else { "浅色" },
@@ -300,41 +301,4 @@ fn raw_input(time: f64, ppp: f32) -> egui::RawInput {
         },
     );
     raw
-}
-
-/// 与 `settings_shot` 同一套 BMP 写出（回读缓冲是 RGBA，BMP 像素序 BGR）。
-fn write_bmp(path: &str, rgba: &[u8], bg: [u8; 3], w: u32, h: u32) -> std::io::Result<()> {
-    let row_stride = ((w as usize) * 3).div_ceil(4) * 4;
-    let mut buf = Vec::with_capacity(54 + row_stride * h as usize);
-    buf.extend_from_slice(b"BM");
-    buf.extend_from_slice(&((54 + row_stride * h as usize) as u32).to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&54u32.to_le_bytes());
-    buf.extend_from_slice(&40u32.to_le_bytes());
-    buf.extend_from_slice(&(w as i32).to_le_bytes());
-    buf.extend_from_slice(&(h as i32).to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&24u16.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&((row_stride * h as usize) as u32).to_le_bytes());
-    buf.extend_from_slice(&2835i32.to_le_bytes());
-    buf.extend_from_slice(&2835i32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    for y in (0..h).rev() {
-        let mut written = 0;
-        for x in 0..w {
-            let i = ((y * w + x) * 4) as usize;
-            let (r, g, b, a) = (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
-            let inv = 255 - a as u32;
-            let blend =
-                |c: u8, bgc: u8| -> u8 { (c as u32 + bgc as u32 * inv / 255).min(255) as u8 };
-            buf.push(blend(b, bg[2]));
-            buf.push(blend(g, bg[1]));
-            buf.push(blend(r, bg[0]));
-            written += 3;
-        }
-        buf.extend(std::iter::repeat_n(0u8, row_stride - written));
-    }
-    std::fs::File::create(path)?.write_all(&buf)
 }

@@ -83,11 +83,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match App::boot()? {
+    let Some(mut app) = App::boot()? else {
         // `None` = 已有实例在跑。这是正常退出，不是错误。
-        None => Ok(()),
-        Some(mut app) => app.run(),
+        return Ok(());
+    };
+    let outcome = app.run();
+    // 先把 `App` 落地（析构 = AppBar 注销 + 配置写盘 + 单实例释放），
+    // 再交替换脚本 —— 脚本要等的正是"本进程退出"，顺序反了会自己卡住自己。
+    let pending = app.pending_update.take();
+    drop(app);
+    if let Some(staged) = pending {
+        nooksill_platform::update::apply_and_restart(&staged)?;
     }
+    outcome
 }
 
 // ============================ 调试开关 ============================
@@ -176,6 +184,10 @@ struct App {
     update_release: Option<nooksill_platform::update::Release>,
     /// 已下载并校验通过的暂存文件。
     update_staged: Option<std::path::PathBuf>,
+    /// 退出后要执行的替换。**不能**在 `apply_update` 里直接 `process::exit`：
+    /// 那个函数不跑析构，AppBar 注销与配置写盘都会被跳过 —— 而新进程起来
+    /// 要读到干净的状态。
+    pending_update: Option<std::path::PathBuf>,
 
     // ---- 后台线程。UI 线程只 `try_recv`，永远不等它们 ----
     /// 取图标（shell / COM，串行）。
@@ -515,6 +527,7 @@ impl App {
             update_rx: None,
             update_release: None,
             update_staged: None,
+            pending_update: None,
             debug_opened,
             watcher: nooksill_gpu::popup::Watcher::default(),
             panel_was_open: false,
@@ -3400,17 +3413,10 @@ impl App {
         let Some(staged) = self.update_staged.clone() else {
             return;
         };
-        match nooksill_platform::update::apply_and_restart(&staged) {
-            Ok(()) => {
-                // 走正常退出：AppBar 注销、配置写盘都在析构里。
-                std::process::exit(0);
-            }
-            Err(e) => {
-                if let Some(sw) = self.settings_slot.as_mut() {
-                    sw.state.update.status = format!("替换失败：{e}");
-                    sw.wake();
-                }
-            }
-        }
+        // 只做"记号 + 退出循环"。真正的替换放在 `main` 里、`App` 析构之后：
+        // `process::exit` 不跑析构，AppBar 的 ABM_REMOVE 与配置写盘都会丢。
+        self.pending_update = Some(staged);
+        // SAFETY: `PostQuitMessage` 只是往本线程队列塞一条 WM_QUIT。
+        unsafe { PostQuitMessage(0) };
     }
 }
