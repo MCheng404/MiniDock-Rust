@@ -102,7 +102,8 @@ fn section_of_numeric(name: &str) -> &'static str {
         // 起动台毛玻璃。
         "LpFrost" => return "widgets.launchpad",
         // 设置窗口毛玻璃 / 栏体左右内边距 / 界面缩放。
-        "UiFrost" | "HPad" | "UiScale" | "UiAccent" | "UiAccentDock" => return "appearance",
+        "UiFrost" | "HPad" | "UiScale" | "UiAccent" | "UiAccentDock" | "UiAccentDockIcons"
+        | "UiAccentCcIcons" => return "appearance",
         // 帧率与同步（Rust 版自有）。
         "FrameCap" | "VSync" | "Msaa" => return "performance",
         // 右键菜单毛玻璃。
@@ -290,6 +291,10 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("VSync", 0, 1, 0, true, false),
     // MSAA samples: 0 = auto by window area, 1/2/4 = forced (next launch).
     ("Msaa", 0, 4, 0, false, false),
+    // 图标应用主题色：与「同步到 Dock 栏体」彼此独立，两个窗口各一个开关。
+    // 默认开 —— 用户要的就是图标跟着主题色走；关掉回落各自的中性配色。
+    ("UiAccentDockIcons", 0, 1, 1, true, false),
+    ("UiAccentCcIcons", 0, 1, 1, true, false),
 ];
 
 impl Key {
@@ -505,6 +510,10 @@ impl Key {
     pub const VSYNC: Key = Key::Numeric(99);
     /// `Msaa`：0 = 按窗口面积自动，1/2/4 = 强制档位。
     pub const MSAA: Key = Key::Numeric(100);
+    /// `UiAccentDockIcons`：Dock 图标（内置条目 / 首字占位）是否应用主题色。
+    pub const UI_ACCENT_DOCK_ICONS: Key = Key::Numeric(101);
+    /// `UiAccentCcIcons`：控制中心磁贴图标是否应用主题色。
+    pub const UI_ACCENT_CC_ICONS: Key = Key::Numeric(102);
 }
 
 impl Key {
@@ -661,6 +670,8 @@ impl Key {
         Key::FRAME_CAP,
         Key::VSYNC,
         Key::MSAA,
+        Key::UI_ACCENT_DOCK_ICONS,
+        Key::UI_ACCENT_CC_ICONS,
     ];
 
     /// 需要读写的全部键：行序表在前，自有键在后。
@@ -1120,6 +1131,9 @@ pub struct Config {
     /// 不参与 ini 读写 —— 系统强调色是环境值，不该被保存到配置里。
     /// `None` = 使用主题默认配色。
     pub runtime_accent: Option<[u8; 3]>,
+    /// 运行时图标主题色：由主循环按两个图标开关解析一次，Dock / 控制中心
+    /// 共用。与 `runtime_accent`（栏体渐变）彼此独立，都不写 ini。
+    pub runtime_icon_accent: Option<[u8; 3]>,
 }
 
 impl Config {
@@ -1183,6 +1197,7 @@ impl Config {
             adapter: String::new(),
             cc_order: String::new(),
             runtime_accent: None,
+            runtime_icon_accent: None,
         }
     }
 
@@ -1451,6 +1466,18 @@ impl Default for Config {
 mod tests {
     use super::*;
 
+    /// 两个图标主题色开关彼此独立：关掉 Dock 的不该顺带关掉控制中心。
+    #[test]
+    fn icon_accent_switches_are_independent() {
+        let mut c = Config::defaults(96);
+        assert_eq!(c.get_i32(Key::UI_ACCENT_DOCK_ICONS), 1, "默认开");
+        assert_eq!(c.get_i32(Key::UI_ACCENT_CC_ICONS), 1, "默认开");
+        c.apply_i32(Key::UI_ACCENT_DOCK_ICONS, 0);
+        assert_eq!(c.get_i32(Key::UI_ACCENT_CC_ICONS), 1);
+        c.apply_i32(Key::UI_ACCENT_CC_ICONS, 0);
+        assert_eq!(c.get_i32(Key::UI_ACCENT_DOCK_ICONS), 0);
+    }
+
     #[test]
     fn defaults_match_c_version() {
         let c = Config::defaults(96);
@@ -1650,6 +1677,8 @@ mod tests {
             (Key::FRAME_CAP, "FrameCap"),
             (Key::VSYNC, "VSync"),
             (Key::MSAA, "Msaa"),
+            (Key::UI_ACCENT_DOCK_ICONS, "UiAccentDockIcons"),
+            (Key::UI_ACCENT_CC_ICONS, "UiAccentCcIcons"),
         ];
         for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");

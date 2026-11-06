@@ -13,7 +13,7 @@ use std::io::Write as _;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect};
 use minidock_core::control::Tile;
 use minidock_gpu::frame::FrameRenderer;
-use minidock_gpu::glyph::{self, Builtin};
+use minidock_gpu::glyph::{self, Builtin, IconState, IconStyle};
 use minidock_gpu::gpu::Gpu;
 
 const W: u32 = 780;
@@ -132,56 +132,132 @@ fn sheet(ui: &mut egui::Ui, dark: bool, accent: Color32) {
             *n += 1;
         };
 
+    let style = |color: Color32| IconStyle::plain(color);
+    let dock = |a: Color32| IconStyle::new(Color32::WHITE, a, IconState::default());
+    let st = |state: IconState| IconStyle::new(fg, accent, state);
+
     // 第一行：Dock 内置、首字占位、条带、喇叭。
     cell(p, &mut n, "Start", &|p, r| {
-        glyph::paint_tile(p, r, Builtin::Start, accent, dark)
+        glyph::paint_tile(p, r, Builtin::Start, dock(accent), dark)
     });
     cell(p, &mut n, "Launchpad", &|p, r| {
-        glyph::paint_tile(p, r, Builtin::Launchpad, accent, dark)
+        glyph::paint_tile(p, r, Builtin::Launchpad, dock(accent), dark)
     });
     cell(p, &mut n, "Monogram", &|p, r| {
-        glyph::paint_monogram(p, r, 'M', accent, dark)
+        glyph::paint_monogram(p, r, 'M', dock(accent), dark)
     });
-    cell(p, &mut n, "Sliders", &|p, r| glyph::sliders(p, r, fg));
+    cell(p, &mut n, "Sliders", &|p, r| {
+        glyph::sliders(p, r, style(fg))
+    });
     cell(p, &mut n, "Speaker", &|p, r| {
-        glyph::speaker(p, r, fg, false)
+        glyph::speaker(p, r, style(fg))
     });
-    cell(p, &mut n, "Muted", &|p, r| glyph::speaker(p, r, fg, true));
+    cell(p, &mut n, "Muted", &|p, r| {
+        glyph::speaker(
+            p,
+            r,
+            IconStyle::new(
+                fg,
+                fg,
+                IconState {
+                    muted: true,
+                    ..IconState::default()
+                },
+            ),
+        )
+    });
     cell(p, &mut n, "Start · pink", &|p, r| {
-        glyph::paint_tile(p, r, Builtin::Start, Color32::from_rgb(224, 86, 138), dark)
+        glyph::paint_tile(
+            p,
+            r,
+            Builtin::Start,
+            dock(Color32::from_rgb(224, 86, 138)),
+            dark,
+        )
     });
 
     // 第二行：控制中心 9 个磁贴图标。
     for (tile, label) in tiles {
         cell(p, &mut n, label, &|p, r| {
-            glyph::control_tile(p, r, tile, fg)
+            glyph::control_tile(p, r, tile, style(fg))
         });
     }
 
-    // 第三行：小尺寸（24px，缩放一致性）与开关态（白字强调色底）。
+    // 第三行：小尺寸（24px）与开关态（白图标 + 主题色底）。
     cell(p, &mut n, "Wifi · 24px", &|p, r| {
         let small = Rect::from_center_size(r.center(), egui::vec2(24.0, 24.0));
         p.rect_filled(small, CornerRadius::same(4), tonal(dark));
-        glyph::control_tile(p, small, Tile::Wifi, fg)
+        glyph::control_tile(p, small, Tile::Wifi, style(fg))
     });
     cell(p, &mut n, "Settings · 24px", &|p, r| {
         let small = Rect::from_center_size(r.center(), egui::vec2(24.0, 24.0));
         p.rect_filled(small, CornerRadius::same(4), tonal(dark));
-        glyph::control_tile(p, small, Tile::Settings, fg)
+        glyph::control_tile(p, small, Tile::Settings, style(fg))
     });
     cell(p, &mut n, "Start · 24px", &|p, r| {
         let small = Rect::from_center_size(r.center(), egui::vec2(24.0, 24.0));
-        glyph::paint_tile(p, small, Builtin::Start, accent, dark)
+        glyph::paint_tile(p, small, Builtin::Start, dock(accent), dark)
     });
     cell(p, &mut n, "Wifi · ON", &|p, r| {
         let chip = Rect::from_center_size(r.center(), egui::vec2(48.0, 48.0));
         p.rect_filled(chip, CornerRadius::same(14), accent);
-        glyph::control_tile(p, chip, Tile::Wifi, Color32::WHITE)
+        glyph::control_tile(p, chip, Tile::Wifi, style(Color32::WHITE))
     });
     cell(p, &mut n, "Gear · ON", &|p, r| {
         let chip = Rect::from_center_size(r.center(), egui::vec2(48.0, 48.0));
         p.rect_filled(chip, CornerRadius::same(14), accent);
-        glyph::control_tile(p, chip, Tile::Settings, Color32::WHITE)
+        glyph::control_tile(p, chip, Tile::Settings, style(Color32::WHITE))
+    });
+
+    // 第四行：动态状态（level / phase）与主题色开关对比 —— 以后接动画
+    // 只改 IconState，绘制代码不用动。
+    cell(p, &mut n, "Wifi · lv .33", &|p, r| {
+        glyph::control_tile(p, r, Tile::Wifi, st(IconState::default().with_level(0.33)))
+    });
+    cell(p, &mut n, "Speaker · lv .5", &|p, r| {
+        glyph::speaker(p, r, st(IconState::default().with_level(0.5)))
+    });
+    cell(p, &mut n, "Energy · lv .4", &|p, r| {
+        glyph::control_tile(p, r, Tile::Energy, st(IconState::default().with_level(0.4)))
+    });
+    cell(p, &mut n, "Launch · lv .55", &|p, r| {
+        glyph::paint_tile(
+            p,
+            r,
+            Builtin::Launchpad,
+            IconStyle::new(
+                Color32::WHITE,
+                accent,
+                IconState::default().with_level(0.55),
+            ),
+            dark,
+        )
+    });
+    cell(p, &mut n, "Gear · phase", &|p, r| {
+        glyph::control_tile(
+            p,
+            r,
+            Tile::Settings,
+            st(IconState::default().with_phase(0.5)),
+        )
+    });
+    cell(p, &mut n, "Hotspot · phase", &|p, r| {
+        glyph::control_tile(
+            p,
+            r,
+            Tile::Hotspot,
+            st(IconState::default().with_phase(0.25)),
+        )
+    });
+    cell(p, &mut n, "accent off / on", &|p, r| {
+        let left = Rect::from_center_size(
+            Pos2::new(r.center().x - 15.0, r.center().y),
+            egui::vec2(26.0, 26.0),
+        );
+        let right = left.translate(egui::vec2(30.0, 0.0));
+        // 关：中性前景色；开：主题色。两个独立开关只影响 color。
+        glyph::control_tile(p, left, Tile::Wifi, style(fg));
+        glyph::control_tile(p, right, Tile::Wifi, style(accent));
     });
 }
 

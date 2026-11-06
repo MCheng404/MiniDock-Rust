@@ -16,6 +16,7 @@
 use std::pin::Pin;
 use std::time::Instant;
 
+use crate::glyph::{IconState, IconStyle};
 use egui::{Align2, Color32, CornerRadius, FontId, Rect as EguiRect};
 use minidock_core::control::{self, Tile};
 use minidock_platform::audio::{Audio, Battery};
@@ -75,6 +76,8 @@ pub struct CcWindow {
     dark: bool,
     /// 主题被这个面板改过，主循环要重读一次。
     pub dirty_theme: bool,
+    /// 图标主题色（独立开关 UiAccentCcIcons 控制，None = 中性前景色）。
+    icon_accent: Option<Color32>,
 
     /// 磁贴列表（顺序由 core 决定）。
     tiles: Vec<Tile>,
@@ -181,6 +184,7 @@ impl CcWindow {
             // **不能**拿 `CcEnergy` 当"节能模式开着"：那个键的语义是
             // "要不要显示这一格"。真实状态查 `PowerGetActiveScheme`。
             energy: sysact::is_power_saver(),
+            icon_accent: None,
             power: sysact::PowerSaver::default(),
             hover: None,
             hits: Vec::new(),
@@ -254,6 +258,12 @@ impl CcWindow {
     }
 
     /// 画一帧。
+    /// 主循环每帧设置：图标主题色开关开启时是解析后的 RGB，
+    /// 关闭时是 `None`（图标回落中性前景色）。
+    pub fn set_icon_accent(&mut self, rgb: Option<[u8; 3]>) {
+        self.icon_accent = rgb.map(|c| Color32::from_rgb(c[0], c[1], c[2]));
+    }
+
     pub fn render(&mut self, gpu: &Gpu) -> Result<(), GpuError> {
         let pos = self.pos;
         let hwnd = self.hwnd;
@@ -264,13 +274,23 @@ impl CcWindow {
         let energy = self.energy;
         let has_audio = self.audio.is_some();
         let hover = self.hover;
+        let icon_accent = self.icon_accent;
         let battery = Battery::read();
         let raw = self.input.take(self.renderer.size(), self.ppp);
         let mut hits = Vec::new();
         let mut slider = EguiRect::NOTHING;
         self.renderer.render(gpu, raw, hwnd, pos, |ui| {
             let (h, s) = draw_panel(
-                ui, dark, &tiles, volume, mute, energy, has_audio, battery, hover,
+                ui,
+                dark,
+                &tiles,
+                volume,
+                mute,
+                energy,
+                has_audio,
+                battery,
+                hover,
+                icon_accent,
             );
             hits = h;
             slider = s;
@@ -484,6 +504,7 @@ fn draw_panel(
     has_audio: bool,
     battery: Battery,
     hover: Option<Hit>,
+    icon_accent: Option<Color32>,
 ) -> (Vec<EguiRect>, EguiRect) {
     let rect = ui.max_rect();
     let painter = ui.painter().clone();
@@ -507,6 +528,8 @@ fn draw_panel(
         )
     };
     let accent = ui.visuals().selection.bg_fill;
+    // 图标主题色：独立开关（UiAccentCcIcons）控制，关掉就用中性前景色。
+    let icon_color = icon_accent.unwrap_or(tc);
     let tile_off = if dark {
         Color32::from_rgba_unmultiplied(255, 255, 255, 58)
     } else {
@@ -555,12 +578,24 @@ fn draw_panel(
         };
         painter.rect_filled(r, CornerRadius::same(14), fill);
 
-        let fg = if on { Color32::WHITE } else { tc };
+        // off 态图标走 icon_color（开关开 = 主题色，关 = 中性前景色）；
+        // on 态保持白图标压在主题色磁贴上。
+        let fg = if on { Color32::WHITE } else { icon_color };
+        let state = IconState {
+            active: on,
+            level: if *tile == Tile::Mute {
+                volume as f32 / 100.0
+            } else {
+                1.0
+            },
+            muted: mute,
+            ..IconState::default()
+        };
         crate::glyph::control_tile(
             &painter,
             EguiRect::from_center_size(egui::pos2(x + tw * 0.5, y + 24.0), egui::vec2(24.0, 24.0)),
             *tile,
-            fg,
+            IconStyle::new(fg, accent, state),
         );
         painter.text(
             egui::pos2(x + tw * 0.5, y + 52.0),
@@ -589,8 +624,15 @@ fn draw_panel(
     crate::glyph::speaker(
         &painter,
         EguiRect::from_center_size(icon_c, egui::vec2(20.0, 20.0)),
-        sub,
-        mute,
+        IconStyle::new(
+            icon_color,
+            accent,
+            IconState {
+                level: volume as f32 / 100.0,
+                muted: mute,
+                ..IconState::default()
+            },
+        ),
     );
     let track = EguiRect::from_min_max(
         egui::pos2(slider.left() + 30.0, slider.center().y - 3.0),

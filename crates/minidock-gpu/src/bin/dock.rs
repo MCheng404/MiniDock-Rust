@@ -1834,6 +1834,23 @@ impl App {
         } else {
             None
         };
+        // 图标主题色：两个独立开关任一开启才解析一次（DWM 调用不重复）。
+        // 存运行时字段，Dock / 控制中心共用；各自再按自己的开关决定上色。
+        let icon_on = self.dock.cfg.get_i32(Key::UI_ACCENT_DOCK_ICONS) != 0
+            || self.dock.cfg.get_i32(Key::UI_ACCENT_CC_ICONS) != 0;
+        self.dock.cfg.runtime_icon_accent = if icon_on {
+            minidock_gpu::accent::resolve(&self.dock.cfg)
+        } else {
+            None
+        };
+        let cc_accent = if self.dock.cfg.get_i32(Key::UI_ACCENT_CC_ICONS) != 0 {
+            self.dock.cfg.runtime_icon_accent
+        } else {
+            None
+        };
+        if let Some(win) = self.cc_slot.as_mut() {
+            win.set_icon_accent(cc_accent);
+        }
         let dock = &*self.dock;
         // 烟雾的输入全部在闭包外取好：闭包里同时持有 `&Dock` 与
         // `&mut SmokeFx`，再读 `self` 的其它字段就会撞借用。

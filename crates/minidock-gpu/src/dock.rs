@@ -1305,7 +1305,7 @@ impl Dock {
         // 图标略小于计时器卡片里的表盘：滑轨本身有留白，画等大反而显小。
         let s = c.width().min(c.height()) * 0.62;
         let icon = EguiRect::from_center_size(c.center(), egui::vec2(s, s));
-        crate::glyph::sliders(painter, icon, color);
+        crate::glyph::sliders(painter, icon, crate::glyph::IconStyle::plain(color));
     }
 
     fn paint_tool_card(&self, painter: &egui::Painter, p: Proj, dark: bool) {
@@ -1659,16 +1659,26 @@ impl Dock {
             );
         }
 
-        // 图标统一取同一份主题色（同步到 Dock 时是运行时解析值，
-        // 否则回落默认蓝）：内置条目底色、首字占位文字都跟着走。
-        let accent = self.cfg.runtime_accent.map_or_else(
+        // 图标主题色由独立开关 UiAccentDockIcons 控制，与「同步到 Dock
+        // 栏体」互不牵连；关掉回落默认蓝。运行时值主循环每帧算一次。
+        let accent = if self.cfg.get_i32(Key::UI_ACCENT_DOCK_ICONS) != 0 {
+            self.cfg.runtime_icon_accent
+        } else {
+            None
+        }
+        .map_or_else(
             || Color32::from_rgb(46, 123, 246),
             |a| argbc(255, a[0], a[1], a[2]),
+        );
+        let style = crate::glyph::IconStyle::new(
+            Color32::WHITE,
+            accent,
+            crate::glyph::IconState::default(),
         );
 
         // 内置条目（开始 / 起动台）没有 shell 图标可取，现画。
         if let Some(kind) = crate::glyph::Builtin::from_path(&it.path) {
-            crate::glyph::paint_tile(painter, inner, kind, accent, dark);
+            crate::glyph::paint_tile(painter, inner, kind, style, dark);
             return;
         }
 
@@ -1685,7 +1695,7 @@ impl Dock {
 
         // 没有图标 → 首字占位（中性 tonal 底 + 主题色首字母）。
         if let Some(ch) = it.name.chars().next() {
-            crate::glyph::paint_monogram(painter, inner, ch, accent, dark);
+            crate::glyph::paint_monogram(painter, inner, ch, style, dark);
         }
     }
 

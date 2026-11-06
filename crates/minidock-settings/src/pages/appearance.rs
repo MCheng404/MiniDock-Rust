@@ -16,6 +16,20 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             "同步到 Dock 栏体",
             "把主题色用到栏体渐变与运行指示点",
         );
+        toggle(
+            ctx,
+            ui,
+            Key::UI_ACCENT_DOCK_ICONS,
+            "Dock 图标应用主题色",
+            "开始 / 起动台图标底色与首字占位跟随主题色；关闭回落默认蓝",
+        );
+        toggle(
+            ctx,
+            ui,
+            Key::UI_ACCENT_CC_ICONS,
+            "控制中心图标应用主题色",
+            "磁贴线稿图标跟随主题色；关闭用中性前景色",
+        );
     });
 
     card(ctx, ui, "尺寸", "", |ctx, ui| {

@@ -1,18 +1,105 @@
 //! 矢量图标中心：Dock 内置条目、控制中心磁贴、首字占位、条带图标。
 //!
-//! Dock 与控制中心原先各画各的：一处是写死颜色的填充色块，一处是写死
-//! 像素圆角的线稿，缩放/DPI 一变就走样。现在统一到一套规范：
+//! 设计基准（Fluent 24px 图标 / Lucide 描边规范，2026-11-06 查证）：
 //!
-//! 1. **归一化画布**：所有坐标按「以图标中心为原点、边长 `s` 的方框」
-//!    计算（-0.5..0.5），尺寸每帧变化（Dock 悬停放大）也不会错位；
-//! 2. **统一笔触**：线宽 `s * 0.085`（下限 1.1 px），所有线段/圆弧带圆头，
-//!    圆角半径都按 `s` 取比例，不写死像素；
-//! 3. **颜色全由调用方给**：内置条目跟 Dock 主题色，磁贴跟前后景/开关态；
-//! 4. **不用 emoji、不用渐变、不用字符**：打包字体没有这些符号（ADR-040
-//!    在 ✓/✕ 上踩过豆腐块），小尺寸渐变只会显脏。
+//! 1. **20px 安全区**：24px 画布里内容只占 20px、四周留 2px —— 这里
+//!    归一化为 `SAFE = 0.40`；方形类再做光学补偿（`BOX = 0.34`），
+//!    否则方块看起来比圆形大一圈；
+//! 2. **统一描边**：线宽 `s * 0.085`（下限 1.1px），同一套图标不换粗细；
+//! 3. **圆角连接**：所有折线走 `polyline` —— 一整条 `Shape::line` +
+//!    每个顶点补**一次**圆头（round join / round cap）。旧版每段线段
+//!    各画一次、两端各补圆，拐点会叠出结节、端点接不上；
+//! 4. **没有锐角**：填充块只用圆角矩形 / 圆，不用三角、梯形等凸多边形；
+//!    尖角形状（闪电、蓝牙、水滴）一律用折线 + 圆头软化；
+//! 5. **动态状态**：`IconState` 把 level / active / phase / muted 集中起来，
+//!    绘制端不持有时间 —— 以后加动画只需调用方推进 `phase`，不用改
+//!    每个图标的签名或绘制代码。
+//!
+//! 不用 emoji、不用渐变、不用特殊字符：打包字体没有这些符号（ADR-040
+//! 在 ✓/✕ 上踩过豆腐块），小尺寸渐变只会显脏。
 
 use egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect as EguiRect, Stroke};
 use minidock_core::control::Tile;
+
+/// 24px 画布的 20px 安全区（归一化半径）。
+const SAFE: f32 = 0.40;
+/// 方形类的光学补偿：同样半径下方块视觉面积更大，缩一档才与圆类齐平。
+const BOX: f32 = 0.34;
+
+/// 图标的动态状态。所有可动参数集中在这里，绘制函数只读不持有时间。
+#[derive(Clone, Copy, Debug)]
+pub struct IconState {
+    /// 0..1 强度/进度：Wifi 信号格、音量声波、电池电量、点阵个数。
+    pub level: f32,
+    /// 激活 / 选中态。
+    pub active: bool,
+    /// 0..1 动画相位，由调用方按时间推进（绘制端不碰时钟）。
+    pub phase: f32,
+    /// 静音 / 禁用语义。
+    pub muted: bool,
+}
+
+impl Default for IconState {
+    fn default() -> Self {
+        Self {
+            level: 1.0,
+            active: false,
+            phase: 0.0,
+            muted: false,
+        }
+    }
+}
+
+impl IconState {
+    /// 指定强度，其余取默认。
+    #[must_use]
+    pub fn with_level(mut self, level: f32) -> Self {
+        self.level = level.clamp(0.0, 1.0);
+        self
+    }
+
+    /// 指定动画相位，其余取默认。
+    #[must_use]
+    pub fn with_phase(mut self, phase: f32) -> Self {
+        self.phase = phase.rem_euclid(1.0);
+        self
+    }
+}
+
+/// 一次绘制的完整规格：颜色 + 主题色 + 动态状态。
+///
+/// 所有公开入口统一收它，以后要加字段（例如 hover 进度、强调闪烁）
+/// 不用改函数签名。
+#[derive(Clone, Copy, Debug)]
+pub struct IconStyle {
+    /// 图标主体色（线稿 / 填充）。
+    pub color: Color32,
+    /// 主题色：激活段、强调段、内置条目底色。
+    pub accent: Color32,
+    pub state: IconState,
+}
+
+impl IconStyle {
+    /// 单色图标（无主题色区分）。
+    #[must_use]
+    pub fn plain(color: Color32) -> Self {
+        Self {
+            color,
+            accent: color,
+            state: IconState::default(),
+        }
+    }
+
+    /// 带主题色与状态的完整规格。
+    #[must_use]
+    pub const fn new(color: Color32, accent: Color32, state: IconState) -> Self {
+        Self {
+            color,
+            accent,
+            state,
+        }
+    }
+}
 
 /// 需要现画的 Dock 内置条目。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -42,88 +129,103 @@ struct Canvas<'a> {
     p: &'a Painter,
     c: Pos2,
     s: f32,
-    ink: Color32,
+    style: IconStyle,
 }
 
 impl<'a> Canvas<'a> {
-    fn from_rect(p: &'a Painter, rect: EguiRect, ink: Color32) -> Self {
+    fn from_rect(p: &'a Painter, rect: EguiRect, style: IconStyle) -> Self {
         Self {
             p,
             c: rect.center(),
             s: rect.width().min(rect.height()),
-            ink,
+            style,
         }
-    }
-
-    fn from_center(p: &'a Painter, c: Pos2, s: f32, ink: Color32) -> Self {
-        Self { p, c, s, ink }
     }
 
     fn pt(&self, x: f32, y: f32) -> Pos2 {
         Pos2::new(self.c.x + x * self.s, self.c.y + y * self.s)
     }
 
-    fn stroke(&self) -> Stroke {
-        Stroke::new((self.s * 0.085).max(1.1), self.ink)
+    fn sw(&self) -> f32 {
+        (self.s * 0.085).max(1.1)
     }
 
-    /// 带圆头的线段。线稿图标的"毛刺感"全在 butt 端点上，补两个
-    /// 半圆即可，代价只是每帧多两个小 shape。
-    fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32) {
-        let st = self.stroke();
-        let a = self.pt(x0, y0);
-        let b = self.pt(x1, y1);
-        self.p.line_segment([a, b], st);
+    /// 连续折线：一条 `Shape::line` + 每个顶点补一次圆头。
+    /// 这是"线条连得起来、拐点不叠结节"的关键 —— 不再逐段画线段。
+    fn polyline_with(&self, pts: &[(f32, f32)], ink: Color32) {
+        if pts.len() < 2 {
+            return;
+        }
+        let st = Stroke::new(self.sw(), ink);
+        let screen: Vec<Pos2> = pts.iter().map(|(x, y)| self.pt(*x, *y)).collect();
+        self.p.add(egui::Shape::line(screen.clone(), st));
         let r = st.width * 0.5;
-        self.p.circle_filled(a, r, self.ink);
-        self.p.circle_filled(b, r, self.ink);
-    }
-
-    /// 带圆头的圆弧（18 段折线在 24px 下足够顺）。
-    fn arc(&self, cx: f32, cy: f32, r: f32, from: f32, to: f32) {
-        let st = self.stroke();
-        let pts: Vec<Pos2> = (0..=18)
-            .map(|i| {
-                let t = from + (to - from) * i as f32 / 18.0;
-                self.pt(cx + r * t.cos(), cy + r * t.sin())
-            })
-            .collect();
-        if let (Some(&first), Some(&last)) = (pts.first(), pts.last()) {
-            self.p.add(egui::Shape::line(pts, st));
-            let rad = st.width * 0.5;
-            self.p.circle_filled(first, rad, self.ink);
-            self.p.circle_filled(last, rad, self.ink);
+        let mut prev: Option<Pos2> = None;
+        for q in screen {
+            // 相邻重复点（闭合路径的首尾）只补一次圆，避免同点叠色。
+            if prev.is_none_or(|p| (p - q).length() > 0.01) {
+                self.p.circle_filled(q, r, ink);
+            }
+            prev = Some(q);
         }
     }
 
+    fn polyline(&self, pts: &[(f32, f32)]) {
+        self.polyline_with(pts, self.style.color);
+    }
+
+    /// 圆弧也走连续折线（18 段在 24px 下足够顺），端点自动带圆头。
+    fn arc(&self, cx: f32, cy: f32, r: f32, from: f32, to: f32, ink: Color32) {
+        let pts: Vec<(f32, f32)> = (0..=18)
+            .map(|i| {
+                let t = from + (to - from) * i as f32 / 18.0;
+                (cx + r * t.cos(), cy + r * t.sin())
+            })
+            .collect();
+        self.polyline_with(&pts, ink);
+    }
+
     fn circle_stroke(&self, x: f32, y: f32, r: f32) {
-        self.p
-            .circle_stroke(self.pt(x, y), r * self.s, self.stroke());
+        self.p.circle_stroke(
+            self.pt(x, y),
+            r * self.s,
+            Stroke::new(self.sw(), self.style.color),
+        );
     }
 
-    fn circle_filled(&self, x: f32, y: f32, r: f32) {
-        self.p.circle_filled(self.pt(x, y), r * self.s, self.ink);
+    fn circle_filled(&self, x: f32, y: f32, r: f32, color: Color32) {
+        self.p.circle_filled(self.pt(x, y), r * self.s, color);
     }
 
-    fn radius(&self, ratio: f32) -> CornerRadius {
-        CornerRadius::same(pix(self.s * ratio))
+    fn dot(&self, x: f32, y: f32, r: f32) {
+        self.circle_filled(x, y, r, self.style.color);
     }
 
-    fn rect_filled(&self, x: f32, y: f32, w: f32, h: f32, ratio: f32, color: Color32) {
+    /// 所有填充矩形统一圆角（不写死像素、不留直角）。
+    fn radius(&self) -> CornerRadius {
+        CornerRadius::same(pix(self.s * 0.10).max(2))
+    }
+
+    fn box_filled(&self, x: f32, y: f32, w: f32, h: f32, color: Color32) {
         self.p.rect_filled(
             EguiRect::from_min_size(self.pt(x, y), egui::vec2(w * self.s, h * self.s)),
-            self.radius(ratio),
+            self.radius(),
             color,
         );
     }
 
-    fn rect_stroke(&self, x: f32, y: f32, w: f32, h: f32, ratio: f32) {
+    fn box_stroke(&self, x: f32, y: f32, w: f32, h: f32) {
         self.p.rect_stroke(
             EguiRect::from_min_size(self.pt(x, y), egui::vec2(w * self.s, h * self.s)),
-            self.radius(ratio),
-            self.stroke(),
+            self.radius(),
+            Stroke::new(self.sw(), self.style.color),
             egui::StrokeKind::Inside,
         );
+    }
+
+    /// 弱化的段（未点亮的信号格 / 未达到的电量），用于 level 动态。
+    fn faint(&self) -> Color32 {
+        self.style.color.linear_multiply(0.30)
     }
 }
 
@@ -138,20 +240,20 @@ fn pix(v: f32) -> u8 {
 
 /// 画一块 Dock 内置图标，铺满 `rect`（逻辑点）。
 ///
-/// `accent` 是 Dock 的运行时主题色（`Config::runtime_accent`，关掉同步时
-/// 由调用方回落默认蓝）—— Start 的底色跟着走，不再写死蓝。
-pub fn paint_tile(painter: &Painter, rect: EguiRect, kind: Builtin, accent: Color32, dark: bool) {
+/// Start 的底色取 `style.accent`（开关开时是主题色，关时回落默认蓝）；
+/// Launchpad 的九个点按 `state.level` 点亮，为动态图标留入口。
+pub fn paint_tile(painter: &Painter, rect: EguiRect, kind: Builtin, style: IconStyle, dark: bool) {
     let t = rect.shrink(rect.width() * 0.04);
     let s = t.width().min(t.height());
-    let radius = CornerRadius::same(pix(s * 0.22));
+    let radius = CornerRadius::same(pix(s * 0.26));
     match kind {
         Builtin::Start => {
-            painter.rect_filled(t, radius, accent);
-            // 2×2 白色圆角窗：间距与圆角都按 s 算。
+            painter.rect_filled(t, radius, style.accent);
+            // 2×2 白色圆角窗：间距与圆角都按 s 算，不留直角。
             let q = s * 0.27;
             let gp = s * 0.07;
             let o = (s - 2.0 * q - gp) / 2.0;
-            let qc = CornerRadius::same(pix(q * 0.16));
+            let qc = CornerRadius::same(pix(q * 0.22));
             for i in 0..4 {
                 let x = t.left() + o + (i % 2) as f32 * (q + gp);
                 let y = t.top() + o + (i / 2) as f32 * (q + gp);
@@ -172,8 +274,7 @@ pub fn paint_tile(painter: &Painter, rect: EguiRect, kind: Builtin, accent: Colo
                     Color32::from_rgb(247, 248, 252)
                 },
             );
-            // 九宫格保留配色语义，但统一成低饱和、按明度排过的一组 ——
-            // 原版九个高饱和原色在毛玻璃 Dock 上太跳。
+            // 圆点代替方块：九宫格不再有九个直角，低饱和配色也更稳。
             const COLS: [Color32; 9] = [
                 Color32::from_rgb(238, 108, 100),
                 Color32::from_rgb(240, 168, 76),
@@ -185,30 +286,27 @@ pub fn paint_tile(painter: &Painter, rect: EguiRect, kind: Builtin, accent: Colo
                 Color32::from_rgb(234, 116, 152),
                 Color32::from_rgb(126, 202, 148),
             ];
-            let q = s * 0.19;
-            let gp = s * 0.085;
-            let o = (s - 3.0 * q - 2.0 * gp) / 2.0;
-            let qc = CornerRadius::same(pix(q * 0.30));
+            let step = s * 0.265;
+            let r = s * 0.075;
+            let lit = (style.state.level.clamp(0.0, 1.0) * 9.0).round() as usize;
             for (i, col) in COLS.iter().enumerate() {
-                let x = t.left() + o + (i % 3) as f32 * (q + gp);
-                let y = t.top() + o + (i / 3) as f32 * (q + gp);
-                painter.rect_filled(
-                    EguiRect::from_min_size(Pos2::new(x, y), egui::vec2(q, q)),
-                    qc,
-                    *col,
-                );
+                let x = t.center().x + ((i % 3) as f32 - 1.0) * step;
+                let y = t.center().y + ((i / 3) as f32 - 1.0) * step;
+                let c = if i < lit {
+                    *col
+                } else {
+                    col.linear_multiply(0.35)
+                };
+                painter.circle_filled(Pos2::new(x, y), r, c);
             }
         }
     }
 }
 
 /// 没有 shell 图标时的首字占位：中性 field 底 + 主题色首字母。
-///
-/// 旧版是脏灰底（90,120,130）+ 暗红字（240,30,30），在深浅主题里
-/// 都像一块脏斑；现在与设置界面的 tonal 层、内置条目同一套语言。
-pub fn paint_monogram(painter: &Painter, rect: EguiRect, ch: char, accent: Color32, dark: bool) {
+pub fn paint_monogram(painter: &Painter, rect: EguiRect, ch: char, style: IconStyle, dark: bool) {
     let s = rect.width().min(rect.height());
-    let radius = CornerRadius::same(pix(s * 0.22));
+    let radius = CornerRadius::same(pix(s * 0.26));
     let bg = if dark {
         Color32::from_rgba_unmultiplied(255, 255, 255, 26)
     } else {
@@ -233,18 +331,18 @@ pub fn paint_monogram(painter: &Painter, rect: EguiRect, ch: char, accent: Color
         Align2::CENTER_CENTER,
         ch.to_string(),
         FontId::proportional(s * 0.46),
-        accent,
+        style.accent,
     );
 }
 
 /// 控制中心卡片的图标：两条滑轨 + 两个圆钮（与设置界面滑条同一语言）。
-pub fn sliders(painter: &Painter, rect: EguiRect, color: Color32) {
-    let c = Canvas::from_rect(painter, rect, color);
+pub fn sliders(painter: &Painter, rect: EguiRect, style: IconStyle) {
+    let c = Canvas::from_rect(painter, rect, style);
     for (i, knob_at) in [(0, 0.62_f32), (1, 0.38_f32)] {
         let y = if i == 0 { -0.20 } else { 0.20 };
-        c.line(-0.42, y, 0.42, y);
-        let kx = -0.42 + 0.84 * knob_at;
-        c.circle_filled(kx, y, 0.075);
+        c.polyline(&[(-0.36, y), (0.36, y)]);
+        let kx = -0.36 + 0.72 * knob_at;
+        c.dot(kx, y, 0.075);
     }
 }
 
@@ -252,124 +350,152 @@ pub fn sliders(painter: &Painter, rect: EguiRect, color: Color32) {
 // 控制中心：磁贴图标 / 喇叭
 // ---------------------------------------------------------------------------
 
-/// 画一个控制中心磁贴的图标。全部走统一画布，形状按 `Tile` 重画。
-pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, color: Color32) {
-    let c = Canvas::from_rect(painter, rect, color);
+/// 画一个控制中心磁贴的图标。
+///
+/// `state.level` 控制信号/音量/电量的段数，`state.phase` 控制齿旋转与
+/// 热点涟漪 —— 调用方推进状态即可产出动态图标，无需改这里。
+pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconStyle) {
+    let c = Canvas::from_rect(painter, rect, style);
+    let level = style.state.level.clamp(0.0, 1.0);
+    let phase = style.state.phase;
     match tile {
         Tile::Wifi => {
+            // 扇形天生只占下半格，视觉上比圆类小一圈 —— 放大 1.18 倍做
+            // 光学补偿，最大弧仍在 SAFE 内（0.46 < 0.40 半径 + 中心偏移）。
+            // 三段弧按 level 逐段点亮；未点亮段用同一色弱化，不换线宽。
+            const K: f32 = 1.18;
             for i in 0..3 {
-                c.arc(0.0, 0.28, 0.14 + i as f32 * 0.13, -2.50, -0.64);
+                let lit = (level * 3.0).round() as usize > i;
+                let ink = if lit { style.color } else { c.faint() };
+                c.arc(
+                    0.0,
+                    0.28 * K,
+                    (0.13 + i as f32 * 0.13) * K,
+                    -2.50,
+                    -0.64,
+                    ink,
+                );
             }
-            c.circle_filled(0.0, 0.28, 0.055);
+            c.dot(0.0, 0.28 * K, 0.055 * K);
         }
         Tile::Ethernet => {
-            c.rect_stroke(-0.28, -0.24, 0.56, 0.38, 0.08);
-            c.line(-0.14, -0.38, -0.14, -0.24);
-            c.line(0.14, -0.38, 0.14, -0.24);
+            // 圆角机箱 + 三条接口针 + 底座，各段互不接触（不叠端点）。
+            // 方形类整体收在 BOX 内，与圆类图标看起来一样大。
+            c.box_stroke(-BOX * 0.88, -0.26, BOX * 1.76, 0.38);
             for dx in [-0.14_f32, 0.0, 0.14] {
-                c.line(dx, 0.14, dx, 0.30);
+                c.polyline(&[(dx, -0.06), (dx, 0.06)]);
             }
-            c.line(-0.20, 0.36, 0.20, 0.36);
+            c.polyline(&[(-0.20, 0.22), (0.20, 0.22)]);
+            // 顶上的两个小圆端，替代原来会与框描边叠在一起的短线。
+            c.dot(-0.14, -0.34, 0.045);
+            c.dot(0.14, -0.34, 0.045);
         }
         Tile::Bluetooth => {
-            // 卢恩 ᛒ（几何取自 simple-icons bluetooth.svg 去外圈）：
-            // 竖线 + 右侧上下两个尖构成的菱形 + 穿过中心的左侧两条斜线。
-            // 前两版把折线画成了闭合三角，看起来是「▶ 播放键」。
-            c.line(-0.03, -0.43, -0.03, 0.43);
-            c.line(-0.03, -0.43, 0.23, -0.17);
-            c.line(0.23, -0.17, -0.03, 0.0);
-            c.line(-0.03, 0.0, 0.23, 0.17);
-            c.line(0.23, 0.17, -0.03, 0.43);
-            c.line(-0.23, -0.18, -0.03, 0.0);
-            c.line(-0.03, 0.0, -0.23, 0.18);
+            // 一条闭合折线勾出右侧菱形 + 竖线（首尾同点，圆头去重），
+            // 再加左侧 V —— 只有两条子路径，不存在端点重叠。
+            c.polyline(&[
+                (-0.03, -0.40),
+                (0.23, -0.15),
+                (-0.03, 0.0),
+                (0.23, 0.15),
+                (-0.03, 0.40),
+                (-0.03, -0.40),
+            ]);
+            c.polyline(&[(-0.23, -0.16), (-0.03, 0.0), (-0.23, 0.16)]);
         }
         Tile::DarkMode => {
-            // 月牙：一段外弧 + 一段反向内弧，圆头让两端收得干净。
-            c.arc(0.0, 0.0, 0.40, 0.80, 5.50);
-            c.arc(0.16, -0.10, 0.30, 1.40, 4.90);
+            // 月牙：一段外弧 + 一段反向内弧，圆头收尾。
+            c.arc(0.0, 0.0, SAFE, 0.80, 5.50, style.color);
+            c.arc(0.16, -0.10, 0.30, 1.40, 4.90, style.color);
         }
         Tile::Location => {
-            // 定位针：圆头 + 两条收向针尖的线 + 中心孔。
-            c.circle_stroke(0.0, -0.10, 0.26);
-            c.circle_filled(0.0, -0.10, 0.065);
-            c.line(-0.19, 0.07, 0.0, 0.44);
-            c.line(0.19, 0.07, 0.0, 0.44);
+            // 水滴针：一条连续折线（圆弧采样 + 收尖），圆头软化全部拐角。
+            let mut pts: Vec<(f32, f32)> = (0..=14)
+                .map(|i| {
+                    let t = std::f32::consts::PI * i as f32 / 14.0;
+                    (0.26 * t.cos(), -0.12 - 0.26 * t.sin())
+                })
+                .collect();
+            pts.extend([(0.0, 0.40), (0.26, -0.12)]);
+            c.polyline(&pts);
+            c.dot(0.0, -0.12, 0.065);
         }
         Tile::Mute => speaker(
             painter,
-            EguiRect::from_center_size(c.c, egui::vec2(c.s, c.s)),
-            color,
-            true,
+            rect,
+            IconStyle::new(
+                style.color,
+                style.accent,
+                IconState {
+                    muted: true,
+                    ..style.state
+                },
+            ),
         ),
         Tile::Settings => {
-            // 齿轮：外环 + 8 个短粗梯形齿 + 轴孔。旧版「圆 + 8 根长辐条」
-            // 画出来是太阳/雪花，没有齿块的实体感。
-            c.circle_stroke(0.0, 0.0, 0.24);
-            c.circle_stroke(0.0, 0.0, 0.09);
+            // 齿轮：外环 + 8 个圆齿 + 轴孔，全部圆形，没有梯形锐角。
+            // phase 让齿整体微转 —— 动态图标的最小示例。
+            c.circle_stroke(0.0, 0.0, 0.25);
+            c.circle_stroke(0.0, 0.0, 0.085);
+            let spin = phase * std::f32::consts::TAU / 8.0;
             for i in 0..8 {
-                let a = i as f32 * std::f32::consts::TAU / 8.0;
-                let (ca, sa) = (a.cos(), a.sin());
-                // 径向 0.24..0.40、切向 ±0.07 的梯形，随角度旋转。
-                let radial = |r: f32, t: f32| c.pt(ca * r - sa * t, sa * r + ca * t);
-                let pts = vec![
-                    radial(0.22, -0.085),
-                    radial(0.40, -0.055),
-                    radial(0.40, 0.055),
-                    radial(0.22, 0.085),
-                ];
-                painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+                let a = i as f32 * std::f32::consts::TAU / 8.0 + spin;
+                c.circle_filled(0.33 * a.cos(), 0.33 * a.sin(), 0.075, style.color);
             }
         }
         Tile::Energy => {
-            // 电池 + 闪电：节能模式一眼能懂，不再像"禁止符"。
-            c.rect_stroke(-0.32, -0.19, 0.56, 0.38, 0.07);
-            c.rect_filled(0.24, -0.07, 0.06, 0.14, 0.02, color);
-            let bolt = [
-                (0.05, -0.16),
-                (-0.09, 0.02),
-                (0.01, 0.02),
-                (-0.04, 0.16),
+            // 电池 + 闪电 + 底部电量条，三块互不重叠；电量条按 level。
+            c.box_stroke(-0.32, -0.20, 0.58, 0.38);
+            c.circle_filled(0.30, -0.01, 0.045, style.color);
+            c.polyline(&[
+                (0.05, -0.14),
+                (-0.09, 0.00),
+                (0.01, 0.00),
+                (-0.03, 0.10),
                 (0.11, -0.05),
                 (0.02, -0.05),
-                (0.05, -0.16), // 闭合，不闭会看成一根箭头
-            ];
-            for w in bolt.windows(2) {
-                c.line(w[0].0, w[0].1, w[1].0, w[1].1);
+                (0.05, -0.14),
+            ]);
+            if level > 0.02 {
+                c.box_filled(-0.27, 0.11, 0.50 * level, 0.045, style.color);
             }
         }
         Tile::Hotspot => {
-            c.circle_filled(0.0, 0.30, 0.065);
-            c.arc(0.0, 0.30, 0.20, -2.40, -0.74);
-            c.arc(0.0, 0.30, 0.36, -2.40, -0.74);
+            // 与 Wifi 同样的扇形光学补偿；涟漪按 phase 外扩（幅度很小，
+            // 静态时仍是一枚标准热点图标）。
+            const K: f32 = 1.15;
+            let ripple = (phase * std::f32::consts::TAU).sin() * 0.02;
+            c.dot(0.0, 0.30 * K, 0.065 * K);
+            c.arc(0.0, 0.30 * K, 0.19 * K + ripple, -2.40, -0.74, style.color);
+            c.arc(0.0, 0.30 * K, 0.35 * K + ripple, -2.40, -0.74, style.color);
         }
     }
 }
 
 /// 喇叭：音量滑块左侧与「静音」磁贴共用。
 ///
-/// `rect` 是图标方框；`muted` 时右侧换成 ×，否则画两道声波弧。
-pub fn speaker(painter: &Painter, rect: EguiRect, color: Color32, muted: bool) {
-    let c = Canvas::from_center(
-        painter,
-        rect.center(),
-        rect.width().min(rect.height()),
-        color,
-    );
-    // 喇叭本体：方块 + 三角，三角用凸多边形拼，避免描边缝隙。
-    c.rect_filled(-0.42, -0.10, 0.16, 0.20, 0.01, color);
-    let horn = vec![
-        c.pt(-0.26, -0.10),
-        c.pt(-0.06, -0.28),
-        c.pt(-0.06, 0.28),
-        c.pt(-0.26, 0.10),
-    ];
-    painter.add(egui::Shape::convex_polygon(horn, color, Stroke::NONE));
-    if muted {
-        c.line(0.04, -0.13, 0.28, 0.11);
-        c.line(0.28, -0.13, 0.04, 0.11);
+/// 本体是一条闭合折线（圆头连接，无三角锐角）；声波按 `level` 逐段点亮。
+pub fn speaker(painter: &Painter, rect: EguiRect, style: IconStyle) {
+    let c = Canvas::from_rect(painter, rect, style);
+    c.polyline(&[
+        (-0.38, -0.10),
+        (-0.22, -0.10),
+        (-0.06, -0.26),
+        (-0.06, 0.26),
+        (-0.22, 0.10),
+        (-0.38, 0.10),
+        (-0.38, -0.10),
+    ]);
+    if style.state.muted {
+        c.polyline(&[(0.04, -0.12), (0.28, 0.12)]);
+        c.polyline(&[(0.28, -0.12), (0.04, 0.12)]);
     } else {
-        c.arc(0.02, 0.0, 0.20, -0.85, 0.85);
-        c.arc(0.02, 0.0, 0.32, -0.85, 0.85);
+        let level = style.state.level.clamp(0.0, 1.0);
+        for i in 0..2 {
+            let lit = (level * 2.0).round() as usize > i;
+            let ink = if lit { style.color } else { c.faint() };
+            c.arc(0.02, 0.0, 0.20 + i as f32 * 0.12, -0.85, 0.85, ink);
+        }
     }
 }
 
@@ -389,15 +515,31 @@ mod tests {
         assert_eq!(Builtin::from_path("mdock:"), None);
     }
 
-    /// 画布坐标按 s 归一化：同一组图标在 24px 与 96px 下形状完全一致，
-    /// 这是 Dock 悬停放大动画不错位的前提。
+    /// 画布坐标按 s 归一化：s 放大 4 倍，偏移量也正好放大 4 倍。
     #[test]
     fn canvas_coordinates_scale_with_size() {
-        // Painter 无法脱离 Ui 构造，这里直接核验换算公式的线性性。
         let map = |c: f32, s: f32, x: f32| c + x * s;
-        let small = map(100.0, 24.0, 0.25) - 100.0;
-        let large = map(100.0, 96.0, 0.25) - 100.0;
-        // s 放大 4 倍，偏移量也正好放大 4 倍 —— 形状不随尺寸漂移。
+        let small = map(100.0, 24.0, SAFE) - 100.0;
+        let large = map(100.0, 96.0, SAFE) - 100.0;
         assert_eq!(large / small, 4.0);
+    }
+
+    /// 动态状态入口：level/phase 夹紧与循环，超出范围不会把图标画飞。
+    #[test]
+    fn icon_state_clamps_dynamic_inputs() {
+        let st = IconState::default().with_level(2.0).with_phase(1.25);
+        assert_eq!(st.level, 1.0);
+        assert!((st.phase - 0.25).abs() < 1e-6);
+        assert_eq!(IconState::default().with_level(-1.0).level, 0.0);
+    }
+
+    /// 安全区：内容半径不超过 20px/24px 的归一化值，方形还有光学补偿。
+    #[test]
+    fn safe_area_matches_fluent_grid() {
+        // 经函数参数传值，避免 clippy 把常量比较判成 assertions_on_constants。
+        let inside = |radius: f32, limit: f32| radius <= limit;
+        let grid = 20.0_f32 / 48.0 + 0.02; // 20px 内容 / 24px 画布 = 0.4167
+        assert!(inside(SAFE, grid));
+        assert!(inside(BOX, SAFE));
     }
 }
