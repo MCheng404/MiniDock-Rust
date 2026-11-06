@@ -603,9 +603,11 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 | ✅ **已接** | `MenuTheme` | 右键菜单原来只跟 Dock 主题；现 0 浅 / 1 深 / 2 跟随 |
 | ✅ **已接** | `ReflSize` `ReflGap` `ReflOpacity` | **倒影原来根本没画**，只在栏下留一条空白。现在在呈现层做：把栏体那几行上下翻转、按距离线性衰减后写到下方（`present::mirror_rows`，预乘 BGRA 四通道同乘） |
 | ✅ **已接** | `Browser` | 网页应用原来固定 Edge→Chrome；现按键选（0 自动 / 1 Edge / 2 Chrome / 3 Firefox / 4 系统默认），指定的没装就继续往下退，最后回落到系统默认 |
-| 待做 | `BgColor3` + `GradAngle/A1/A2/A3` | 三色渐变只做两色，角度没读；要给 `rounded_gradient` 加第三停靠点与旋转，中等 |
-| 待做 | `MinStyle` / `MnAuto` / `MnNotes` / `MnAdd` | 菜单的最小化样式与附加项，要先有对应的菜单能力 |
-| 待做 | `Guardian` | 守护进程，要第二个进程；建议直接砍掉 |
+| ✅ **已接** | `BgColor3` + `GradAngle/A1/A2/A3` | 渐变改成"两端 + 可选中间色"，`at(t)` 在 t=0.5 取中间色；角度换成把点投影到方向向量、按矩形在该方向的跨度归一化（0°/90° 与旧的 `Direction` 完全一致）。每档透明度独立作用（预乘后再插值，半透明端不会串色） |
+| 待做 | `MnAuto` / `MnAdd` | 菜单里加「开机自启」与「新建项」—— 现在可做：命令已经在 |
+| 待做 | `MnNotes` | 卡在「速记」本身：`ItemKind::Note` 的启动仍是 `Unsupported` |
+| 不做 | `MinStyle` | 最小化动画风格，前提是窗口动画——§9.4 已论证不移植 |
+| 不做 | `Guardian` | 守护进程要第二个进程，一个 Dock 不值得再养一个常驻 |
 
 一条经验：**"开关写了键、没人读"这类问题编译器抓不到**，只能靠这种静态交叉
 扫描。以后新增键时，界面与实现必须在同一提交里落地，否则就进这张表。

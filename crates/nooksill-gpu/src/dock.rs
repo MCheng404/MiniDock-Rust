@@ -1854,10 +1854,51 @@ impl Dock {
             return;
         }
         let (c1, c2) = self.bar_colors(dark);
-        let (c1, c2) = (
-            Color32::from_rgba_unmultiplied(c1.0 as u8, c1.1 as u8, c1.2 as u8, (op * 255.0) as u8),
-            Color32::from_rgba_unmultiplied(c2.0 as u8, c2.1 as u8, c2.2 as u8, (op * 255.0) as u8),
+        // 三档透明度分别作用于三色；`BgColor3 < 0` 表示不启用中间色。
+        let alpha = |key: Key| -> u8 {
+            let pct = self.cfg.get_i32(key).clamp(0, 100) as f32 / 100.0;
+            (op * 255.0 * pct).round() as u8
+        };
+        let from = Color32::from_rgba_unmultiplied(
+            c1.0 as u8,
+            c1.1 as u8,
+            c1.2 as u8,
+            alpha(Key::GRAD_A1),
         );
+        let to = Color32::from_rgba_unmultiplied(
+            c2.0 as u8,
+            c2.1 as u8,
+            c2.2 as u8,
+            alpha(Key::GRAD_A2),
+        );
+        let mid_rgb = self.cfg.get_i32(Key::BG_COLOR3);
+        let mid = (mid_rgb >= 0).then(|| {
+            let v = mid_rgb as u32;
+            Color32::from_rgba_unmultiplied(
+                (v >> 16) as u8,
+                ((v >> 8) & 0xff) as u8,
+                (v & 0xff) as u8,
+                alpha(Key::GRAD_A3),
+            )
+        });
+        // 角度默认 90。竖排停靠时旧版用的是"左→右"，默认值不能被 90 带跑偏：
+        // 没改过这个键（仍是 90）就沿用旧的按边方向。
+        let raw_angle = self.cfg.get_i32(Key::GRAD_ANGLE);
+        let angle_deg = if raw_angle == 90 {
+            if self.cfg.edge.is_horizontal() {
+                0.0
+            } else {
+                90.0
+            }
+        } else {
+            raw_angle.rem_euclid(360) as f32
+        };
+        let grad = BarGradient {
+            from,
+            mid,
+            to,
+            angle_deg,
+        };
         // `BgMode::Solid` 画纯色；`Gradient` 与 `Frost` 都走渐变。
         //
         // 磨砂**还没实现**（PORTING.md 的 M3：需要桌面捕获 + compute 模糊），
@@ -1866,16 +1907,11 @@ impl Dock {
         // （PORTING.md 第 11 行："关闭磨砂 = 退回渐变"），M3 落地后这里
         // 才需要分成两支。
         if self.cfg.get_i32(Key::BgMode) == 0 {
-            painter.rect_filled(rect, CornerRadius::same(r8(rad)), c1);
+            painter.rect_filled(rect, CornerRadius::same(r8(rad)), from);
         } else {
-            let dir = if self.cfg.edge.is_horizontal() {
-                Direction::LeftToRight
-            } else {
-                Direction::TopDown
-            };
             // **不能**用 `Shape::gradient_rect`：它只是一个 4 顶点四边形，
             // epaint 的网格不带圆角，结果就是"填充是方角、只有描边是圆角"。
-            painter.add(rounded_gradient(rect, rad, dir, c1, c2));
+            painter.add(rounded_gradient(rect, rad, grad));
         }
         if self.cfg.border {
             let base = if dark { 90.0 } else { 150.0 };
@@ -2042,13 +2078,60 @@ fn argbc(a: u8, r: u8, g: u8, b: u8) -> Color32 {
 /// 额外补一圈羽化：`Shape::Mesh` 走的是 `tessellator` 的直通分支，
 /// **不做** epaint 的 1px 抗锯齿。所以轮廓外再放一圈全透明顶点，
 /// 让边缘按标准做法淡出，否则弧线上会出现锯齿。
-fn rounded_gradient(
-    rect: EguiRect,
-    radius: f32,
-    dir: Direction,
+/// 栏体渐变的一帧参数。
+///
+/// 三色是"两端 + 可选中间色"：`BgColor3` 关掉时退化成两色，行为与旧版一致。
+/// 角度是屏幕坐标下的度数（0 = 左→右，90 = 上→下）。
+#[derive(Clone, Copy, Debug)]
+struct BarGradient {
     from: Color32,
+    mid: Option<Color32>,
     to: Color32,
-) -> egui::epaint::Shape {
+    angle_deg: f32,
+}
+
+impl BarGradient {
+    /// 方角退化路径要一个 `Direction`，按角度挑最近的。
+    fn roughly(self) -> Direction {
+        let a = self.angle_deg.rem_euclid(360.0);
+        if !(45.0..135.0).contains(&a) && (a < 315.0 || a >= 225.0) {
+            if a < 45.0 || a >= 315.0 {
+                Direction::LeftToRight
+            } else {
+                Direction::RightToLeft
+            }
+        } else if a < 225.0 {
+            Direction::TopDown
+        } else {
+            Direction::BottomUp
+        }
+    }
+
+    /// 某个位置上的颜色（预乘）。三色时在 t=0.5 处插值中间色。
+    fn at(self, t: f32) -> Color32 {
+        let (a, b, u) = match self.mid {
+            Some(mid) if t < 0.5 => (self.from, mid, t * 2.0),
+            Some(mid) => (mid, self.to, (t - 0.5) * 2.0),
+            None => (self.from, self.to, t),
+        };
+        let premul = |c: Color32| {
+            let k = f32::from(c.a()) / 255.0;
+            [
+                (f32::from(c.r()) * k).round() as u8,
+                (f32::from(c.g()) * k).round() as u8,
+                (f32::from(c.b()) * k).round() as u8,
+                c.a(),
+            ]
+        };
+        let (pa, pb) = (premul(a), premul(b));
+        let mix = |i: usize| -> u8 {
+            (f32::from(pa[i]) + (f32::from(pb[i]) - f32::from(pa[i])) * u).round() as u8
+        };
+        Color32::from_rgba_premultiplied(mix(0), mix(1), mix(2), mix(3))
+    }
+}
+
+fn rounded_gradient(rect: EguiRect, radius: f32, grad: BarGradient) -> egui::epaint::Shape {
     use egui::epaint::Vertex;
     use std::f32::consts::PI;
 
@@ -2059,31 +2142,27 @@ fn rounded_gradient(
         return egui::epaint::Shape::Noop;
     }
     if r < 0.5 {
-        return egui::epaint::Shape::gradient_rect(rect, dir, [from, to]);
+        // 方角退化：用 `gradient_rect` 更省顶点，颜色按最近的方向取两端色
+        // （中间色在这种尺寸下看不出来，不值得为它铺网格）。
+        let dir = grad.roughly();
+        let (a, b) = match dir {
+            Direction::LeftToRight | Direction::TopDown => (grad.from, grad.to),
+            _ => (grad.to, grad.from),
+        };
+        return egui::epaint::Shape::gradient_rect(rect, dir, [a, b]);
     }
 
-    // 颜色按位置做线性插值。方向语义与 epaint 的 `Direction` 一致。
+    // 颜色沿 `angle_deg` 方向线性插值：把点投影到方向向量上，再用矩形在
+    // 该方向上的跨度归一化 —— 这样 0°/90° 与旧的 `Direction` 完全一致，
+    // 任意角度也成立。
+    let (sin, cos) = grad.angle_deg.to_radians().sin_cos();
+    let center = rect.center();
+    let span = (cos.abs() * w + sin.abs() * h).max(1e-3);
     let param = |p: Pos2| -> f32 {
-        let t = match dir {
-            Direction::LeftToRight => (p.x - rect.left()) / w,
-            Direction::RightToLeft => (rect.right() - p.x) / w,
-            Direction::TopDown => (p.y - rect.top()) / h,
-            Direction::BottomUp => (rect.bottom() - p.y) / h,
-        };
-        t.clamp(0.0, 1.0)
+        let d = (p.x - center.x) * cos + (p.y - center.y) * sin;
+        (d / span + 0.5).clamp(0.0, 1.0)
     };
-    let shade = |p: Pos2| -> Color32 {
-        let t = param(p);
-        let lerp = |a: u8, b: u8| -> u8 {
-            (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8
-        };
-        Color32::from_rgba_premultiplied(
-            lerp(from.r(), to.r()),
-            lerp(from.g(), to.g()),
-            lerp(from.b(), to.b()),
-            lerp(from.a(), to.a()),
-        )
-    };
+    let shade = |p: Pos2| -> Color32 { grad.at(param(p)) };
 
     // 每段弧的点数：随半径增长，保证弧线看不出折线。
     let seg = ((r * 1.2).ceil() as usize).clamp(3, 20);
@@ -2244,13 +2323,7 @@ mod tests {
     fn rounded_gradient_leaves_the_corners_empty() {
         let rect = EguiRect::from_min_size(Pos2::new(100.0, 50.0), egui::vec2(200.0, 60.0));
         let r = 20.0_f32;
-        let shape = rounded_gradient(
-            rect,
-            r,
-            Direction::LeftToRight,
-            Color32::WHITE,
-            Color32::BLACK,
-        );
+        let shape = rounded_gradient(rect, r, grad_lr(Color32::WHITE, Color32::BLACK));
         let egui::epaint::Shape::Mesh(mesh) = shape else {
             panic!("应当产出网格");
         };
@@ -2289,17 +2362,100 @@ mod tests {
         }
     }
 
+    fn grad_lr(from: Color32, to: Color32) -> BarGradient {
+        BarGradient {
+            from,
+            mid: None,
+            to,
+            angle_deg: 0.0,
+        }
+    }
+
+    /// 三色渐变：t=0.5 必须**正好**是中间色，两端不受影响。
+    #[test]
+    fn three_stop_gradient_hits_the_middle_color() {
+        let red = Color32::from_rgb(220, 30, 40);
+        let g = BarGradient {
+            from: Color32::WHITE,
+            mid: Some(red),
+            to: Color32::BLACK,
+            angle_deg: 0.0,
+        };
+        assert_eq!(g.at(0.0), Color32::WHITE);
+        assert_eq!(g.at(0.5), red);
+        assert_eq!(g.at(1.0), Color32::BLACK);
+        // 四分之一点落在"白→红"的中途，不该是中间色本身。
+        let q = g.at(0.25);
+        assert!(q.r() > 200 && q.g() < 180, "{q:?}");
+    }
+
+    /// 角度决定"哪条边是起点"：0° 左白右黑，90° 上白下黑。
+    ///
+    /// 直接看网格顶点：取最左/最右（或最上/最下）那个不透明顶点的颜色。
+    #[test]
+    fn angle_controls_which_edge_is_the_start() {
+        let rect = EguiRect::from_min_size(Pos2::ZERO, egui::vec2(100.0, 100.0));
+        let white = Color32::WHITE;
+        let black = Color32::BLACK;
+
+        let edge_color =
+            |grad: BarGradient, pick: fn(&egui::epaint::Vertex, &egui::epaint::Vertex) -> bool| {
+                let egui::epaint::Shape::Mesh(mesh) = rounded_gradient(rect, 8.0, grad) else {
+                    panic!("应当产出网格");
+                };
+                let solid: Vec<_> = mesh.vertices.iter().filter(|v| v.color.a() > 200).collect();
+                assert!(!solid.is_empty());
+                let mut best = solid[0];
+                for v in &solid {
+                    if pick(v, best) {
+                        best = v;
+                    }
+                }
+                best.color
+            };
+
+        // 最左一点 / 最上一点。
+        let left = edge_color(grad_lr(white, black), |v, b| v.pos.x < b.pos.x);
+        let top = edge_color(
+            BarGradient {
+                angle_deg: 90.0,
+                ..grad_lr(white, black)
+            },
+            |v, b| v.pos.y < b.pos.y,
+        );
+        assert!(left.r() > 240, "0° 时最左边应当是起点色：{left:?}");
+        assert!(top.r() > 240, "90° 时最上边应当是起点色：{top:?}");
+
+        // 最右一点 / 最下一点，应当是终点色（黑）。
+        let right = edge_color(grad_lr(white, black), |v, b| v.pos.x > b.pos.x);
+        let bottom = edge_color(
+            BarGradient {
+                angle_deg: 90.0,
+                ..grad_lr(white, black)
+            },
+            |v, b| v.pos.y > b.pos.y,
+        );
+        assert!(right.r() < 20, "0° 时最右边应当是终点色：{right:?}");
+        assert!(bottom.r() < 20, "90° 时最下边应当是终点色：{bottom:?}");
+    }
+
+    /// 每档透明度独立生效：A3=0 时中间色完全透明。
+    #[test]
+    fn per_stop_alpha_is_applied() {
+        let g = BarGradient {
+            from: Color32::from_rgba_unmultiplied(255, 255, 255, 255),
+            mid: Some(Color32::from_rgba_unmultiplied(255, 0, 0, 0)),
+            to: Color32::from_rgba_unmultiplied(0, 0, 0, 255),
+            angle_deg: 0.0,
+        };
+        assert_eq!(g.at(0.5).a(), 0, "A3=0 的中间色应当全透明");
+    }
+
     /// 半径接近 0 时退回方角渐变，不白搭一堆顶点。
     #[test]
     fn tiny_radius_falls_back_to_plain_gradient() {
         let rect = EguiRect::from_min_size(Pos2::ZERO, egui::vec2(10.0, 10.0));
-        let shape = rounded_gradient(
-            rect,
-            0.0,
-            Direction::TopDown,
-            Color32::WHITE,
-            Color32::BLACK,
-        );
+        let shape = rounded_gradient(rect, 0.0, grad_lr(Color32::WHITE, Color32::BLACK));
         let egui::epaint::Shape::Mesh(mesh) = shape else {
             panic!("应当产出网格");
         };
@@ -2968,7 +3124,7 @@ mod tests {
         let rect = EguiRect::from_min_size(Pos2::ZERO, egui::vec2(100.0, 40.0));
         let white = Color32::from_rgb(255, 255, 255);
         let black = Color32::from_rgb(0, 0, 0);
-        let shape = rounded_gradient(rect, 8.0, Direction::LeftToRight, white, black);
+        let shape = rounded_gradient(rect, 8.0, grad_lr(white, black));
         let egui::epaint::Shape::Mesh(mesh) = shape else {
             panic!("应当产出网格");
         };

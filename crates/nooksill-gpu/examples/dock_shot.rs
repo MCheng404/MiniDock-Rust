@@ -25,6 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let path = args.next().unwrap_or_else(|| "dock.bmp".to_owned());
     let dark = args.next().as_deref() != Some("light");
+    // `grad`：开三色斜向渐变（`BgColor3` + `GradAngle`），用来肉眼验这两个键。
+    let demo_grad = args.next().as_deref() == Some("grad");
     let ppp = 1.25_f32;
 
     let mut cfg = Config::defaults(120);
@@ -33,6 +35,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.apply_i32(Key::REFL_GAP, 6);
     cfg.apply_i32(Key::REFL_OPACITY, 55);
     cfg.apply_i32(Key::BORDER_WIDTH, 3);
+    if demo_grad {
+        cfg.apply_i32(Key::BG_COLOR3, 0x3A7BD5); // 中段：蓝
+        cfg.apply_i32(Key::GRAD_ANGLE, 30);
+        cfg.apply_i32(Key::GRAD_A1, 100);
+        cfg.apply_i32(Key::GRAD_A2, 55);
+        cfg.apply_i32(Key::GRAD_A3, 90);
+        cfg.apply_i32(Key::BgMode, 1);
+    }
     cfg.border = true;
     cfg.theme = nooksill_core::config::DockTheme::Dark;
     cfg.mode = nooksill_core::config::DockMode::Always;

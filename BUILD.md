@@ -101,7 +101,7 @@ scripts/version.rs ──┬── crates/nooksill-core/build.rs  →  env!("NOO
 | `nooksill-dock` | `target/x86_64-pc-windows-msvc/{debug,release}/nooksill-dock.exe` | Dock 主程序。ADR-035 删除 GDI+ 老实现后**唯一**的 Dock 可执行文件 |
 | `probe` | 同目录 `probe.exe` | 显存/后端探针，只建设备不建窗口（`scripts/probe-mem.sh`） |
 | `settings_shot` | `cargo run -p nooksill-gpu --example settings_shot -- <出图.bmp>` | 离屏渲染任意一页设置界面，走真实 `FrameRenderer` |
-| `dock_shot` | `cargo run -p nooksill-gpu --example dock_shot -- <出图.bmp> [dark]` | 离屏渲染 Dock 栏（含倒影/边框），倒影走与真实窗口同一条 `mirror_rows` |
+| `dock_shot` | `cargo run -p nooksill-gpu --example dock_shot -- <出图.bmp> [light] [grad]` | 离屏渲染 Dock 栏（含倒影/边框），倒影走与真实窗口同一条 `mirror_rows` |
 
 `Cargo.toml` 里 `[[bin]]` 是显式声明的；`src/bin/` 下没有其它自动发现的可执行文件。
 README 里早期提过的 `nooksill-spike`、`NookSill.exe` 都已在 ADR-035 / ADR-036 删除。
