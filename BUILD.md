@@ -106,16 +106,21 @@ README 里早期提过的 `minidock-spike`、`MiniDock.exe` 都已在 ADR-035 / 
 ### 4.3 分发包（`scripts/package.sh`）
 
 ```
-dist/MiniDock-0.9.25-win64/               minidock-dock.exe + LICENSE + README.md
-dist/MiniDock-0.9.25-dev.58-win64-debug/  同上（--pdb 时另加 minidock_dock.pdb）
+dist/MiniDock-1.0.0-win64.exe
+dist/MiniDock-1.0.0-win64.exe.sha256
+dist/MiniDock-1.0.0-dev.60-win64-debug.exe          （--pdb 时另加同名 .pdb）
+dist/MiniDock-1.0.0-dev.60-win64-debug.exe.sha256
 ```
 
-- 目录名 = `MiniDock-<版本>-win64[-debug]`，版本与 exe 资源一致。
-- **exe 文件名不变**（`minidock-dock.exe`）：改名会让 debug 的 `minidock_dock.pdb`
-  对不上，也和我们所有文档/脚本里的路径冲突。要让用户看到的是**包名**。
-- pdb 默认不进包：debug 的 PDB 有 200 MB 量级，每个提交都传一遍不划算，
-  需要时加 `--pdb`。
-- 有 `zip` 命令时同时产出同名 `.zip`；CI 的 release 用 `Compress-Archive` 现场压。
+- **裸文件，不压 zip**：GitHub Release 上是 exe 与校验和两个下载项，用户下下来
+  就能跑，不需要先解压。
+- 校验和是 `sha256sum` 的标准格式（`<hash>  <文件名>`），
+  `sha256sum -c MiniDock-1.0.0-win64.exe.sha256` 直接能验。
+- 包内 exe 叫 `MiniDock-<版本>-win64[-debug].exe`（产品名），而 cargo 产出的
+  二进制仍叫 `minidock-dock.exe`；改名只发生在复制到 `dist/` 这一步。
+  代价：`--pdb` 出来的 `.pdb` 与 exe 不同名，调试器不会自动找到它，
+  需要手动加载（所以 pdb 默认不进包，它本来就是本地排查用的）。
+- Debug 的 pdb 有 200 MB 量级，默认不打包。
 
 首次 `cargo build` 要编译 wgpu（naga、wgpu-hal、DX12 后端），**冷启动 3–6 分钟**属正常；
 之后增量在 10–30 秒。release 首次更久（fat LTO）。
@@ -256,15 +261,16 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 | job | 触发 | 干什么 |
 |---|---|---|
 | `gate` | 每次 push（任意分支）/ PR | `fmt --check` → `clippy -D warnings` → `--lib --tests`，与本地 `--gate` 同一批命令 |
-| `debug` | 每次 push（任意分支）/ 手动触发 | `MINIDOCK_BUILD=<run_number>` → `package.sh` → 上传 Actions 产物 `MiniDock-<ver>-win64-debug`（保留 14 天）；默认**再发一条 rolling Pre-Release** |
-| `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 一致 → `package.sh --release` → 压缩 → 发**正式 Release**（非草稿、非预发布、抢 `Latest`） |
+| `debug` | 每次 push（任意分支）/ 手动触发 | `MINIDOCK_BUILD=<run_number>` → `package.sh` → 上传 Actions 产物（`MiniDock-<ver>-win64-debug.exe` + `.sha256`，保留 14 天）；默认**再发一条 rolling Pre-Release** |
+| `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 一致 → `package.sh --release` → 发**正式 Release**（资产是裸 exe + `.sha256`；非草稿、非预发布、抢 `Latest`） |
 
 ### 8.1 Debug 的两个出口
 
 1. **Actions 产物**：无条件上传，任何分支都有。分支名不能当版本，所以特性分支
    只留在这里。
 2. **Pre-Release**：只在默认分支（`main`）上发，**永远用同一个 tag `dev`**，
-   标题写 `Development build <版本>`，资产每次覆盖（旧资产按名字删掉，不会堆积）。
+   标题写 `Development build <版本>`，资产（exe + `.sha256`）每次覆盖
+   （旧资产先删再传，不会堆积）。
 
    > 为什么不每次一个新 tag：一天几十次提交就是几十条 release，Releases 页
    > 会被刷屏，而且 `Latest` 旁边的"预发布"永远指向某个半成品。滚动一条，

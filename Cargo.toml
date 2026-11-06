@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.25"
+version = "1.0.0"
 edition = "2021"
 # egui 0.37 / egui-wgpu 0.37 require 1.95.
 rust-version = "1.95"

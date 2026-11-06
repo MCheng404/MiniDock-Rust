@@ -32,7 +32,7 @@ cargo test  --workspace        # Logic Layer + Settings Interface (No Need for M
 PROBE_LIST=1 ./target/x86_64-pc-windows-msvc/release/probe.exe   # First Check Adapter List
 ```
 **After Cloning, Do It Once** `git config core.hooksPath .githooks`, Otherwise the `fmt` / `clippy` Gate Check Before Submission Will Not Take Effect. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for Submission Information Format and Branch Convention.
-Artifacts: `./scripts/package.sh [--release]` → `dist/MiniDock-<version>-win64[-debug]/`. Debug Builds Carry a Build Number (`X.Y.Z-dev.<n>`), Releases Are Stable (`X.Y.Z`); See Section 4 of [`BUILD.md`](BUILD.md).
+Artifacts: `./scripts/package.sh [--release]` → `dist/MiniDock-<version>-win64[-debug].exe` + `.sha256` (Plain Files, No Zip). Debug Builds Carry a Build Number (`X.Y.Z-dev.<n>`), Releases Are Stable (`X.Y.Z`); See Section 4 of [`BUILD.md`](BUILD.md).
 Dependency Versions: `egui 0.37` / `egui-wgpu 0.37` / `wgpu 30` / `windows 0.62`, All Taking the Latest at Present.
 
 ## License

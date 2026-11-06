@@ -100,19 +100,16 @@ jobs:
           echo "publish mode: $mode"
 
       # 产物无条件上传：即便是"仅 Actions"模式，测试也要有东西可下。
+      # 给的是 .exe 与 .sha256 两个裸文件 —— GitHub 的 artifact 存储内部
+      # 仍然是 zip 容器（它的机制，改不了），但下载解出来的就是这两个文件。
       - uses: actions/upload-artifact@v4
         with:
           name: MiniDock-${{ steps.ver.outputs.value }}-win64-debug
-          path: dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug/
+          path: |
+            dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug.exe
+            dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug.exe.sha256
           if-no-files-found: error
           retention-days: 14
-
-      - name: zip
-        if: steps.mode.outputs.mode != 'artifact' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        shell: pwsh
-        run: |
-          $dir = Get-Item "dist/MiniDock-*-win64-debug" | Select-Object -First 1
-          Compress-Archive -Path $dir.FullName -DestinationPath "$($dir.FullName).zip"
 
       # rolling Pre-Release：永远用同一个 tag，资产每次覆盖。
       # 只有主分支发布 —— 特性分支的验证包留在 Actions 里，免得 Releases 页被刷屏。
@@ -125,7 +122,8 @@ jobs:
         run: |
           set -euo pipefail
           tag=dev
-          zip="dist/MiniDock-$VERSION-win64-debug.zip"
+          exe="dist/MiniDock-$VERSION-win64-debug.exe"
+          sum="$exe.sha256"
           sha8="${GITHUB_SHA:0:8}"
 
           {
@@ -142,9 +140,10 @@ jobs:
             gh release create "$tag" --prerelease --title "Development build" --notes-file debug-notes.md
           fi
           # 资产名带版本号，不清掉旧的会一直堆积。
-          gh release view "$tag" --json assets --jq '.assets[].name' \
-            | while read -r name; do [ -n "$name" ] && gh release delete-asset "$tag" "$name" -y; done
-          gh release upload "$tag" "$zip" --clobber
+          for name in $(gh release view "$tag" --json assets --jq '.assets[].name'); do
+            gh release delete-asset "$tag" "$name" -y
+          done
+          gh release upload "$tag" "$exe" "$sum" --clobber
           gh release edit "$tag" --prerelease --title "Development build $VERSION" --notes-file debug-notes.md
 
   release:
@@ -175,12 +174,9 @@ jobs:
         shell: bash
         run: ./scripts/package.sh --release
 
-      - name: zip
-        shell: pwsh
-        run: |
-          $dir = Get-Item "dist/MiniDock-*-win64" | Select-Object -First 1
-          Compress-Archive -Path $dir.FullName -DestinationPath "$($dir.FullName).zip"
-          Get-ChildItem dist
+      - name: list artifacts
+        shell: bash
+        run: ls -l dist
 
       - name: release notes from changelog
         shell: bash
@@ -191,7 +187,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          # 裸 exe + 校验和，不打 zip。
+          files: |
+            dist/*.exe
+            dist/*.sha256
           body_path: notes.md
           fail_on_unmatched_files: true
           # 正式版：不是草稿、不是预发布，并抢下 "Latest" 角标。
