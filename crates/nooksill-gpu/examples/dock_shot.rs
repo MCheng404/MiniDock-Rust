@@ -73,7 +73,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (w, h) = (w as u32, h as u32);
     let gpu = Gpu::new("")?;
     let mut frame = FrameRenderer::new(&gpu, w, h, ppp)?;
-    let clock = None;
+    // 打开时钟：`paint_clock_card` 是崩溃报告里点名的那条路径。
+    cfg.clock = true;
+    let now = nooksill_core::clock::ClockParts {
+        year: 2026,
+        month: 11,
+        day: 7,
+        weekday: 5,
+        hour: 0,
+        minute: 10,
+        second: 0,
+    };
+    let lines = nooksill_core::clock::clock_lines(&cfg, &now);
+    let clock = Some(lines.as_slice());
     let (rgba, _) = frame.render_rgba(&gpu, raw_input(w, h, ppp), |ui| {
         dock.paint(ui, ppp, dark, clock);
     })?;

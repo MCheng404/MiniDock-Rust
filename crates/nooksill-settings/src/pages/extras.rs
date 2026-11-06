@@ -33,7 +33,6 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             toggle(ctx, ui, Key::CC_HOTSPOT, "控制中心 · 移动热点磁贴", "");
             toggle(ctx, ui, Key::RES_MON, "资源监视器", "");
             toggle(ctx, ui, Key::TOOL_W, "计时器 / 待办", "");
-            toggle(ctx, ui, Key::MODE_W, "专注模式", "");
             toggle(
                 ctx,
                 ui,

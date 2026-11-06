@@ -240,6 +240,12 @@ impl FrameRenderer {
     }
 
     /// 撤掉背景层（毛玻璃关掉、或捕获失败时调用）。
+    /// 是否已有磨砂层。
+    #[must_use]
+    pub fn has_frost(&self) -> bool {
+        self.frost.is_some()
+    }
+
     pub fn clear_frost(&mut self) {
         self.frost = None;
     }

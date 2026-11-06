@@ -1536,6 +1536,16 @@ impl Dock {
         const PAD_Y: f32 = 4.0;
         let line_h = (c.height() - PAD_Y * 2.0) / n as f32;
         let avail = c.width() - PAD_X * 2.0;
+        // 卡片退化（宽高不够塞一行字）就干脆不画。
+        //
+        // 这里踩过一个 panic：`metrics` 里没有 Clock 卡片时 `clock_w = 0`，
+        // 卡片宽度算出来是 0，`avail` 变成负的，字号 `size *= avail / w`
+        // 乘成 -0.006 —— epaint 的 `glyph_atlas` 断言 `px_scale_factor > 0`
+        // 直接崩。渲染比布局慢一帧（配置刚把时钟打开、`update` 还没跑）
+        // 就会命中，属于"改个设置就崩"的那类。
+        if !(line_h > 4.0 && avail > 8.0) {
+            return;
+        }
         let mut prev: Option<&ClockLine> = None;
         for (k, line) in lines.iter().enumerate() {
             // 时间比日期大一号：汉字在同样字号下比数字"重"，比例再拉大会
@@ -1550,6 +1560,8 @@ impl Dock {
             if w > avail && w > 0.0 {
                 size *= avail / w;
             }
+            // 兜底：再怎么算也不给 epaint 一个非正的字号。
+            let size = size.max(1.0);
             painter.text(
                 EguiRect::from_min_max(
                     Pos2::new(c.left(), c.top() + PAD_Y + line_h * k as f32),
