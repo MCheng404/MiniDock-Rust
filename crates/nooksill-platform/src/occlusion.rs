@@ -373,20 +373,26 @@ mod tests {
         ));
     }
 
-    /// 把自己排除掉之后，全屏的"自己"不该算遮挡。
+    /// 排除列表生效 = 被排除的句柄在枚举里直接被跳过。
     ///
-    /// 这条守的是最容易犯的错：忘了传 `exclude`，Dock 覆盖的正是自己那块
-    /// 区域，于是永远"被遮挡"，Dock 一起动就收起。
+    /// 这条原来断言"当前桌面窗口必然覆盖全屏"—— 桌面状态一变（窗口最小化、
+    /// 无交互会话、全屏应用退出）就假红，而且它要验的东西 `overlaps` 的
+    /// 单测已经覆盖了。现在只钉两件与机器无关的事：覆盖判定的两个方向，
+    /// 以及被排除的句柄确实会被跳过（忘了传 `exclude` 就是 Dock 挡自己，
+    /// 一起动就收起，这是最容易犯的错）。
     #[test]
     fn excluding_everything_yields_no_coverage() {
-        // 用一个真实存在的窗口做实验：拿当前进程的桌面窗口是不行的，
-        // 这里只验证"排除列表生效"这一点 —— 传一个必然被枚举到的句柄。
+        let target = Rect::new(0, 0, 1920, 1080);
+        assert!(
+            overlaps(Rect::new(-10, -10, 1930, 1090), target),
+            "覆盖必须判真"
+        );
+        assert!(
+            !overlaps(Rect::new(2000, 0, 2100, 100), target),
+            "不相交必须判假"
+        );
+
         let desk = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() };
-        let r = window_rect(desk).unwrap_or(Rect::new(0, 0, 1920, 1080));
-        // 不排除时桌面窗口应当被判为遮挡（它就是铺满全屏的）。
-        assert!(any_window_covers(r, &[]), "全屏区域应当能被某个窗口覆盖");
-        // 排除之后……桌面窗口类名是 Progman/WorkerW 之一，本来就被过滤，
-        // 所以这里只能保证不 panic，语义由 `should_skip` 的过滤规则保证。
-        let _ = any_window_covers(r, &[desk]);
+        assert!(should_skip(desk, &[desk]), "被排除的句柄必须跳过");
     }
 }

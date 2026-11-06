@@ -1846,10 +1846,14 @@ impl Dock {
         if self.cfg.border {
             let base = if dark { 90.0 } else { 150.0 };
             let a = (base * if op < 0.35 { op / 0.35 } else { 1.0 }) as u8;
+            // 线宽来自 `BorderWidth`（1..6）；早先写死 1.2，滑杆形同虚设。
+            // 1 → 1.2（与旧默认逐像素一致），每档 +0.5，6 → 3.7。
+            let step = self.cfg.get_i32(Key::BORDER_WIDTH).clamp(1, 6) - 1;
+            let w = 1.2 + step as f32 * 0.5;
             painter.rect_stroke(
                 rect,
                 CornerRadius::same(r8(rad)),
-                Stroke::new(1.2, Color32::from_rgba_unmultiplied(255, 255, 255, a)),
+                Stroke::new(w, Color32::from_rgba_unmultiplied(255, 255, 255, a)),
                 StrokeKind::Middle,
             );
         }
