@@ -60,7 +60,7 @@ eframe 线程（独立循环 + IPC），但内存会在设置打开时翻倍。
 
 ## ADR-003 · 设置界面独立成 crate，不依赖 wgpu
 
-**决定**：`minidock-settings` 只依赖 `egui` + `minidock-core`。
+**决定**：`nooksill-settings` 只依赖 `egui` + `nooksill-core`。
 
 **理由**：这是"可测试性"的全部来源。9 页、约 40 个控件，如果与 wgpu 耦合，
 就只能靠人眼看；拆开后 kittest 可以在无显示器环境点完每一页。
@@ -177,7 +177,7 @@ async 运行时的调度开销与每任务栈占用都不划算，调试也更�
 
 ## ADR-010 · 保留 GDI+ 实现到 M2 结束
 
-**决定**：`minidock-gfx` / `minidock-ui` 暂不删除，作为行为参照与 fallback。
+**决定**：`nooksill-gfx` / `nooksill-ui` 暂不删除，作为行为参照与 fallback。
 
 **理由**：图标形状、圆角、文字基线这些细节，最可靠的对照物是能跑的旧实现。
 M2 图标迁移完成后，两份实现并排截图差分，然后删除。
@@ -336,7 +336,7 @@ if ctx.has_requested_repaint() {
 **决定**：启动时 `SingleInstance::acquire()`：
 
 - `Ok(Some(guard))` → 正常启动，guard 活到进程结束。
-- `Ok(None)` → 已有实例，`find_window("MiniDockOverlay")` 后
+- `Ok(None)` → 已有实例，`find_window("NookSillOverlay")` 后
   `SetForegroundWindow` 并退出（退出码 0）。
 - `Err(_)` → 互斥体本身失败，**照常启动**：宁可多一份 Dock，也不要起不来。
 
@@ -400,7 +400,7 @@ if ctx.has_requested_repaint() {
 2. 解包对比 `g_tab[]` / `DefaultCfg()` / 设置行。
 3. 键有增减 → 改 `NUMERIC_KEYS` 表 + `Key::ALL` + 具名常量 + 两个测试。
 4. 布局公式变了 → 改 `core::layout::calc_metrics` 并补测试。
-5. `cargo run -p minidock-core --example config_table` 重新生成 `CONFIG.md` 的键表。
+5. `cargo run -p nooksill-core --example config_table` 重新生成 `CONFIG.md` 的键表。
 
 **已同步的内容**（v1.4.0）：
 
@@ -443,7 +443,7 @@ if ctx.has_requested_repaint() {
 **背景**：egui 0.37 不再从 `RawInput` 直接读 `pixels_per_point`，
 改由 `RawInput.viewports[ROOT].native_pixels_per_point` 告知。
 
-**决定**：凡是自持 Win32 循环的地方（`input.rs`、`minidock-dock`），
+**决定**：凡是自持 Win32 循环的地方（`input.rs`、`nooksill-dock`），
 构造 `RawInput` 时都补上：
 
 ```rust
@@ -590,7 +590,7 @@ C 版是 `2026年10月30日 周五`，我们是 `10月30日 周五`。
 叠出两个分层窗口，而 `FindWindow` 只返回其中一个 ——
 外部工具（截图、自动化）会操作错的那个，排查时极具误导性。
 
-**决定**：`minidock-dock` 接 `SingleInstance::acquire()`，第二次启动直接退出。
+**决定**：`nooksill-dock` 接 `SingleInstance::acquire()`，第二次启动直接退出。
 互斥体本身失败时不阻止启动（与尖刺一致）。
 
 ### 排查手法（值得复用）
@@ -773,11 +773,11 @@ C 版用 `hash(边, 厚度, 显示器矩形)` 判断要不要重新提交。问�
 
 ### 可观测性
 
-`occlusion::covering_window()` 返回盖住者的标题，`MINIDOCK_GEOM=1` 时
+`occlusion::covering_window()` 返回盖住者的标题，`NOOKSILL_GEOM=1` 时
 打印成 `[hide] target=true ... by "窗口标题"`。实测输出直接点名了
 用户正在用的 Edge —— 这类"为什么它躲起来了"的问题，没有点名只能靠猜。
 
-`MINIDOCK_FAKE_COVERED=0/1` 可覆盖判定结果：桌面环境不可控（用户随时
+`NOOKSILL_FAKE_COVERED=0/1` 可覆盖判定结果：桌面环境不可控（用户随时
 开着窗口），要验证"遮挡消失就展开"这条分支，不能真去最小化别人的窗口。
 
 ---
@@ -863,7 +863,7 @@ let vt = Interface::vtable(&link);
 用一个 `#[ignore]` 的真实解析测试兜住：
 
 ```text
-cargo test -p minidock-platform --lib shortcut -- --ignored
+cargo test -p nooksill-platform --lib shortcut -- --ignored
 ```
 
 它会去开始菜单里找一个 `.lnk`，断言解析出的 exe 真实存在。实测输出
@@ -907,7 +907,7 @@ cargo test -p minidock-platform --lib shortcut -- --ignored
 而不是从解析代码往回猜。探针已固化为：
 
 ```text
-cargo run -q -p minidock-core --example read_ini -- <ini 路径>
+cargo run -q -p nooksill-core --example read_ini -- <ini 路径>
 ```
 
 它同时打印**解析值**与**原样字符串**，能区分"没读到"（raw=None）
@@ -1082,7 +1082,7 @@ M0 的验收标准没有被破坏。
 
 **一个坑**：自动化测试里"右键后立刻点击外部"偶尔收不到消息 ——
 `SetCapture` 还没来得及建立。真实使用间隔在几百毫秒以上，不受影响。
-排查时用 `MINIDOCK_MENU_TRACE=1` 打印菜单窗口收到的每条消息。
+排查时用 `NOOKSILL_MENU_TRACE=1` 打印菜单窗口收到的每条消息。
 
 ### 六、已知缺口
 
@@ -1174,7 +1174,7 @@ M0 的验收标准没有被破坏。
 
 先说为什么**不**换成 TOML/JSON：
 
-`minidock-core` 是**零依赖**且 `unsafe_code = "forbid"` 的。引 serde + toml
+`nooksill-core` 是**零依赖**且 `unsafe_code = "forbid"` 的。引 serde + toml
 会打破这条 —— 而这条是整个分层的基础（core 能在任何环境下单测，
 不需要 Windows SDK）。自己写一个 TOML 子集解析器要几百行外加一堆边角
 （多行字符串、日期、内联表……），换来的只是语法更"现代"。
@@ -1268,11 +1268,11 @@ GEOM dpi=144 S=64.0 Z=100.0 ... clockW=249     ← 全部取自旧配置
 
 ---
 
-## ADR-035 · 删除 GDI+ 老实现（minidock / gfx / ui）
+## ADR-035 · 删除 GDI+ 老实现（nooksill / gfx / ui）
 
 ### 一、ADR-010 当时为什么留
 
-ADR-010 的决定是「`minidock-gfx` / `minidock-ui` 暂不删除，作为行为参照与
+ADR-010 的决定是「`nooksill-gfx` / `nooksill-ui` 暂不删除，作为行为参照与
 fallback」。在 M0 阶段这是对的：wgpu 路线还没证明可行，
 GDI+ 那套至少能跑，留个退路。
 
@@ -1287,17 +1287,17 @@ GDI+ 那套至少能跑，留个退路。
 2. **两份实现已经开始漂移。** `layout.rs` 的注释里记着一例：GDI+ 版算基准
    宽度时用了动画中的 `cur`，导致基准槽位每帧漂移；GPU 版用固定的 `s` 才是
    对的。这类分歧只会越来越多，而"哪份是对的"每次都要重新判断。
-3. **它让 `cargo build` 产出两个 Dock。** `MiniDock.exe`（GDI+）与
-   `minidock-dock.exe`（wgpu）并存，两个都编、都能启动、都读同一份配置。
+3. **它让 `cargo build` 产出两个 Dock。** `NookSill.exe`（GDI+）与
+   `nooksill-dock.exe`（wgpu）并存，两个都编、都能启动、都读同一份配置。
    调试时先要确认"我跑的是哪个"，这个成本每次都在付。
 
 ### 三、删了什么
 
 | 路径 | 行数 | 内容 |
 |---|---|---|
-| `crates/minidock` | 83 | 老的 bin 入口（`MiniDock.exe`） |
-| `crates/minidock-gfx` | 969 | GDI+ 封装（canvas / objects / 字体） |
-| `crates/minidock-ui` | 948 | GDI+ 版 Dock 骨架 |
+| `crates/nooksill` | 83 | 老的 bin 入口（`NookSill.exe`） |
+| `crates/nooksill-gfx` | 969 | GDI+ 封装（canvas / objects / 字体） |
+| `crates/nooksill-ui` | 948 | GDI+ 版 Dock 骨架 |
 
 合计 **2000 行**，占当时总代码（16604 行）的 12%。
 
@@ -1305,9 +1305,9 @@ workspace 从 7 个 crate 减到 4 个：`core` / `platform` / `settings` / `gpu
 
 ### 四、影响的可见变化
 
-**可执行文件名从 `MiniDock.exe` 变成 `minidock-dock.exe`**。之前两个 exe
-并存，现在只剩后者。如果后续需要沿用 `MiniDock.exe` 这个名字，
-应该在 `minidock-gpu` 里给 bin 加一个 alias，而不是把老 crate 捡回来。
+**可执行文件名从 `NookSill.exe` 变成 `nooksill-dock.exe`**。之前两个 exe
+并存，现在只剩后者。如果后续需要沿用 `NookSill.exe` 这个名字，
+应该在 `nooksill-gpu` 里给 bin 加一个 alias，而不是把老 crate 捡回来。
 
 ### 五、被删代码里有什么值得留意的
 
@@ -1326,14 +1326,14 @@ workspace 从 7 个 crate 减到 4 个：`core` / `platform` / `settings` / `gpu
   实际会让"删干净"这件事永远差一步：CI 要不要编它？测试要不要跑它？
   两份实现共存的成本会以另一种形式回来。
 - **没有先把它们移到 `archive/` 分支**。git 历史里都有，需要时
-  `git checkout <sha> -- crates/minidock-ui` 就能拿回来。
+  `git checkout <sha> -- crates/nooksill-ui` 就能拿回来。
 
 
 ## ADR-036 · 设置窗口接进 Dock 进程
 
 ### 一、为什么是进程内
 
-设置界面（`minidock-settings`）早就写好了 9 页，但它一直是"有个 UI，没人用"：
+设置界面（`nooksill-settings`）早就写好了 9 页，但它一直是"有个 UI，没人用"：
 原来的 `overlay.rs` 只是个 spike（配 `bin/spike.rs` 的独立 exe），既读不了真正的
 配置，也改不动 Dock。要接到一起只有两条路：
 
@@ -1415,7 +1415,7 @@ sw.attach();                              // 把这时的地址写进 USERDATA
 | 写 ini | 读文件 + UTF-16 全量回写 | 拖拽每一步 / 改设置 |
 | 启动应用 | `ShellExecuteW` | 点击 |
 
-**决定**：`minidock-gpu::worker` 里四个**专用线程**，各自一条 `mpsc` 通道：
+**决定**：`nooksill-gpu::worker` 里四个**专用线程**，各自一条 `mpsc` 通道：
 
 - `IconLoader` —— shell/COM 取图标，**串行**（`IImageList` 是共享的 shell 对象，
   并发访问没有保证），像素处理（缩放判定 + 圆角遮罩）在批内用 rayon 并行；
@@ -1621,7 +1621,7 @@ ADR-038 把布局泛化成了"小组件条带"，但那时条带里只有时钟 
 自动化脚本要点击卡片，就得知道它在哪。栏体坐标是**窗口内**的，
 脚本自己推算过一次 —— 忘了加窗口偏移，点在了空气里。
 
-现在 `MINIDOCK_GEOM=1` 会多打一行：
+现在 `NOOKSILL_GEOM=1` 会多打一行：
 
 ```text
 GEOM widget=Resource screen=(1415,1486) size=(90,78)
@@ -1960,7 +1960,7 @@ Dropped TexturesDelta with 1 unapplied deltas.
 
 ### 六、入口
 
-右键菜单新增「起动台」。上游是把一个 `mdock:launchpad` 的伪条目塞进 Dock
+右键菜单新增「起动台」。上游是把一个 `nooksill:launchpad` 的伪条目塞进 Dock
 （`SysAdd(SYS_LAUNCH)`），我们没有那套系统条目机制，所以走菜单。
 
 
@@ -2224,7 +2224,7 @@ pub fn in_launch_grace(last_launch_ms: Option<u64>, now_ms: u64) -> bool
 
 - 截图两种模式各一张：合并时是一整块胶囊（时钟 / CPU / 计时器 / 托盘
   连在一起），关掉 `WMerge` 是四块独立卡片；
-- 点击托盘卡片，`MINIDOCK_GEOM=1` 打出 `[widget] 打开系统托盘`，进程存活。
+- 点击托盘卡片，`NOOKSILL_GEOM=1` 打出 `[widget] 打开系统托盘`，进程存活。
 
 ---
 
@@ -2236,7 +2236,7 @@ pub fn in_launch_grace(last_launch_ms: Option<u64>, now_ms: u64) -> bool
 *Taskbar Smoke*（`taskbar-smoke-fork.cpp`，Rubicus）：给 Windows 11 任务栏
 胶囊画一圈真的在流动的烟。
 
-**决定**：把它的三块核心搬进 `minidock-core::smoke`，渲染接到 egui：
+**决定**：把它的三块核心搬进 `nooksill-core::smoke`，渲染接到 egui：
 
 | 原版 | 这里 |
 |---|---|
@@ -2520,14 +2520,14 @@ ALT 键连击。每级之后都**复核** `GetForegroundWindow`。
 
 ## ADR-052 · 内置条目的图标用矢量画，起动台补键盘操作
 
-### 一、`mdock:` 条目此前是"半条命"
+### 一、`nooksill:` 条目此前是"半条命"
 
-上游 `LoadItemIcon` 里有一句分支：`mdock:start` 走 `StartIcon(cs)`、
-`mdock:launchpad` 走 `LaunchIcon(cs)` —— 这两个条目**没有文件**，图标是
+上游 `LoadItemIcon` 里有一句分支：`nooksill:start` 走 `StartIcon(cs)`、
+`nooksill:launchpad` 走 `LaunchIcon(cs)` —— 这两个条目**没有文件**，图标是
 现画的。移植时漏了这条，于是：
 
 - 图标：走 shell 取不到 → 落到"首字占位"，Dock 上立着一块写着「起」的方块；
-- 点击：`mdock:launchpad` 被当作普通文件丢给 `ShellExecuteW`，必然失败，
+- 点击：`nooksill:launchpad` 被当作普通文件丢给 `ShellExecuteW`，必然失败，
   表现为"点起动台毫无反应"。
 
 ### 二、为什么不用 emoji、也不用字体字符
@@ -2849,7 +2849,7 @@ Vulkan 路径。
 
 1. 面板显示前 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`，
    隐藏时恢复 `WDA_NONE`。
-2. 面板可见期间起 `minidock-frost` 线程：抓屏 → 与上一帧逐字节比较 →
+2. 面板可见期间起 `nooksill-frost` 线程：抓屏 → 与上一帧逐字节比较 →
    变了才模糊 → `ColorImage` 经通道回传 → `WM_APP_WAKE` 叫醒 UI 线程。
 3. 节拍 100 ms；连续无变化时间隔翻倍退避到 800 ms，一有变化立刻复位。
 
@@ -2989,7 +2989,7 @@ if saw { Pumped::Frames } else { Pumped::Idle }
 但每次醒来只做几次只读判定，不产生 GPU / `UpdateLayeredWindow` 工作。
 实测收起 8 秒 0 帧、CPU 0.26% 单核。
 
-**验收方式**：`MINIDOCK_FPS=1` 每秒打一行帧率。收起后应当**一行都没有**。
+**验收方式**：`NOOKSILL_FPS=1` 每秒打一行帧率。收起后应当**一行都没有**。
 
 **注意**：别把 `pump` 的 `Wake` 当成"什么都不用处理"。它仍然要
 `DispatchMessage` —— 面板类窗口（起动台 / 设置 / 菜单）的 `WM_APP_WAKE`
@@ -3022,7 +3022,7 @@ if saw { Pumped::Frames } else { Pumped::Idle }
 
 **遗留**：用户报的"四角变成直角"在本轮没有独立复现。掩码一直是胶囊形
 （半径 = 栏体高 / 2），若本轮之后仍有直角，说明来源不是掩码 —— 下一轮
-要用 `MINIDOCK_SMOKE_TRACE` 的 `maxA` 配合逐像素采样定位（可能是烟团粒子
+要用 `NOOKSILL_SMOKE_TRACE` 的 `maxA` 配合逐像素采样定位（可能是烟团粒子
 或位图被窗口边界裁切）。
 
 ---
@@ -3121,7 +3121,7 @@ icon::tests::dib_fallback_draws_into_the_dib_not_the_screen ... ok
 Dock 整体的窗口/命中/出帧本轮未真机运行，不假称验过。
 
 **何时重新考虑**：升级 `windows` 大版本时重跑一次
-`cargo test -p minidock-platform --lib -- --ignored`；若上游改动了
+`cargo test -p nooksill-platform --lib -- --ignored`；若上游改动了
 `IShellLinkW` 的生成签名，测试会立刻抓到。
 
 ---
@@ -3255,7 +3255,7 @@ MSAA 只在大窗口降采样）。节拍改动是设计值：动画最大唤醒
 
 **决定**：
 
-1. 新增 `crates/minidock-gpu/examples/present_bench.rs`，长期作为呈现路径的
+1. 新增 `crates/nooksill-gpu/examples/present_bench.rs`，长期作为呈现路径的
    测量工具（与 `probe`、`settings_shot` 同类）。真实分层窗口，alpha 1/255
    不可见但走完整合成路径。
 2. **不**引入 DirectComposition / swapchain，`UpdateLayeredWindow` 保持不变。
@@ -3339,7 +3339,7 @@ MSAA 只在大窗口降采样）。节拍改动是设计值：动画最大唤醒
 全屏起动台一开就 panic：
 
 ```
-In Device::create_texture, label = 'minidock-offscreen-msaa'
+In Device::create_texture, label = 'nooksill-offscreen-msaa'
   Sample count 2 is not supported by format Rgba8UnormSrgb on this device.
   The WebGPU spec guarantees [1, 4] samples... With the
   TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES feature your device supports [1, 2, 4, 8].
@@ -3362,7 +3362,7 @@ In Device::create_texture, label = 'minidock-offscreen-msaa'
 （256×128 → 384×128），于是 `write_buffer` 写到缓冲外沿。改为"容量不够就重建"。
 两处都是"一次性分配 + 尺寸会变"的同类错误。
 
-**验证**：`MINIDOCK_DEBUG_OPEN=launchpad` 与"设置窗口 + 起动台同开"两种
+**验证**：`NOOKSILL_DEBUG_OPEN=launchpad` 与"设置窗口 + 起动台同开"两种
 复现路径各跑 12 秒无 panic（改前 100% 崩在 create_texture）；
 `msaa_two_requires_the_adapter_specific_feature` 覆盖 2/4/0/1 四档。
 
@@ -3378,13 +3378,13 @@ CHANGELOG 又是另一套编号（0.9.x）。用户看到的、属性页看到�
 **决定**：
 
 1. 唯一的版本计算逻辑放 `scripts/version.rs`，被
-   `crates/minidock-core/build.rs` 与 `crates/minidock-gpu/build.rs` `include!`。
-2. 规则：`MINIDOCK_VERSION` 有值→原样用；`PROFILE=release`→`X.Y.Z`；否则
-   `X.Y.Z-dev.<构建编号>`。构建编号取 `MINIDOCK_BUILD`，回落
+   `crates/nooksill-core/build.rs` 与 `crates/nooksill-gpu/build.rs` `include!`。
+2. 规则：`NOOKSILL_VERSION` 有值→原样用；`PROFILE=release`→`X.Y.Z`；否则
+   `X.Y.Z-dev.<构建编号>`。构建编号取 `NOOKSILL_BUILD`，回落
    `git rev-list --count HEAD`，再回落 0。
-3. 分发三处，全部由同一次计算得出：`cargo:rustc-env=MINIDOCK_VERSION`
-   （`minidock_core::VERSION` → 关于页）、VERSIONINFO（属性页）、
-   `target/<triple>/<profile>/MINIDOCK_VERSION`（`scripts/package.sh` 读它拼产物名）。
+3. 分发三处，全部由同一次计算得出：`cargo:rustc-env=NOOKSILL_VERSION`
+   （`nooksill_core::VERSION` → 关于页）、VERSIONINFO（属性页）、
+   `target/<triple>/<profile>/NOOKSILL_VERSION`（`scripts/package.sh` 读它拼产物名）。
 4. `Cargo.toml` 版本改为与 CHANGELOG 同号（0.9.25），删掉 `APP_VERSION`。
 
 **依据**：产物名、关于页、属性页三者不一致是最容易在发版时翻车的地方，而
@@ -3402,7 +3402,7 @@ CHANGELOG 又是另一套编号（0.9.x）。用户看到的、属性页看到�
 
 **验证**：本机 debug 构建属性页与关于页都是 `0.9.25-dev.58`，release 为
 `0.9.25`（7.4 MB 单文件）；`./scripts/package.sh --release` 产出
-`dist/MiniDock-0.9.25-win64/`。
+`dist/NookSill-0.9.25-win64/`。
 
 ---
 
@@ -3430,7 +3430,7 @@ CHANGELOG 又是另一套编号（0.9.x）。用户看到的、属性页看到�
    实现 TLS 栈（rustls 直连 IP + SNI），那是另一个量级的依赖与风险。
 5. **替换自己靠一段 `cmd`**。运行中的 exe 不能覆盖自己：脚本轮询 `tasklist`，
    等本进程退出后 `move /Y` 再 `start`。下载先落到 exe 同级的
-   `MiniDock.update.exe`（同一卷，move 是原子的），校验不过就不落盘。
+   `NookSill.update.exe`（同一卷，move 是原子的），校验不过就不落盘。
 6. **隐藏入口**：连点版本号 5 次解锁「高级」卡片，窗口一关就复位。
    两个开关（安全 DNS、镜像全部测速）是"调错会让人以为坏了"的那类，
    不适合摆在一级界面。
@@ -3444,6 +3444,6 @@ ping 值再低也没意义。
 "镜像速度"其实是代理的速度，这没法回避，也不该回避（用户就是想用代理）。
 DoH 依赖 Cloudflare 可达；不可达时判定为"未污染"，退化成只看镜像测速。
 
-**验证**：`cargo run -p minidock-platform --example update_check` 实测
+**验证**：`cargo run -p nooksill-platform --example update_check` 实测
 （2026-11-06）：读到最新版 `1.0.0`、比当前 `1.0.0-65-fe678af` 新、
 选中 `ghfast.top`、下载 7,782,912 字节、SHA-256 与发布页 `.sha256` 一致。

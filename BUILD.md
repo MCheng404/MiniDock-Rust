@@ -54,7 +54,7 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
 | `rayon` | 1.12 | **唯一用途**是图标像素处理（ADR-007 / ADR-037） |
 | `pollster` | 1.0 | 启动时同步等 `request_device` / `enumerate_adapters` |
 | `glass-backdrop` | git rev `747457c` | 只用 capture / blur / glass_sdf 三个数据模块（ADR-057） |
-| `winresource` | 0.1.34 | 仅 build-dependency，把 `assets/minidock.ico` 编进 exe |
+| `winresource` | 0.1.34 | 仅 build-dependency，把 `assets/nooksill.ico` 编进 exe |
 
 **没有 eframe、没有 winit**。理由见 [`DECISIONS.md`](DECISIONS.md) ADR-002。
 
@@ -74,20 +74,20 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
 
 | 条件 | 版本 | 用在哪 |
 |---|---|---|
-| `MINIDOCK_VERSION` 有值 | 原样使用 | CI 显式指定（预留） |
+| `NOOKSILL_VERSION` 有值 | 原样使用 | CI 显式指定（预留） |
 | `PROFILE=release` | `X.Y.Z`（`Cargo.toml` 的 workspace 版本） | Release 稳定版 |
 | 其它（debug） | `X.Y.Z-<构建编号>-<提交号>` | Debug 版（如 `1.1.0-66-fe678af`） |
 
-构建编号取 `MINIDOCK_BUILD`，没有就取 `git rev-list --count HEAD`（随提交单调递增），
+构建编号取 `NOOKSILL_BUILD`，没有就取 `git rev-list --count HEAD`（随提交单调递增），
 再没有就是 `0`。提交号是 7 位短哈希：CI 用 `GITHUB_SHA`，本地 `git rev-parse --short`。
-CI 用 `MINIDOCK_BUILD=${{ github.run_number }}`。
+CI 用 `NOOKSILL_BUILD=${{ github.run_number }}`。
 
 三处必须一致，所以只在构建期算一次、分发下去：
 
 ```
-scripts/version.rs ──┬── crates/minidock-core/build.rs  →  env!("MINIDOCK_VERSION") → minidock_core::VERSION（关于页）
-                     ├── crates/minidock-gpu/build.rs   →  exe 的 VERSIONINFO（属性 → 详细信息）
-                     └── target/<triple>/<profile>/MINIDOCK_VERSION  →  package.sh 的产物名
+scripts/version.rs ──┬── crates/nooksill-core/build.rs  →  env!("NOOKSILL_VERSION") → nooksill_core::VERSION（关于页）
+                     ├── crates/nooksill-gpu/build.rs   →  exe 的 VERSIONINFO（属性 → 详细信息）
+                     └── target/<triple>/<profile>/NOOKSILL_VERSION  →  package.sh 的产物名
 ```
 
 `./scripts/build.sh --version` 直接读最后那个文件；`scripts/package.sh` 也只读它，
@@ -97,28 +97,28 @@ scripts/version.rs ──┬── crates/minidock-core/build.rs  →  env!("MIN
 
 | 目标 | 路径 | 说明 |
 |---|---|---|
-| `minidock-dock` | `target/x86_64-pc-windows-msvc/{debug,release}/minidock-dock.exe` | Dock 主程序。ADR-035 删除 GDI+ 老实现后**唯一**的 Dock 可执行文件 |
+| `nooksill-dock` | `target/x86_64-pc-windows-msvc/{debug,release}/nooksill-dock.exe` | Dock 主程序。ADR-035 删除 GDI+ 老实现后**唯一**的 Dock 可执行文件 |
 | `probe` | 同目录 `probe.exe` | 显存/后端探针，只建设备不建窗口（`scripts/probe-mem.sh`） |
-| `settings_shot` | `cargo run -p minidock-gpu --example settings_shot -- <出图.bmp>` | 离屏渲染任意一页设置界面，走真实 `FrameRenderer` |
+| `settings_shot` | `cargo run -p nooksill-gpu --example settings_shot -- <出图.bmp>` | 离屏渲染任意一页设置界面，走真实 `FrameRenderer` |
 
 `Cargo.toml` 里 `[[bin]]` 是显式声明的；`src/bin/` 下没有其它自动发现的可执行文件。
-README 里早期提过的 `minidock-spike`、`MiniDock.exe` 都已在 ADR-035 / ADR-036 删除。
+README 里早期提过的 `nooksill-spike`、`NookSill.exe` 都已在 ADR-035 / ADR-036 删除。
 
 ### 4.3 分发包（`scripts/package.sh`）
 
 ```
-dist/MiniDock-1.0.0-win64.exe
-dist/MiniDock-1.0.0-win64.exe.sha256
-dist/MiniDock-1.1.0-66-fe678af-win64-debug.exe     （--pdb 时另加同名 .pdb）
-dist/MiniDock-1.1.0-66-fe678af-win64-debug.exe.sha256
+dist/NookSill-1.0.0-win64.exe
+dist/NookSill-1.0.0-win64.exe.sha256
+dist/NookSill-1.1.0-66-fe678af-win64-debug.exe     （--pdb 时另加同名 .pdb）
+dist/NookSill-1.1.0-66-fe678af-win64-debug.exe.sha256
 ```
 
 - **裸文件，不压 zip**：GitHub Release 上是 exe 与校验和两个下载项，用户下下来
   就能跑，不需要先解压。
 - 校验和是 `sha256sum` 的标准格式（`<hash>  <文件名>`），
-  `sha256sum -c MiniDock-1.0.0-win64.exe.sha256` 直接能验。
-- 包内 exe 叫 `MiniDock-<版本>-win64[-debug].exe`（产品名），而 cargo 产出的
-  二进制仍叫 `minidock-dock.exe`；改名只发生在复制到 `dist/` 这一步。
+  `sha256sum -c NookSill-1.0.0-win64.exe.sha256` 直接能验。
+- 包内 exe 叫 `NookSill-<版本>-win64[-debug].exe`（产品名），而 cargo 产出的
+  二进制仍叫 `nooksill-dock.exe`；改名只发生在复制到 `dist/` 这一步。
   代价：`--pdb` 出来的 `.pdb` 与 exe 不同名，调试器不会自动找到它，
   需要手动加载（所以 pdb 默认不进包，它本来就是本地排查用的）。
 - Debug 的 pdb 有 200 MB 量级，默认不打包。
@@ -131,7 +131,7 @@ dist/MiniDock-1.1.0-66-fe678af-win64-debug.exe.sha256
 
 ## 五、内存基线（2026-10-27 · AMD Radeon 610M + NVIDIA RTX 5070 Laptop · 2560×1600@150%）
 
-体积：`minidock-spike.exe` release **7.2 MB**（`opt-level=z` + fat LTO + strip），
+体积：`nooksill-spike.exe` release **7.2 MB**（`opt-level=z` + fat LTO + strip），
 debug 43 MB（符号占绝大部分）。
 
 内存：`probe.exe` 只建设备、不建窗口、不跑 egui，由进程内 `mem.rs` 自采样
@@ -210,7 +210,7 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 | 悬停 / 动画 | 按 `repaint_delay` 排帧，`ZERO` 时节流到 60 fps |
 | 单帧 CPU（1320×1080，含 GPU 回读与呈现） | release 下 1–2 ms（见性能页） |
 
-查"为什么还在重绘"：`MINIDOCK_TRACE=1` 运行，每秒一行，
+查"为什么还在重绘"：`NOOKSILL_TRACE=1` 运行，每秒一行，
 含累计帧数、`hover` 位置与 `repaint_causes()`。
 
 ### 方法学（不写清楚就会得出错误结论）
@@ -228,7 +228,7 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 
 复现：`scripts/probe-mem.sh`（`PROBE_HOLD=20` 更稳）。单点：
 `PROBE_BACKEND=d3d11 PROBE_ADAPTER=NVIDIA PROBE_ALLOC=1`。探针源码
-`crates/minidock-gpu/src/bin/probe.rs`，采样逻辑 `src/mem.rs`。
+`crates/nooksill-gpu/src/bin/probe.rs`，采样逻辑 `src/mem.rs`。
 
 ## 六、排错
 
@@ -247,9 +247,9 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 
 | 层 | 命令 | 依赖 |
 |---|---|---|
-| 逻辑层（配置/INI/布局/条目） | `cargo test -p minidock-core` | 无 |
-| 设置界面（kittest 无头） | `cargo test -p minidock-settings` | 需要系统中文字体 |
-| 平台层（显示器/注册表） | `cargo test -p minidock-platform` | 需要桌面会话 |
+| 逻辑层（配置/INI/布局/条目） | `cargo test -p nooksill-core` | 无 |
+| 设置界面（kittest 无头） | `cargo test -p nooksill-settings` | 需要系统中文字体 |
+| 平台层（显示器/注册表） | `cargo test -p nooksill-platform` | 需要桌面会话 |
 | GPU 尖刺 | 手动运行 | 需要 D3D12 适配器 |
 
 `core` 的测试**不依赖 Windows**，可以放到任意 CI runner 上跑；这是把纯逻辑
@@ -262,7 +262,7 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 | job | 触发 | 干什么 |
 |---|---|---|
 | `gate` | 每次 push（任意分支）/ PR | `fmt --check` → `clippy -D warnings` → `--lib --tests`，与本地 `--gate` 同一批命令 |
-| `debug` | 每次 push（任意分支）/ 手动触发 | `MINIDOCK_BUILD=<run_number>` → `package.sh` → 上传 Actions 产物（`MiniDock-<ver>-win64-debug.exe` + `.sha256`，保留 14 天）；默认**再发一条 rolling Pre-Release** |
+| `debug` | 每次 push（任意分支）/ 手动触发 | `NOOKSILL_BUILD=<run_number>` → `package.sh` → 上传 Actions 产物（`NookSill-<ver>-win64-debug.exe` + `.sha256`，保留 14 天）；默认**再发一条 rolling Pre-Release** |
 | `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 一致 → `package.sh --release` → 发**正式 Release**（资产是裸 exe + `.sha256`；非草稿、非预发布、抢 `Latest`） |
 
 ### 8.1 Debug 的两个出口

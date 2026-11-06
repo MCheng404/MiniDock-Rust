@@ -1,18 +1,18 @@
 // Resolve the version string stamped into binaries and Windows resources.
 //
 // Included by build scripts (`include!("../../scripts/version.rs")`), so the
-// `env!("MINIDOCK_VERSION")` constant, the VERSIONINFO resource and the
+// `env!("NOOKSILL_VERSION")` constant, the VERSIONINFO resource and the
 // artifact name can never drift apart.
 //
 // Rules, in order:
 //
 // | condition | result |
 // |---|---|
-// | `MINIDOCK_VERSION` set | used verbatim (CI passes the tag / run number) |
+// | `NOOKSILL_VERSION` set | used verbatim (CI passes the tag / run number) |
 // | `PROFILE == release` | `X.Y.Z` — the stable version |
 // | otherwise | `X.Y.Z-<build>-<sha>` — stable prefix, build number, commit |
 //
-// The build number comes from `MINIDOCK_BUILD`, else `git rev-list --count`
+// The build number comes from `NOOKSILL_BUILD`, else `git rev-list --count`
 // (monotonic across commits), else `0`. The short commit comes from
 // `GITHUB_SHA` in CI, else `git rev-parse --short`, else `nogit`.
 
@@ -30,7 +30,7 @@ fn is_release() -> bool {
 }
 
 fn build_number() -> u64 {
-    if let Ok(raw) = std::env::var("MINIDOCK_BUILD") {
+    if let Ok(raw) = std::env::var("NOOKSILL_BUILD") {
         if let Ok(n) = raw.trim().parse() {
             return n;
         }
@@ -88,7 +88,7 @@ fn short_sha() -> String {
 }
 
 pub fn resolve(pkg_version: &str) -> Version {
-    if let Ok(explicit) = std::env::var("MINIDOCK_VERSION") {
+    if let Ok(explicit) = std::env::var("NOOKSILL_VERSION") {
         let explicit = explicit.trim().to_owned();
         if !explicit.is_empty() {
             let [a, b, c] = triple(&explicit);

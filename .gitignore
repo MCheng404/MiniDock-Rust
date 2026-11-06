@@ -7,14 +7,14 @@
 **/*.o
 
 # 运行期数据（便携模式会把 ini 与图标缓存写在这里）
-/MiniDock.ini
-/MiniDock.portable
+/NookSill.ini
+/NookSill.portable
 /icons/
 /run/
 
 # 原始 C 项目与参考资料**不**纳入版本库：
 #   上游源码版权归原作者 Wangcy，许可证未授予再分发权（见 README）。
-#   本地对照时请自行把 minidock.c 放到 reference/ 下，该目录被忽略。
+#   本地对照时请自行把 nooksill.c 放到 reference/ 下，该目录被忽略。
 /reference/
 
 # 编辑器 / 系统

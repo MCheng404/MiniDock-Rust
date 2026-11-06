@@ -1,4 +1,4 @@
-# MiniDock-rs 构建/测试（PowerShell 入口，注入 MSVC + Windows SDK 环境）。
+# NookSill-rs 构建/测试（PowerShell 入口，注入 MSVC + Windows SDK 环境）。
 #
 # 与 scripts/env.sh 等价，供不习惯 Git Bash 的场景使用。
 #

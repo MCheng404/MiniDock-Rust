@@ -73,7 +73,7 @@ fix: 时钟开启时栏体右端被裁
 
 原因：calc_metrics 把 clock_extra 算进了逻辑宽度，但布局没减掉它。
 影响：GDI+ 版与 GPU 版都偏右，宽度越窄越明显。
-验证：cargo test -p minidock-core layout
+验证：cargo test -p nooksill-core layout
 ```
 
 性能类改动必须带**同机、同配置**的前后数字，否则下一个人没法判断
@@ -87,7 +87,7 @@ fix: 时钟开启时栏体右端被裁
 | `reference/` | 上游 C 源码。**版权未授予再分发权**（见 README），只允许本地对照 |
 | `scratch/` | 临时验证程序（含编译出来的 exe） |
 | `.workbuddy-ai/` | 协作工具的工作区数据，只对当前机器有意义 |
-| `MiniDock.ini` / `icons/` | 运行期数据，便携模式下会写在这里 |
+| `NookSill.ini` / `icons/` | 运行期数据，便携模式下会写在这里 |
 
 `Cargo.lock` **要提交**：这是二进制程序，不是库，依赖必须可复现。
 

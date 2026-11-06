@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MiniDock-rs 构建环境引导（只导出环境变量，不执行构建）。
+# NookSill-rs 构建环境引导（只导出环境变量，不执行构建）。
 #
 # 用法：
 #   source scripts/env.sh          # 在当前 shell 生效

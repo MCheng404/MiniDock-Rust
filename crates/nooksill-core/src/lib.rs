@@ -1,0 +1,41 @@
+//! NookSill 的纯逻辑层。
+//!
+//! 这里**不允许**出现任何 Win32 / GDI+ 依赖。原因不是洁癖，而是验证成本：
+//! 整个实现里，真正容易出错的是配置解析、条目序列化、布局数学
+//! 这三块，它们全部与图形无关。把它们留在无 Win32 依赖的 crate 里，才能在
+//! 秒级反馈回路里跑单元测试；而窗口过程、GPU 资源这类只能靠"跑起来看"的
+//! 部分，则集中在 `nooksill-gpu` 里，靠手动验收。
+//!
+//! 模块划分与 对应关系见 `PORTING.md`。
+
+#![deny(missing_debug_implementations)]
+
+pub mod calendar;
+pub mod clock;
+pub mod color;
+pub mod config;
+pub mod control;
+pub mod icon;
+pub mod ini;
+pub mod item;
+pub mod launchpad;
+pub mod layout;
+pub mod running;
+pub mod smoke;
+pub mod store;
+pub mod tool;
+pub mod units;
+
+/// 进程级常量。
+pub const APP_NAME: &str = "NookSill";
+
+/// 构建时写入的版本号：Release 是 `X.Y.Z`，Debug 是 `X.Y.Z-dev.<构建编号>`。
+/// 与 exe 的 VERSIONINFO、产物文件名同源（`scripts/version.rs`）。
+pub const VERSION: &str = env!("NOOKSILL_VERSION");
+/// 单实例互斥体名。
+pub const SINGLETON_MUTEX: &str = "Local\\NookSill_Singleton";
+
+/// 条目上限。这两个数字**必须**与 ini 解析、UI 循环、拖拽索引三处一致，
+/// 因此只在 core 里定义一次。是 `MAXI` / `MAXK` 宏。
+pub const MAX_ITEMS: usize = 128;
+pub const MAX_KIDS: usize = 16;

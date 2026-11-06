@@ -6,6 +6,23 @@
 
 ---
 
+## 2.0.0 — 更名为 NookSill（2026-11-06）
+
+项目、仓库、产物全部改名：**MiniDock → NookSill**，仓库改为 **NookSill-Rust**。
+
+- crate 与二进制：`nooksill-core` / `nooksill-platform` / `nooksill-settings` /
+  `nooksill-gpu`，主程序 `nooksill-dock.exe`；资源改成 `assets/nooksill.{ico,rc}`。
+- 运行时标识：窗口类 `NookSillWindow`、单实例互斥体 `Local\NookSill_Singleton`、
+  配置目录与 `NookSill.ini`、便携标记 `NookSill.portable`、内置条目 scheme
+  `nooksill:`、更新器常量 `MCheng404/NookSill-Rust`。
+- 环境变量前缀 `MINIDOCK_*` → `NOOKSILL_*`（`NOOKSILL_DEBUG_OPEN` 等调试开关）。
+- 旧名字只保留在 `PORTING.md` / `DECISIONS.md` 指代**上游 C 项目**的地方
+  （`minidock.c`、上游发行包 `MiniDock-1.x.zip`）—— 那是历史事实，不改。
+
+**破坏性**：这是一次身份变更，不复用旧路径 —— 配置目录、ini 名、互斥体、
+URI scheme 全换，旧版本配置不会被继承，两个版本也不会抢同一个单实例。
+GitHub 上旧的 Release 与标签一并清空，从 2.0.0 重新开始。
+
 ## 1.1.0 — 应用内更新（2026-11-06）
 
 - **Debug 命名规则**：`X.Y.Z-<第几次构建>-<提交号>`（如 `1.1.0-66-fe678af`），
@@ -31,7 +48,7 @@
 
 - 渲染：wgpu / DX12 离屏 + `UpdateLayeredWindow`，空闲时不出帧。
 - 体积：单文件 exe（静态 CRT），release 约 7.4 MB，不依赖 VC 运行库。
-- 分发：`MiniDock-1.0.0-win64.exe` + 同名 `.sha256`，**裸文件不打包**。
+- 分发：`NookSill-1.0.0-win64.exe` + 同名 `.sha256`，**裸文件不打包**。
 - 尚未移植：顶部状态栏、窗口动画重做、多窗口应用模式；缺口与理由见
   `PORTING.md` 第九节。
 
@@ -127,14 +144,14 @@ Dock 栏图标 + 控制中心图标）。
 ## 0.9.25 — 构建机制、版本号与 CI（2026-11-06）
 
 - 版本号统一到 `scripts/version.rs`，两个 `build.rs` `include!` 同一份逻辑：
-  Debug 是 `X.Y.Z-dev.<构建编号>`，Release 是 `X.Y.Z`。构建编号取 `MINIDOCK_BUILD`
+  Debug 是 `X.Y.Z-dev.<构建编号>`，Release 是 `X.Y.Z`。构建编号取 `NOOKSILL_BUILD`
   （CI 传 run number），本地回落 `git rev-list --count HEAD`。
-- 三处分发同源：`minidock_core::VERSION`（关于页）、exe 的 VERSIONINFO（属性页）、
-  `target/<triple>/<profile>/MINIDOCK_VERSION`（`package.sh` 的产物名）。
+- 三处分发同源：`nooksill_core::VERSION`（关于页）、exe 的 VERSIONINFO（属性页）、
+  `target/<triple>/<profile>/NOOKSILL_VERSION`（`package.sh` 的产物名）。
   `package.sh` 只读那个文件，不重新推导。
 - workspace 版本 `0.1.0` → `0.9.25`，与 CHANGELOG 对齐；删掉名不副实的
   `APP_VERSION = "1.2.0"`（从未被引用过）。
-- 新增 `scripts/package.sh`：产出 `dist/MiniDock-<ver>-win64[-debug]/`
+- 新增 `scripts/package.sh`：产出 `dist/NookSill-<ver>-win64[-debug]/`
   （exe + LICENSE + README）；`--pdb` 才带调试符号（debug 的 PDB 有 200 MB 量级）。
   `./scripts/build.sh --version` 打印本次构建钉住的版本。
 - 新增 `.github/workflows/build.yml` 三段式：`gate`（每次 push / PR）、
@@ -174,7 +191,7 @@ Dock 栏图标 + 控制中心图标）。
 - **烟雾字段缓冲写越界**。`SmokeShader::raster` 的缓冲只在首帧创建，而网格
   按栏体宽度重新分档（256×128 → 384×128）后 `write_buffer` 越界报错。改为
   容量不足即重建。这个 bug 原本被上面的崩溃挡在后面。
-- 验证：`MINIDOCK_DEBUG_OPEN=launchpad` 与「设置窗口 + 起动台同开」各跑
+- 验证：`NOOKSILL_DEBUG_OPEN=launchpad` 与「设置窗口 + 起动台同开」各跑
   12 秒无 panic（改前必崩）。
 
 ## 0.9.22 — 同步上游 1.7.x 的三处行为（2026-11-06）
@@ -337,7 +354,7 @@ pub unsafe fn GetArguments(&self, pszargs: &mut [u16]) -> Result<()>
 ### 文档
 
 `BUILD.md` 的依赖表与产物表还停在 M0（列着已删除的 `crossbeam-channel` /
-`arc-swap` / `raw-window-handle`、`minidock-spike.exe` / `MiniDock.exe`），
+`arc-swap` / `raw-window-handle`、`nooksill-spike.exe` / `NookSill.exe`），
 `README.md` 的启动命令指向已删除的 spike、hooks 配置命令少一个空格，
 `ARCHITECTURE.md` 第六节仍写着 `ArcSwap` + GPU compute 模糊。全部对齐实现
 （`ARCHITECTURE.md` 顺带按 `.gitattributes` 的 `eol=lf` 规范回 LF）。
@@ -355,7 +372,7 @@ pub unsafe fn GetArguments(&self, pszargs: &mut [u16]) -> Result<()>
 - egui-wgpu 的 `textures_delta` 顺序核对后**不改**：官方 `winit.rs` 同样是
   先 `set` 上传、在 submit 之后才 `free`，与 `frame.rs` 一致。
 - 顺手修 `scripts/build.sh --exe`：它还打印着 ADR-035 已删除的
-  `MiniDock.exe`，改成 `minidock-dock.exe`。
+  `NookSill.exe`，改成 `nooksill-dock.exe`。
 - **未验证**：Dock 整体（透明窗口、命中、出帧）本轮没有真机运行；这轮改动
   只覆盖纯逻辑、快捷方式解析与取图标路径。
 
@@ -413,12 +430,12 @@ pub unsafe fn GetArguments(&self, pszargs: &mut [u16]) -> Result<()>
    `next_smoke`，等待循环算出来 `left=0` → `timeout = 1 ms` → 主循环在收起
    状态下按 ~1000 Hz 空转。这条比出帧更费 CPU，而且看不出来。
 
-实测（`MINIDOCK_FPS=1`，自动隐藏 + 光标移开）：收起后 8 秒内日志里没有
+实测（`NOOKSILL_FPS=1`，自动隐藏 + 光标移开）：收起后 8 秒内日志里没有
 任何 `[fps]` 行 = 0 帧；进程 CPU 0.26% 单核（只剩 100 ms 一次的光标轮询）。
 
 ### 顺带
 
-- 新增 `MINIDOCK_FPS=1`：每秒打一行 `[fps] N 帧/秒（hidden=… anim=…）`。
+- 新增 `NOOKSILL_FPS=1`：每秒打一行 `[fps] N 帧/秒（hidden=… anim=…）`。
   "空闲 0 帧"这个承诺从此可以验收，不必靠读代码相信。
 - 顺手验证了上一轮的遮挡矩形：最大化 Edge 覆盖停靠带时日志给出
   `covered=true by "…Edge Beta"`，点名正确。
@@ -476,7 +493,7 @@ release 是 GUI 子系统（实测 `Subsystem=2`），debug 保留控制台看 p
 
 ### 实现
 
-- `frost::Live`：面板可见期间起一条 `minidock-frost` 线程，按 100 ms 节拍
+- `frost::Live`：面板可见期间起一条 `nooksill-frost` 线程，按 100 ms 节拍
   抓屏 → 与上一帧逐字节比较 → 变了才模糊并回传。UI 线程在每次出帧前
   `poll_frost()` 取最新一帧，`TextureHandle::set` 原地改写纹理（不是每帧
   重建一张）。
@@ -514,7 +531,7 @@ release 是 GUI 子系统（实测 `Subsystem=2`），debug 保留控制台看 p
 ### 测试
 
 `frost` 9 条：新增「可分离 == 朴素二维卷积」「只算四角的 alpha == 整幅扫描」
-「非方图不会把横竖搞混」，其余沿用。另加 `MINIDOCK_FROST_TRACE=1`：
+「非方图不会把横竖搞混」，其余沿用。另加 `NOOKSILL_FROST_TRACE=1`：
 每帧打一行尺寸 / 平均色 / 变化像素数 / 耗时 —— 背后放一个闪色窗口即可
 确认"确实在实时重抓、且没有抓到面板自己"。
 
@@ -642,7 +659,7 @@ docs.rs 0.37 文档与本地 epaint/egui 源码验证每项是否真有收益。
 
 ### 重构
 
-- 新建 `minidock_settings::text_field` —— 所有 rs 输入框共用一个控件：
+- 新建 `nooksill_settings::text_field` —— 所有 rs 输入框共用一个控件：
   外壳（12px 圆角 / field 底色 / 主题色 2px 焦点光晕）、放大镜图标、
   快捷键提示、有内容时的 × 清除按钮、整框可点聚焦、焦点收起 hint、
   官方 `align(Align2::LEFT_CENTER)` 垂直居中。`FieldOpts` / `FieldIcon`
@@ -674,7 +691,7 @@ kittest：清除按钮清空字符串、空内容时无清除按钮；纯函数�
   `?accent=RRGGBB` 深链 + 外观页「主题色」卡（来源下拉 / 取色器 /
   同步到 Dock 开关）实时改色。
 - **补上雏形缺的设置项**：常规页「界面缩放」下拉、外观页「主题色」卡、
-  常规页「关于」卡（展示 `assets/minidock.ico` 应用图标资产）。
+  常规页「关于」卡（展示 `assets/nooksill.ico` 应用图标资产）。
 - 控件圆角与 Rust 对齐（10 / 12 / 18 / 22），`--r-pill` 不再用于搜索框；
   修正过时的头部注释（宽度已写死，没有 `fitWindow()`）与 caption。
 - 深链新增 `?focus`；磁吸表加入 `.close-btn`。
@@ -696,7 +713,7 @@ kittest：清除按钮清空字符串、空内容时无清除按钮；纯函数�
   白底，TextEdit 用 `Frame::NONE` 只负责输入；放大镜与 `Ctrl K` 提示
   自绘，整块外壳可点聚焦；焦点且未输入时收起 hint（无框内边距为 0，
   否则光标压在第一个字上）。
-- **MiniDock 品牌对齐导航栏**：`NAV_W` 提到 settings crate 根公开，
+- **NookSill 品牌对齐导航栏**：`NAV_W` 提到 settings crate 根公开，
   顶栏品牌区占同宽一格并 `centered_and_justified` 居中。实测文字中心
   116.0、导航栏中心 114.5。
 - **关闭按钮改成绘制的 × 图标**：28×28 自绘控件，常态主题色、悬停
@@ -722,9 +739,9 @@ kittest：清除按钮清空字符串、空内容时无清除按钮；纯函数�
   `Context::set_visuals`（后者每帧标脏 = 每帧重绘，破坏空闲不提交）。
 - **元素优化**：按钮 / 开关 / 下拉 / 输入框圆角统一到 10（浮层 12），
   与 18px 卡片不再是两套设计；选中态不再二次淡化（之前淡到几乎看不见）。
-- **exe 应用图标**：`assets/minidock.ico` 多尺寸（16…256，内嵌 PNG，
+- **exe 应用图标**：`assets/nooksill.ico` 多尺寸（16…256，内嵌 PNG，
   深色 Dock 胶囊 + 四个彩色图标点），`build.rs` + `winresource` 把资源
-  编进 `minidock-dock.exe` 的 ID 1；主窗口、菜单窗口、设置窗口的
+  编进 `nooksill-dock.exe` 的 ID 1；主窗口、菜单窗口、设置窗口的
   `WNDCLASSW.hIcon` 都挂上它。没装 Windows SDK / 找不到 rc.exe 时
   只警告，不影响构建与运行。
 - `settings_shot` 支持 `accent=RRGGBB`，离屏核对任意主题色。
@@ -746,12 +763,12 @@ exe 内检出 7 张图标 PNG（资源嵌入成功）。
 - 引入 [`glass-backdrop`](https://github.com/MCheng404/glass-backdrop-rs)
   （固定 rev `747457c`）。只取三样：**GDI 桌面捕获**、与 WGSL 同源的
   **高斯权重模型**、**圆角 SDF**。
-- 新增 `minidock-gpu::frost`：开窗前抓一次窗口背后的桌面 → CPU 可分离高斯
+- 新增 `nooksill-gpu::frost`：开窗前抓一次窗口背后的桌面 → CPU 可分离高斯
   （25% 分辨率）→ 圆角 alpha 遮罩 → `egui::TextureHandle`，由
   `FrameRenderer` 画在 UI 最底层。
 - 三处面板底色从 246/250 的不透明降到 140/255 的半透明 tint，让模糊的桌面
   透上来；捕获失败自动退回原底色。
-- 设置窗口新增 `MINIDOCK_DEBUG_OPEN=settings`，无人值守验收不用再猜点击坐标。
+- 设置窗口新增 `NOOKSILL_DEBUG_OPEN=settings`，无人值守验收不用再猜点击坐标。
 
 ### 为什么不用上游的 SPIR-V / liquid-glass
 
@@ -878,7 +895,7 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 - **右键「移动到标签组…」**：二级菜单选组，当前组标「（当前）」，
   还能「自动分类（清除）」退回启发式。
 - **A–Z 按钮**：按名字重排顶层格子（大小写不敏感，存回 dat；之后再拖拽仍可改）。
-- 诊断探针 `cargo run -p minidock-core --example lp_dump -- <launchpad.dat>`。
+- 诊断探针 `cargo run -p nooksill-core --example lp_dump -- <launchpad.dat>`。
 
 ### 修复（两个都是本轮自己写出来的）
 
@@ -895,8 +912,8 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 
 ### 新增
 
-- **内置条目图标**（`minidock-gpu::glyph`）：`mdock:start` 画四格窗、
-  `mdock:launchpad` 画九宫格点阵。全部用 `painter` 现画 —— 不用 emoji
+- **内置条目图标**（`nooksill-gpu::glyph`）：`nooksill:start` 画四格窗、
+  `nooksill:launchpad` 画九宫格点阵。全部用 `painter` 现画 —— 不用 emoji
   （字体缺字就是豆腐块），也不用渐变（纯平基调）。此前这两个条目会去取
   shell 图标，取不到就拿"首字占位"，Dock 上于是立着一块写着「起」的方块。
 - **控制中心小组件卡片**：补上滑杆图标。条带一直给它留着 0.72·栏高 的宽度，
@@ -906,8 +923,8 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 
 ### 修复
 
-- **点「起动台」条目没反应**：`mdock:launchpad` 被当成普通文件交给
-  `ShellExecute`，必然失败。现在走内置动作，直接开起动台；`mdock:start`
+- **点「起动台」条目没反应**：`nooksill:launchpad` 被当成普通文件交给
+  `ShellExecute`，必然失败。现在走内置动作，直接开起动台；`nooksill:start`
   同理（按一下 Win 键）。
 - 起动台方向键分支一度把 Esc 吞掉（`match` 里写了 `_ => return None`），
   已改成 if 链，Esc 逐层后退的行为恢复。
@@ -944,7 +961,7 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 
 ### 新增
 
-- `minidock-gpu::popup`：全局按键轮询（`Watcher`）＋窗口矩形命中。
+- `nooksill-gpu::popup`：全局按键轮询（`Watcher`）＋窗口矩形命中。
 - `[widgets] PanelDismiss`：0/1，默认 1。设置界面「附件 → 小组件」里有开关。
 
 ### 修复
@@ -972,7 +989,7 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 ### 界面（照雏形逐项移植）
 
 - **窗口 893 × 720**（导航栏 193 + 内容区 700），`LOGICAL_SIZE` 更新。
-- **顶栏三栏**：左 `MiniDock`（20px，去掉「设置」二字）；中搜索框
+- **顶栏三栏**：左 `NookSill`（20px，去掉「设置」二字）；中搜索框
   （**几何居中** —— 三栏各自绝对定位，不靠 flex margin，否则会跟着左边
   文字宽度偏）；右「状态文本 + 关闭」。底部状态条删掉了，
   "已保存"等反馈挪到顶栏右栏。
@@ -1046,7 +1063,7 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 - **`FrameRenderer::render_rgba`**：画完不呈现，直接把预乘 BGRA 返回。
   `render` 改成它的薄包装，两者共用同一段绘制。
 - **`examples/settings_shot.rs`**：把任意一页离屏渲染成 BMP
-  （`cargo run -p minidock-gpu --example settings_shot -- 出图.bmp 外观 dark`）。
+  （`cargo run -p nooksill-gpu --example settings_shot -- 出图.bmp 外观 dark`）。
   走的是与真实窗口完全相同的 `FrameRenderer` + `settings_win::shell`，
   所以截出来的就是用户会看到的那一帧。
 
@@ -1073,7 +1090,7 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 
 ### 布局契约（kittest）
 
-截图要 wgpu，而 `minidock-settings` 刻意不依赖 wgpu。所以"画在哪"用矩形
+截图要 wgpu，而 `nooksill-settings` 刻意不依赖 wgpu。所以"画在哪"用矩形
 断言守：导航项在内容区左侧且整行可点、有标题栏时两列不越界、说明文字排在
 标题下方、开关与下拉的右边缘对齐。这四条比截图更适合 CI —— 它们不挑机器，
 也不会因为字体微调而误报。
@@ -1110,8 +1127,8 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
   上限 16 个。临时条目名取 shell 显示名（"Google Chrome"）。
 - `core::running::temp_keys` 纯逻辑 + 5 条测试；`app_window` 加
   `in_front` / `unobstructed` / `Activation` 枚举。
-- 探针：`cargo run -p minidock-platform --example activate_probe -- notepad.exe`。
-- 诊断：`MINIDOCK_LAUNCH_TRACE=1` 打印每次点击的落点（激活/启动）与结果。
+- 探针：`cargo run -p nooksill-platform --example activate_probe -- notepad.exe`。
+- 诊断：`NOOKSILL_LAUNCH_TRACE=1` 打印每次点击的落点（激活/启动）与结果。
 - 扫描按需：`ScanInput::want_running`，指示点全关时不再每 1.2 秒枚举窗口。
 
 ### 测试
@@ -1128,13 +1145,13 @@ core 新增 8 条（id 往返、脏数据跳过、序列化往返、按序排列
 
 ### 新增
 
-- `minidock-core::smoke`：可平铺的域扭曲 FBM 噪声、Stam 稳定流体
+- `nooksill-core::smoke`：可平铺的域扭曲 FBM 噪声、Stam 稳定流体
   （浮力 / 涡量约束 / 压力投影 / 位移场）、网格 → 预乘 RGBA 光栅化。
-- `minidock-gpu::smoke`：按真实帧间隔驱动模拟、上传纹理、画在栏体之下；
+- `nooksill-gpu::smoke`：按真实帧间隔驱动模拟、上传纹理、画在栏体之下；
   另有一层"上升的小烟团"粒子。
 - `[effect.smoke]` 段十一个键（CONFIG.md 第三节），设置界面新增「效果」页。
-- 诊断：`MINIDOCK_SMOKE_TRACE=1` 打印网格 / 位图 / 最大 alpha / 栏体矩形。
-- `cargo run -p minidock-core --example smoke_dump` 把一帧合成到深色背景上
+- 诊断：`NOOKSILL_SMOKE_TRACE=1` 打印网格 / 位图 / 最大 alpha / 栏体矩形。
+- `cargo run -p nooksill-core --example smoke_dump` 把一帧合成到深色背景上
   写成 BMP —— 调参不用起 Dock。
 
 ### 与原版的偏离
@@ -1258,7 +1275,7 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 诊断
 
-- `MINIDOCK_LP_TRACE=1`：打印起动台的右键命中与菜单项执行。
+- `NOOKSILL_LP_TRACE=1`：打印起动台的右键命中与菜单项执行。
 
 ## 0.8.0 — 控制中心与起动台（ADR-042 / ADR-043，2026-11-02）
 
@@ -1310,7 +1327,7 @@ v1.6.5 里落在条带模型上的三件事。
   - `CalendarState`：翻页 / 选中 / 42 格网格，全部可单测。
 - **`gpu::calendar_win`：弹层**（392×480 逻辑像素）。点时钟卡片打开，
   再点一次或点外面关闭；摆在卡片旁边，按停靠边决定方向并夹进显示器。
-- **`MINIDOCK_GEOM=1` 之外新增 `examples/calendar`**：命令行打印某月的网格
+- **`NOOKSILL_GEOM=1` 之外新增 `examples/calendar`**：命令行打印某月的网格
   与固定点，用来人工核对算法。
 
 ### 验证
@@ -1373,7 +1390,7 @@ v1.6.5 里落在条带模型上的三件事。
 - **`platform::sysinfo`**：CPU 占用率（`GetSystemTimes` 差值）、
   内存占用（`GlobalMemoryStatusEx`）、磁盘占用（`GetDiskFreeSpaceExW`）。
 - **按秒采样、数值变了才出帧** —— 不是每帧调系统 API。
-- **`MINIDOCK_GEOM=1` 新增一行** `GEOM widget=... screen=(x,y) size=(w,h)`，
+- **`NOOKSILL_GEOM=1` 新增一行** `GEOM widget=... screen=(x,y) size=(w,h)`，
   报小组件卡片的屏幕坐标，自动化脚本照着点。
 
 ### 缺陷修复
@@ -1435,7 +1452,7 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 新增
 
-- **`minidock-gpu::worker`：四个后台线程**，各自一条 `std::sync::mpsc` 通道。
+- **`nooksill-gpu::worker`：四个后台线程**，各自一条 `std::sync::mpsc` 通道。
 
   | 线程 | 接管的阻塞调用 | 原来压在 UI 线程上的频率 |
   |---|---|---|
@@ -1495,7 +1512,7 @@ v1.6.5 里落在条带模型上的三件事。
   拆分前插入新功能只能按 `②.52` / `②.535` 这类编号找位置，而编号本身
   已经重复（两个 `②.1`、两个 `②.4`）—— 这是"还在长"的代码最典型的症状。
   `main` 现在 12 行，`run` 44 行，每一步单独可读。
-- **调试开关收进 `trace` 模块**：原先 16 处 `std::env::var_os("MINIDOCK_GEOM")`
+- **调试开关收进 `trace` 模块**：原先 16 处 `std::env::var_os("NOOKSILL_GEOM")`
   散在主循环里，每帧各锁一次进程环境块再线性扫描一遍。现在启动时读一次
   并缓存；16 份重复的魔法字符串也只剩一份，拼错会立刻编译失败。
 - **`RawInput` 构造合并**：Dock 与菜单原先各写一遍同样的
@@ -1532,17 +1549,17 @@ v1.6.5 里落在条带模型上的三件事。
 ### 新增
 
 - **Dock 进程内的设置窗口**（`gpu::settings_win`）：右键菜单新增「Dock 设置」，
-  打开一个独立 HWND 的分层窗口，渲染 `minidock-settings` 的 9 页 UI。
+  打开一个独立 HWND 的分层窗口，渲染 `nooksill-settings` 的 9 页 UI。
   同一份 `Config` 被两边共用，改一个滑块下一帧就在栏体上生效，没有 IPC、没有复制。
 - **非模态**：不像菜单那样抢走消息循环，可以一边调参数一边看栏体的变化。
 - **配置自动落盘**：改动后 400 ms 防抖写回 ini（拖滑块不会逐帧重写文件），
   写之前重新读一遍以保住 `[Items]` 段。
 - **停靠边 / 预留 / 隐藏模式变化会重挂**：重新注册 AppBar 并按新边重算窗口位置，
   尺寸变化走已有的热更新路径（ADR-033）。
-- **开机自启动开关**（命令 `ToggleAutostart`）读写 `HKCU\...\Run\MiniDock`；
+- **开机自启动开关**（命令 `ToggleAutostart`）读写 `HKCU\...\Run\NookSill`；
   显示的是注册表真值，不是缓存的配置。
 - **推荐设置 / 低占用**两组预设，以及"在这一页加分割线 / 回收站"入口。
-- `MINIDOCK_SETTINGS_TRACE=1`：打印设置窗口的窗口消息流与交给 egui 的输入事件
+- `NOOKSILL_SETTINGS_TRACE=1`：打印设置窗口的窗口消息流与交给 egui 的输入事件
   （调试本次接线时的主要手段）。
 
 ### 缺陷修复
@@ -1561,16 +1578,16 @@ v1.6.5 里落在条带模型上的三件事。
 
 ## 0.2.1 — 删除 GDI+ 老实现（2026-10-30）
 
-`minidock` / `minidock-gfx` / `minidock-ui` 三个 crate 删除，共 **2000 行**
+`nooksill` / `nooksill-gfx` / `nooksill-ui` 三个 crate 删除，共 **2000 行**
 （占当时总代码 12%）。workspace 从 7 个 crate 减到 4 个。
 
 ### 删除
 
 | 路径 | 行数 | 内容 |
 |---|---|---|
-| `crates/minidock` | 83 | 老的 bin 入口（`MiniDock.exe`） |
-| `crates/minidock-gfx` | 969 | GDI+ 封装（canvas / objects / 字体） |
-| `crates/minidock-ui` | 948 | GDI+ 版 Dock 骨架 |
+| `crates/nooksill` | 83 | 老的 bin 入口（`NookSill.exe`） |
+| `crates/nooksill-gfx` | 969 | GDI+ 封装（canvas / objects / 字体） |
+| `crates/nooksill-ui` | 948 | GDI+ 版 Dock 骨架 |
 
 它们是 M0 之前的一次移植尝试，**从来不是行为基准**（基准一直是上游 C 版
 源码）。ADR-010 当初留作 fallback，现在 wgpu 路线已跑通、两份实现开始漂移
@@ -1579,7 +1596,7 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 可见变化
 
-- **可执行文件名只剩 `minidock-dock.exe`**（原来的 `MiniDock.exe` 一并删除）。
+- **可执行文件名只剩 `nooksill-dock.exe`**（原来的 `NookSill.exe` 一并删除）。
 - `Cargo.lock` 清理干净，`cargo build --workspace` 少编三个 crate。
 
 ### 未做
@@ -1587,7 +1604,7 @@ v1.6.5 里落在条带模型上的三件事。
 - 不留 `--features legacy-gdi` 开关：会让"删干净"永远差一步，
   CI 与测试都要为不存在的路径付成本。
 - 不另开 `archive/` 分支：git 历史里有，需要时
-  `git checkout <sha> -- crates/minidock-ui` 就能取回。
+  `git checkout <sha> -- crates/nooksill-ui` 就能取回。
 
 质量门禁：197 条测试（与删除前一致）、`clippy -D warnings`、`fmt --check`
 全绿；启动实测 3 个真实图标正常渲染。
@@ -1688,7 +1705,7 @@ v1.6.5 里落在条带模型上的三件事。
 ### 新增
 
 - **右键菜单**（ADR-032）。独立分层窗口 + 模态 `SetCapture`，
-  不抢焦点。`minidock-gpu::menu` 负责项模型、布局与绘制（纯逻辑，15 条测试）；
+  不抢焦点。`nooksill-gpu::menu` 负责项模型、布局与绘制（纯逻辑，15 条测试）；
   `bin/dock.rs` 负责建窗、模态循环与命令执行。
 - 菜单项按条目类型生成：普通条目「打开 / 显示·最小化」、
   文件夹「在资源管理器中打开」、运行中的应用「退出应用」、
@@ -1697,7 +1714,7 @@ v1.6.5 里落在条带模型上的三件事。
   与 wgpu 管线。菜单每次打开的高度都不同，没有它就得每次重编管线。
 - `launch::open_folder()`：右键「在资源管理器中打开」用，
   与 `launch()` 分开——后者会把给应用用的参数一起传给 explorer。
-- `MINIDOCK_MENU_TRACE=1`：打印菜单窗口收到的每条消息，
+- `NOOKSILL_MENU_TRACE=1`：打印菜单窗口收到的每条消息，
   排查"点了没反应"用。
 
 ### 实测
@@ -1750,7 +1767,7 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 诊断
 
-- `MINIDOCK_FS_TRACE=1` 打印全屏判定依据（前台类名 / 矩形 / 显示器 /
+- `NOOKSILL_FS_TRACE=1` 打印全屏判定依据（前台类名 / 矩形 / 显示器 /
   是否有标题栏），与真实判定共用 `check_fullscreen()`，不会出现
   "诊断说该隐藏、实际没隐藏"的错位。
 
@@ -1816,7 +1833,7 @@ v1.6.5 里落在条带模型上的三件事。
   实测左侧停靠窗口 `356×724`、栏体竖直、图标纵向排列。
 - `Dock.mode` 取代原来的 `auto_hide: bool`：两个 bool 会组合出
   "`auto_hide=false` 却 `smart=true`"这种不存在的状态。
-- 遮挡判定可点名盖住者：`MINIDOCK_GEOM=1` 时打印
+- 遮挡判定可点名盖住者：`NOOKSILL_GEOM=1` 时打印
   `[hide] ... by "窗口标题"`，排查"为什么突然躲起来"不用靠猜。
 
 ### 已知缺口
@@ -1826,7 +1843,7 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 诊断工具
 
-- `cargo run -q -p minidock-core --example read_ini -- <ini 路径>`：
+- `cargo run -q -p nooksill-core --example read_ini -- <ini 路径>`：
   同时打印解析后的枚举值与 ini 里的**原样字符串**，用于区分
   "配置没读到"（raw=None）与"读了但认不出"（raw=Some 但解析值是默认）。
   这轮靠它在 5 分钟内定位了一次「ini 被整份覆盖回默认值」的假 bug。
@@ -1929,11 +1946,11 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 验证
 
-- 悬停：注入 `MINIDOCK_FAKE_MOUSE="302,134"`，放大的是第一个图标
+- 悬停：注入 `NOOKSILL_FAKE_MOUSE="302,134"`，放大的是第一个图标
   （记事本），气泡文字一致。
 - 点击：向窗口投递 `WM_LBUTTONDOWN/UP`（`Dock` 单实例后只有一个窗口），
   日志 `[click] 第 1 项`，随后目标命令写出了标记文件。
-- 启动层：`cargo test -p minidock-platform --lib launch -- --ignored`
+- 启动层：`cargo test -p nooksill-platform --lib launch -- --ignored`
   真的启动一次 `cmd /c echo ok > 文件`，断言文件内容。
 
 质量门禁：128 条测试、`clippy -D warnings`、`fmt --check` 全绿。
@@ -2002,7 +2019,7 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### 去重
 
-- **新增 `minidock-gpu/src/frame.rs`**：把"egui → 离屏纹理 → 回读 → 分层
+- **新增 `nooksill-gpu/src/frame.rs`**：把"egui → 离屏纹理 → 回读 → 分层
   窗口"的提交路径抽成 `FrameRenderer`。`overlay.rs`（设置窗口）与
   `bin/dock.rs`（Dock 窗口）原先各写了一遍、逐行相同，任何 wgpu/egui 的
   API 变动都要改两处。`overlay.rs` 662 → 531 行，`bin/dock.rs` 350 → 300 行。
@@ -2025,19 +2042,19 @@ v1.6.5 里落在条带模型上的三件事。
   算进逻辑宽度，但布局没减掉它，导致栏体 + 时钟卡片整体偏右、右端被裁。
   现在两版都传 `clock_extra` 给 `base_centers` / `place_slots`。
 - **单实例互斥体名没走常量**：`single_instance.rs` 硬编码了
-  `"Local\\MiniDock_Wangcy_Singleton"`，旁边那句"编译期对齐检查"其实只断言了
+  `"Local\\NookSill_Wangcy_Singleton"`，旁边那句"编译期对齐检查"其实只断言了
   非空。改 `SINGLETON_MUTEX` 不会生效。现在真的用常量构造名字。
 - `Key::range()` 去掉 `_ => (0, 1)` 兜底：新增键忘了给值域时会得到编译错误，
   而不是静默落进布尔域。
-- `minidock/src/main.rs` 启动日志里有两个写死的 `0`（占位残留），改为打印
+- `nooksill/src/main.rs` 启动日志里有两个写死的 `0`（占位残留），改为打印
   配置目录。
 
 ### 清理
 
 - 删除死代码：`overlay.rs` 的 `PANEL_INSET` / `Layout::panel_rect` /
   `pixels_per_point()` / `layout_panel()`，`platform::theme::read_hkcu_dword`。
-- 删除未使用的 `bytemuck` 依赖；`minidock-gpu` 的三个 `[[bin]]` 改为显式声明。
-  顺带修了一个不一致：文档一直写 `minidock-dock`，但自动发现产出的其实叫
+- 删除未使用的 `bytemuck` 依赖；`nooksill-gpu` 的三个 `[[bin]]` 改为显式声明。
+  顺带修了一个不一致：文档一直写 `nooksill-dock`，但自动发现产出的其实叫
   `dock.exe`，按文档里的命令跑会找不到文件。
 - `present.rs` 的 `swap_rb_throughput` 标 `#[ignore]`：它搬 114 MB 只为打印
   数字，是 benchmark 不是测试，不该拖慢每次 `cargo test`。
@@ -2059,15 +2076,15 @@ v1.6.5 里落在条带模型上的三件事。
 
 7 个 crate，依赖方向单向：`gpu → settings → core`、`gpu → platform`。
 
-- `minidock-core`：配置模型（76 键 + 夹紧）、INI 编解码（UTF-16LE/BE/UTF-8）、
+- `nooksill-core`：配置模型（76 键 + 夹紧）、INI 编解码（UTF-16LE/BE/UTF-8）、
   条目与分组序列化、布局数学、DPI 换算。**无 Win32 依赖**，48 条单测。
-- `minidock-platform`：路径（便携模式 + 迁移）、显示器枚举、系统深浅色、
+- `nooksill-platform`：路径（便携模式 + 迁移）、显示器枚举、系统深浅色、
   开机自启动、单实例互斥。含真机测试（显示器枚举）。
-- `minidock-settings`：egui 9 页设置界面，纯 UI 无副作用，产出 `Command`。
+- `nooksill-settings`：egui 9 页设置界面，纯 UI 无副作用，产出 `Command`。
   5 条 kittest 无头测试（点击开关、页签切换、派生键映射、命令产出、全页渲染）。
-- `minidock-gpu`：wgpu 设备/表面、egui 提交、Win32 输入映射、
-  `WM_NCHITTEST` 命中、消息循环。含 `minidock-spike` 可执行。
-- `minidock-gfx` / `minidock-ui` / `minidock`：GDI+ 遗留实现，作行为参照（ADR-010）。
+- `nooksill-gpu`：wgpu 设备/表面、egui 提交、Win32 输入映射、
+  `WM_NCHITTEST` 命中、消息循环。含 `nooksill-spike` 可执行。
+- `nooksill-gfx` / `nooksill-ui` / `nooksill`：GDI+ 遗留实现，作行为参照（ADR-010）。
 
 ### 关键实现决策
 
@@ -2120,10 +2137,10 @@ v1.6.5 里落在条带模型上的三件事。
 
 ### M1 第一批：Dock 本体（同日）
 
-- 新增 `minidock-gpu/src/dock.rs`：Dock 布局状态机 + egui 绘制。
+- 新增 `nooksill-gpu/src/dock.rs`：Dock 布局状态机 + egui 绘制。
   几何逐条照抄 C 版 v1.4.0 的 `Paint()`：栏体、时钟卡片、分割线、图标占位、
   运行指示点、悬停气泡、悬停放大。
-- 新增可执行文件 `minidock-dock`：真实 Dock 形态的窗口（不是设置窗），
+- 新增可执行文件 `nooksill-dock`：真实 Dock 形态的窗口（不是设置窗），
   复用 M0 的离屏 + 分层窗口管线。Esc 退出。
 - **修正命中语义**（ADR-018）：从"最近"改为 C 版的"从左到右第一个"；
   新增 `map_actual_to_base`，放大权重改用基准位置。
@@ -2148,7 +2165,7 @@ v1.6.5 里落在条带模型上的三件事。
   `ReflSize`/`ReflGap` 决定；时钟卡片宽度改由
   `ClockShow`/`ClockSec`/`DateFmt`/`ClockWeek` 算出（横向 74/92/110/124/146/166）。
 - 设置界面补上 20 个与渲染相关的新键（外观 / 图标 / 交互 / 附件 / 性能页）。
-- 新增 `cargo run -p minidock-core --example config_table`：
+- 新增 `cargo run -p nooksill-core --example config_table`：
   由代码生成 `CONFIG.md` 的键表，杜绝文档与实现漂移。
 - 新增 4 条测试：键名逐个对照上游、顺序与总数、具名常量与表行对齐、数值键默认值。
 
@@ -2161,7 +2178,7 @@ v1.6.5 里落在条带模型上的三件事。
 - **接入单实例**（ADR-015）。之前没接，双击两次会叠两个分层窗口，
   外部看着像"空闲占 8% CPU"，实际是两份在跑。
 - **回读位图按 u32 交换 R/B**（ADR-016），实测 1.16 → 0.80 ms/帧（1.45x）。
-- 新增 `MINIDOCK_TRACE=1`：每秒打印帧数、hover 位置、egui 的重绘原因，
+- 新增 `NOOKSILL_TRACE=1`：每秒打印帧数、hover 位置、egui 的重绘原因，
   专门用来查"空闲还在重绘"这类问题。
 
 ### 内存调优（同日）
@@ -2182,7 +2199,7 @@ v1.6.5 里落在条带模型上的三件事。
 - `Config.adapter`：`[Graphics] Adapter`，空 = 自动。存**名字**不存索引
   （索引随驱动/插拔变化），写入前过 `sanitize_adapter`（去空白、剔控制字符、
   限长 128）。5 条单测覆盖默认、往返、清洗、自动往返。
-- `minidock-platform::gpu`：DXGI 枚举适配器（名字 / 厂商 / 显存 / 类型），
+- `nooksill-platform::gpu`：DXGI 枚举适配器（名字 / 厂商 / 显存 / 类型），
   按 `(vendor, device_id, name)` 去重并按独显→核显→其它→软件排序。3 条单测。
 - `Gpu::new(wanted)`：空 = 自动（`PowerPreference::LowPower`）；非空按名字匹配
   （精确忽略大小写 → 互相包含），**匹配不到回退自动**并把候选写进日志与界面提示。
@@ -2196,7 +2213,7 @@ v1.6.5 里落在条带模型上的三件事。
 - Dock 本体未迁移（M1）。
 - 设置窗口目前不透明（设计如此，ADR-009）。
 - 输入未覆盖 IME、拖拽、`WM_MOUSELEAVE`。
-- `minidock-gpu` debug 产物 43 MB；release **7.2 MB**。
+- `nooksill-gpu` debug 产物 43 MB；release **7.2 MB**。
 - 常驻内存 271 MB；同卡空设备基线 dx12 164 MB / vulkan 103 MB / d3d11 34 MB
   （AMD 610M）。ADR-001 复核已执行完毕，结论见 ADR-011（已否决）/ ADR-012。
 - 首帧与稳态画面不同（首帧字体/布局尚未稳定），截图核对必须等第二帧之后。

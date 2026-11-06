@@ -1,6 +1,6 @@
-# MiniDock-rs
+# NookSill
 
-[![build](https://github.com/MCheng404/MiniDock-Rust/actions/workflows/build.yml/badge.svg)](https://github.com/MCheng404/MiniDock-Rust/actions/workflows/build.yml)
+[![build](https://github.com/MCheng404/NookSill-Rust/actions/workflows/build.yml/badge.svg)](https://github.com/MCheng404/NookSill-Rust/actions/workflows/build.yml)
 
 Rust Rewrite of Windows Desktop Dock: GPU Rendering (wgpu / D3D12) + CPU Multi-threaded Pipeline
 UI Logic Decoupled from Rendering Backend, Settings Interface Can Be Headless Driven by Kittest
@@ -12,7 +12,7 @@ Conclusion: **Three Are Valid, One Is Disproven**.
 |---|---|
 | D3D12 Device Available, egui Frame Output | ✅ `Dx12 / AMD Radeon 610M / Bgra8UnormSrgb` |
 | egui Chinese Interface Drawn Normally | ✅ 9 Tabs, Check Boxes, Drop-down Boxes All Correct |
-| Settings Interface Can Be Headless Tested | ✅ `cargo test -p minidock-settings` 5/5 |
+| Settings Interface Can Be Headless Tested | ✅ `cargo test -p nooksill-settings` 5/5 |
 | Window Transparency (Per-pixel Alpha) | ✅ Off-screen Rendering + `UpdateLayeredWindow` (Swap Chain Scheme Disproven) |
 | Per-pixel Hit | ✅ Layered Window Judged by Alpha |
 | Graphics Card Selection (Default Automatic) | ✅ `[Graphics] Adapter`, Matched by Name, Fallback on Mismatch |
@@ -26,13 +26,13 @@ cargo build                    # Default Target: x86_64-pc-windows-msvc
 cargo test  --workspace        # Logic Layer + Settings Interface (No Need for Monitor / GPU)
 ./scripts/build.sh --gate      # Full Gate Check: fmt + clippy + Test (Run This Before Submission)
 # Run the Dock (the only executable; the M0 spike was removed in ADR-036)
-./scripts/build.sh --run -p minidock-gpu --bin minidock-dock
+./scripts/build.sh --run -p nooksill-gpu --bin nooksill-dock
 # Memory Probe: Compare Each Backend on the Same Graphics Card (Table See Section 5 of BUILD.md)
 ./scripts/probe-mem.sh
 PROBE_LIST=1 ./target/x86_64-pc-windows-msvc/release/probe.exe   # First Check Adapter List
 ```
 **After Cloning, Do It Once** `git config core.hooksPath .githooks`, Otherwise the `fmt` / `clippy` Gate Check Before Submission Will Not Take Effect. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for Submission Information Format and Branch Convention.
-Artifacts: `./scripts/package.sh [--release]` → `dist/MiniDock-<version>-win64[-debug].exe` + `.sha256` (Plain Files, No Zip). Debug Builds Carry a Build Number and Commit (`X.Y.Z-<n>-<sha>`), Releases Are Stable (`X.Y.Z`); See Section 4 of [`BUILD.md`](BUILD.md).
+Artifacts: `./scripts/package.sh [--release]` → `dist/NookSill-<version>-win64[-debug].exe` + `.sha256` (Plain Files, No Zip). Debug Builds Carry a Build Number and Commit (`X.Y.Z-<n>-<sha>`), Releases Are Stable (`X.Y.Z`); See Section 4 of [`BUILD.md`](BUILD.md).
 Dependency Versions: `egui 0.37` / `egui-wgpu 0.37` / `wgpu 30` / `windows 0.62`, All Taking the Latest at Present.
 
 ## License

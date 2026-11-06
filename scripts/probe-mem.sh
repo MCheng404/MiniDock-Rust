@@ -17,7 +17,7 @@ source scripts/env.sh
 
 HOLD="${PROBE_HOLD:-8}"
 ADAPTERS="${PROBE_ADAPTERS:-AMD NVIDIA}"
-cargo build --release -p minidock-gpu --bin probe >/dev/null
+cargo build --release -p nooksill-gpu --bin probe >/dev/null
 BIN="target/x86_64-pc-windows-msvc/release/probe.exe"
 
 echo "采样窗口 ${HOLD}s / 单位 MB / 适配器组: ${ADAPTERS}"

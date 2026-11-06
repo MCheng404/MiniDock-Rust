@@ -1,0 +1,3163 @@
+//! M1 的 Dock 窗口：真实 Dock 形态（不是设置窗）。
+//!
+//! 复用 M0 的呈现管线（离屏渲染 → 回读 → `UpdateLayeredWindow`），
+//! 把画面换成 [`nooksill_gpu::dock::Dock`] 的绘制。管线本身在
+//! [`nooksill_gpu::frame::FrameRenderer`] 里，与设置窗口共用同一份实现。
+//!
+//! 用法：
+//!
+//! ```text
+//! cargo run --release -p nooksill-gpu --bin nooksill-dock
+//! ```
+//!
+//! 按 Esc 退出。鼠标移上去会触发悬停放大与标签气泡。
+
+// 双击 exe 不该弹出一个黑色控制台窗口：那是 console 子系统的默认行为。
+// 声明成 GUI 子系统后，从终端启动时仍然继承父进程的 stdout/stderr
+// （`eprintln!` 的诊断照常可见），双击启动时则不分配控制台。
+// debug 构建保留控制台：panic 与工作线程的日志得看得见。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::time::{Duration, Instant};
+
+use nooksill_core::clock;
+use nooksill_core::clock::ClockLine;
+use nooksill_core::config::{Config, DockMode, Edge, Key};
+use nooksill_core::ini::Ini;
+use nooksill_core::item::{Item, ItemKind};
+use nooksill_core::layout;
+use nooksill_core::layout::Rect as LRect;
+use nooksill_core::running;
+use nooksill_core::smoke::{Tuning, PALETTE};
+use nooksill_core::store;
+use nooksill_gpu::calendar_win::CalendarWindow;
+use nooksill_gpu::cc_win::CcWindow;
+use nooksill_gpu::dock::{Dock, DockItem};
+use nooksill_gpu::frame::FrameRenderer;
+use nooksill_gpu::frost::Spec as FrostSpec;
+use nooksill_gpu::gpu::Gpu;
+use nooksill_gpu::launchpad_win::LaunchpadWindow;
+use nooksill_gpu::menu::{Menu, MenuCmd};
+use nooksill_gpu::resmon_win::ResMonWindow;
+use nooksill_gpu::settings_win::{self, SettingsWindow};
+use nooksill_gpu::smoke::{SmokeFx, View as SmokeView};
+use nooksill_gpu::tool_win::ToolWindow;
+use nooksill_gpu::worker::{
+    DiskWriter, IconLoader, IconRequest, OpenJob, Opener, ScanInput, Scanner, Waker, WriteJob,
+    WM_APP_WAKE,
+};
+use nooksill_platform::app_window;
+use nooksill_platform::appbar::{self, AppBar};
+use nooksill_platform::display;
+use nooksill_platform::launch;
+use nooksill_platform::occlusion;
+use nooksill_platform::shortcut;
+use nooksill_platform::single_instance::SingleInstance;
+use nooksill_platform::sysact;
+use nooksill_platform::theme;
+use nooksill_platform::Paths;
+use nooksill_settings::{Command, SettingsState};
+use std::pin::Pin;
+use windows::core::w;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, UpdateWindow, PAINTSTRUCT};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetCapture, GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent,
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, TME_LEAVE, TRACKMOUSEEVENT, VK_SHIFT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
+    GetWindowRect, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match App::boot()? {
+        // `None` = 已有实例在跑。这是正常退出，不是错误。
+        None => Ok(()),
+        Some(mut app) => app.run(),
+    }
+}
+
+// ============================ 调试开关 ============================
+
+/// `NOOKSILL_*` 调试开关。**启动时读一次**，之后只读缓存。
+///
+/// 原先这些判断散在主循环里共 16 处 `std::env::var_os("NOOKSILL_GEOM")`，
+/// 每帧各锁一次进程环境块再线性扫描一遍字符串。60 fps 下是白花的开销，
+/// 而且 16 份重复的魔法字符串里拼错一个，那个开关就静默失效 —— 排查时
+/// 最难受的一类问题。
+mod trace {
+    use std::sync::LazyLock;
+
+    fn flag(name: &'static str) -> bool {
+        std::env::var_os(name).is_some()
+    }
+
+    /// 几何 / 重排 / 点击 / 扫描的详细日志。
+    pub fn geom() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("NOOKSILL_GEOM"));
+        *V
+    }
+
+    /// 全屏检测的判定过程。
+    pub fn fs() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("NOOKSILL_FS_TRACE"));
+        *V
+    }
+
+    /// 菜单窗口的消息流。
+    pub fn menu() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("NOOKSILL_MENU_TRACE"));
+        *V
+    }
+
+    /// 面板"点外面收起"的判定。
+    pub fn popup() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("NOOKSILL_POPUP_TRACE"));
+        *V
+    }
+
+    /// 每秒打一行实际出帧数（`NOOKSILL_FPS=1`）。
+    ///
+    /// 空闲承诺靠它验收：Dock 完全收起时应当**一行都没有**。
+    pub fn fps() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| flag("NOOKSILL_FPS"));
+        *V
+    }
+}
+
+// ============================ 应用状态 ============================
+
+/// 一次 Dock 会话的全部可变状态。
+///
+/// 以前这些是 `main` 里的 16 个局部变量，循环体一路写到 500 多行；
+/// 后来每加一个功能只能按 `②.52` / `②.535` 这种编号插进去，编号本身
+/// 已经重复（两个 `②.1`、两个 `②.4`）。收进结构体之后主循环变成一串
+/// 有名字的步骤，每一步都能单独读、单独改、单独加。
+struct App {
+    hwnd: HWND,
+    gpu: Gpu,
+    frame: FrameRenderer,
+    /// 必须在堆上：`wndproc` 通过 `GWLP_USERDATA` 存的是它的地址，
+    /// `Box` 的内容不会因为 `App` 本身移动而搬家。
+    dock: Box<Dock>,
+    paths: Paths,
+    /// 完整条目（含启动路径与 `.lnk` 解析结果）。`dock.items` 只有显示用的
+    /// 子集，两份必须同步，否则"点了图标启动的是别人"。
+    raw: Vec<Item>,
+    dpi: i32,
+    ppp: f32,
+    /// 目标显示器的工作区（物理像素）。
+    work: LRect,
+    appbar: AppBar,
+    /// AppBar 申请到的预留矩形；`None` = 没有预留（或申请失败）。
+    reserved: Option<LRect>,
+    /// 窗口左上角的屏幕坐标（物理像素）。
+    pos: (i32, i32),
+    /// 窗口尺寸（物理像素）。
+    size: (i32, i32),
+    menu_slot: MenuSlot,
+    settings_slot: Option<Pin<Box<SettingsWindow>>>,
+    /// 更新检查/下载的后台线程通道。UI 线程只 `try_recv`。
+    update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
+    /// 最近一次拿到的发布信息（下载时要用）。
+    update_release: Option<nooksill_platform::update::Release>,
+    /// 已下载并校验通过的暂存文件。
+    update_staged: Option<std::path::PathBuf>,
+
+    // ---- 后台线程。UI 线程只 `try_recv`，永远不等它们 ----
+    /// 取图标（shell / COM，串行）。
+    icons: IconLoader,
+    /// 运行状态 + 遮挡检测（两者都要 `EnumWindows`，合并到一条线程）。
+    scanner: Scanner,
+    /// 上一次刷新系统采样的时刻（资源监视器卡片用）。
+    last_sysinfo: std::time::Instant,
+    /// 资源监视器详情面板。懒建：大部分会话不会点开它。
+    resmon_slot: Option<Pin<Box<ResMonWindow>>>,
+    /// 计时器 / 待办面板。同样懒建。
+    tool_slot: Option<Pin<Box<ToolWindow>>>,
+    /// 日历弹层。懒建。
+    calendar_slot: Option<Pin<Box<CalendarWindow>>>,
+    /// 控制中心面板。懒建（里面有 COM 接口，能不开就不开）。
+    cc_slot: Option<Pin<Box<CcWindow>>>,
+    /// 起动台。懒建，而且只建一次（里面有一条取图标的线程）。
+    launchpad_slot: Option<Pin<Box<LaunchpadWindow>>>,
+    /// `NOOKSILL_DEBUG_OPEN` 只处理一次。
+    debug_opened: bool,
+    /// 面板的「点外面收起」：全局鼠标按键轮询。
+    ///
+    /// 不用鼠标捕获 —— 见 [`nooksill_gpu::popup`] 顶部的说明：
+    /// 只有前台窗口能抓鼠标，而 Dock 从不去抢前台。
+    watcher: nooksill_gpu::popup::Watcher,
+    /// 上一轮有没有面板开着。用来在"刚打开"那一刻重置 `watcher`。
+    panel_was_open: bool,
+    /// 上一次启动应用的时间点（距进程启动的毫秒数）。
+    ///
+    /// 用途见 [`LAUNCH_GRACE_MS`]：刚启动的应用常常先以最大化/全屏姿态出现，
+    /// 全屏监视若立刻判定，Dock 会「闪一下隐藏再弹回来」。
+    last_launch_ms: Option<u64>,
+    /// 计时器面板的改动何时该落盘（防抖，与配置共用一个窗口）。
+    tool_save_at: Option<Instant>,
+    /// 上一次打印的小组件几何；只有变化时才重打（诊断用）。
+    widgets_dump: String,
+    /// `NOOKSILL_FPS=1` 的计数：本秒已画帧数与计时起点。
+    fps_frames: u32,
+    fps_at: Instant,
+    /// 栏体周围的环境烟雾。
+    smoke: SmokeFx,
+    /// DWM 强调色。启动时读一次：它只在用户改主题时变，而改主题会发
+    /// `WM_SETTINGCHANGE` —— 那时才需要重读，不必每帧问系统。
+    accent: [f32; 3],
+    /// 已处理到的外观变更计数（见 [`Dock::look_epoch`]）。
+    look_epoch: u32,
+    /// 写 ini（串行，天然保序）。
+    disk: DiskWriter,
+    /// 启动 / 激活应用（`ShellExecuteW`）。
+    opener: Opener,
+
+    /// 最早一次未落盘的改动；`None` = 没有待写内容。
+    ///
+    /// 条目与配置**共用一个防抖窗口**：一次拖拽可能连着改顺序，一次滑块
+    /// 拖动可能连着改几十个值，逐次写盘等于每帧一次 UTF-16 全量回写。
+    dirty_at: Option<Instant>,
+    /// 待写回的条目；`None` = `[Items]` 段没变。
+    dirty_items: Option<Vec<Item>>,
+    /// 待写回的设置；`None` = `[Settings]` 段没变。
+    dirty_cfg: Option<Box<Config>>,
+
+    /// 扫描线程最近一次给出的遮挡结果（仅智能隐藏用）。
+    covered: bool,
+    /// 「未固定的运行中应用」的临时条目。
+    ///
+    /// 只活在内存里：不写 ini、不参与拖拽重排。它们永远是 `dock.items`
+    /// 的**最后一段**，这样 `dock.items[i]` 与 `raw[i]` 在 `i < raw.len()`
+    /// 时仍然一一对应，点击与菜单的既有下标逻辑不用改。
+    temps: Vec<Item>,
+    /// 上一轮临时条目的 exe（小写）。用来判断"要不要重建列表"，
+    /// 顺便保住顺序：已有的不动，新出现的追加在后面。
+    temp_keys: Vec<String>,
+    /// 已发给扫描线程的那份参数；`None` = 还没发过。
+    ///
+    /// 存整份 `ScanInput` 而不是单存遮挡矩形：其中任何一项变化都要重发，
+    /// 分开记会出现"挡住了新值不生效"这种难查的偏差。
+    scan_sent: Option<ScanInput>,
+
+    last_fs_check: Instant,
+    fs_hidden: bool,
+    /// `NOOKSILL_FAKE_MOUSE="u,v"`：把光标钉在指定位置（无人值守截图用）。
+    fake_mouse: Option<(f32, f32)>,
+    /// `NOOKSILL_FAKE_COVERED=0/1`：覆盖遮挡判定结果。
+    fake_covered: Option<bool>,
+    /// 上一次"靠近"判定的结果。只在 `NOOKSILL_GEOM=1` 下用来打变化日志 ——
+    /// "为什么没展开/没收起"要能看出是判定翻没翻。
+    last_near: Option<bool>,
+    start: Instant,
+    /// 单实例互斥体。**必须是字段**：它是 RAII 锁，放成 `boot` 的局部变量
+    /// 会在 `boot` 返回时立刻释放，第二个实例就能起来了。
+    _guard: Option<SingleInstance>,
+}
+
+/// 消息泵的结论。
+enum Pumped {
+    /// 处理过**会改变界面**的消息（鼠标、键盘、定时器、重绘请求……），
+    /// 需要出帧。
+    Frames,
+    /// 只收到了后台线程的唤醒（`WM_APP_WAKE`）。
+    ///
+    /// 它只负责打断等待，**不强制出帧** —— 是否画由各步自己的脏标记决定。
+    /// 早先把它一并算成"要出帧"，于是扫描线程每 100 ms 一条唤醒就等于
+    /// 每秒白画 10 帧：Dock 收起、屏幕上什么都看不见的时候 CPU 也降不下来。
+    Wake,
+    /// 队列已空。
+    Idle,
+    /// 收到 `WM_QUIT`。
+    Quit,
+}
+
+impl App {
+    /// 建窗口、装资源，直到可以进消息循环为止。
+    ///
+    /// `Ok(None)` 表示已有实例在跑 —— 调用方应当正常退出，不是报错。
+    fn boot() -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        // DPI 感知必须在建窗之前（M0 的教训：未声明时 Windows 会拉伸窗口
+        // 位图，表面尺寸与客户区错位）。
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+
+        // 单实例。**Dock 也必须接这个**：两个 Dock 会叠出两个分层窗口，
+        // 而且 `FindWindow` 只会抓到一个，外部工具/测试会操作错的那个。
+        // 互斥体本身失败时不阻止启动 —— 宁可多一份 Dock，也不要起不来。
+        let guard = match SingleInstance::acquire() {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => {
+                eprintln!("NookSill 已在运行，本次启动退出。");
+                return Ok(None);
+            }
+            Err(e) => {
+                eprintln!("单实例互斥体失败：{e}（继续启动）");
+                None
+            }
+        };
+
+        let paths = Paths::resolve()?;
+        let dpi = display::system_dpi();
+        let mut ini = Ini::load(&paths.ini)?;
+        // 旧格式就地升级：读一次就换成新格式，用户不需要知道。
+        // 只在这一步写盘 —— 迁移失败也不影响本次运行（`from_ini` 两种格式都认）。
+        if Config::upgrade_legacy(&mut ini, dpi) {
+            match ini.save(&paths.ini) {
+                Ok(()) => eprintln!(
+                    "配置已从旧格式升级到 v{}（各设置保持不变）。",
+                    nooksill_core::config::CONFIG_VERSION
+                ),
+                Err(e) => eprintln!("配置升级后保存失败（本次仍按新格式使用）：{e}"),
+            }
+        }
+        let cfg = Config::from_ini(&ini, dpi);
+        // 可变：拖拽重排要跟着 Dock 一起调整，顺序才与屏幕一致。
+        let mut raw: Vec<Item> = store::load_items(&ini);
+        let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
+
+        // 任务栏在同一侧且自动隐藏时，工作区仍少一条任务栏的高度，而那条
+        // 带子上什么都不显示 —— 按显示器物理边界定位，否则 Dock 会离屏幕
+        // 边缘空出一段（上游 1.7.3 同源问题）。
+        let taskbar = appbar::taskbar();
+        let work: LRect = if appbar::taskbar_steals_edge(cfg.edge, taskbar) {
+            display::monitor_rect(0)
+        } else {
+            display::work_area(0)
+        };
+        let mut dock = Box::new(Dock::new(cfg, items, work));
+        dock.mode = dock.cfg.mode;
+        dock.update(dpi);
+
+        let (win_w, win_h) = dock.physical_size_i32();
+        dump_geometry(&dock, dpi);
+        let ppp = dpi as f32 / 96.0;
+
+        let hinstance = unsafe { GetModuleHandleW(None) }?;
+        let wc = WNDCLASSW {
+            hInstance: HINSTANCE(hinstance.0),
+            lpfnWndProc: Some(wndproc),
+            lpszClassName: w!("NookSillWindow"),
+            // **不能留空**：类光标为空、又没人回 `WM_SETCURSOR` 时，
+            // Windows 会退回忙光标（沙漏），表现为"鼠标一进 Dock 就转"。
+            // 见 `gpu::cursor` / ADR-045。
+            hCursor: nooksill_gpu::cursor::class_cursor(),
+            // 任务栏 / Alt+Tab 用 exe 资源里的应用图标。
+            hIcon: nooksill_gpu::app_icon().unwrap_or_default(),
+            ..Default::default()
+        };
+        unsafe {
+            RegisterClassW(&wc);
+        }
+
+        // 先按"没有预留区"的位置建窗：AppBar 的 `ABM_NEW` 需要 hwnd，
+        // 而位置又要用到 AppBar 拿回来的矩形 —— 顺序上只能先建后挪。
+        // 顺序不能反：先算尺寸再 SetWindowPos。
+        let (mut x, mut y) = layout::window_origin(dock.cfg.edge, work, None, win_w, win_h);
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                w!("NookSillWindow"),
+                w!("NookSill"),
+                WS_POPUP,
+                x,
+                y,
+                win_w,
+                win_h,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )?
+        };
+
+        // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
+        // 留着那块空白反而更怪，所以只在预留 + 常显时避让。
+        let mut appbar = AppBar::new(hwnd);
+        let reserved = if appbar::should_reserve(
+            dock.cfg.reserve,
+            dock.mode == DockMode::Always,
+            dock.cfg.edge,
+            taskbar,
+        ) {
+            appbar.apply(
+                dock.cfg.edge,
+                dock.reserve_thickness(),
+                display::monitor_rect(0),
+            )
+        } else {
+            None
+        };
+        (x, y) = layout::window_origin(dock.cfg.edge, work, reserved, win_w, win_h);
+        if reserved.is_some() {
+            // 申请成功才移动窗口：失败时保持原位置，宁可少预留也不要跑到屏幕外。
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    win_w,
+                    win_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        if dock.cfg.reserve && dock.mode != DockMode::Always {
+            // 不预留在隐藏模式下是**故意的**（Dock 会滑走，留一块空白更怪），
+            // 但用户既然开了开关就该知道它没生效，否则会当成 bug 报上来。
+            eprintln!("`Reserve` 只在常显模式（Mode=0）下生效，当前已忽略。");
+        }
+        if trace::geom() {
+            eprintln!(
+                "[layout] edge={:?} reserve={} -> pos=({x},{y}) reserved={reserved:?}",
+                dock.cfg.edge, dock.cfg.reserve
+            );
+        }
+
+        let gpu = Gpu::new("")?;
+        nooksill_gpu::gpu::set_msaa_preference(dock.cfg.get_i32(Key::MSAA));
+        let frame = FrameRenderer::new(&gpu, win_w as u32, win_h as u32, ppp)?;
+        let start = Instant::now();
+
+        // 先把 `.lnk` 解析成真实 exe 路径：判断"是否在运行"和"点击该切过去"
+        // 都要靠它。结果缓存在 `Item.target` 里（不写回 ini，那是运行时缓存）。
+        //
+        // **这一步仍留在 UI 线程**：它发生在建窗之前，用户看不到"卡"，
+        // 而且它决定第一次运行状态扫描准不准 —— 挪到工作线程反而会让指示点
+        // 在头一秒全灭。真正拖慢启动的是 GPU 建设备，不是这里。
+        resolve_targets(&mut raw);
+
+        // 后台线程。取图标是启动时最大的一块同步阻塞（每个条目一次 shell
+        // 调用），挪走之后窗口可以先出来，图标陆续补上。
+        // 每个工作线程都拿到唤醒句柄：有结果时 `PostMessage` 一下，
+        // 主循环的等待立刻返回，不用靠轮询。
+        let waker = Waker::new(hwnd);
+        let icons = IconLoader::spawn(waker, Some(&gpu))?;
+        let scanner = Scanner::spawn(hwnd.0 as isize, waker)?;
+        let last_sysinfo = std::time::Instant::now();
+        let resmon_slot: Option<Pin<Box<ResMonWindow>>> = None;
+        let tool_slot: Option<Pin<Box<ToolWindow>>> = None;
+        let calendar_slot: Option<Pin<Box<CalendarWindow>>> = None;
+        let cc_slot: Option<Pin<Box<CcWindow>>> = None;
+        let launchpad_slot: Option<Pin<Box<LaunchpadWindow>>> = None;
+        let debug_opened = false;
+        let last_launch_ms: Option<u64> = None;
+        let tool_save_at: Option<Instant> = None;
+        let widgets_dump = String::new();
+        let disk = DiskWriter::spawn(paths.ini.clone(), waker)?;
+        let opener = Opener::spawn()?;
+        // 先把所有图标排进队列：工作线程攒批处理，UI 线程立刻返回。
+        request_missing_icons(&icons, &dock, &raw);
+
+        // 全局快捷键 `Ctrl+Alt+D`：强制收起 / 恢复，由 `cfg.hotkey` 开关。
+        // 注册失败（被别的程序占了）只警告，不影响启动。
+        if dock.cfg.hotkey {
+            let ok = unsafe {
+                RegisterHotKey(
+                    Some(hwnd),
+                    1,
+                    HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0),
+                    u32::from(b'D'),
+                )
+            };
+            if ok.is_err() {
+                eprintln!("快捷键 Ctrl+Alt+D 注册失败（可能被占用），强制收起不可用。");
+            }
+        }
+
+        let smoke = SmokeFx::with_gpu(&gpu);
+        let mut app = Self {
+            hwnd,
+            gpu,
+            frame,
+            dock,
+            paths,
+            raw,
+            dpi,
+            ppp,
+            work,
+            appbar,
+            reserved,
+            pos: (x, y),
+            size: (win_w, win_h),
+            menu_slot: None,
+            settings_slot: None,
+            icons,
+            scanner,
+            last_sysinfo,
+            resmon_slot,
+            tool_slot,
+            calendar_slot,
+            cc_slot,
+            launchpad_slot,
+            update_rx: None,
+            update_release: None,
+            update_staged: None,
+            debug_opened,
+            watcher: nooksill_gpu::popup::Watcher::default(),
+            panel_was_open: false,
+            last_launch_ms,
+            tool_save_at,
+            widgets_dump,
+            fps_frames: 0,
+            fps_at: Instant::now(),
+            smoke,
+            accent: theme::accent().unwrap_or(PALETTE[0]),
+            look_epoch: 0,
+            disk,
+            opener,
+            dirty_at: None,
+            dirty_items: None,
+            dirty_cfg: None,
+            covered: false,
+            temps: Vec::new(),
+            temp_keys: Vec::new(),
+            scan_sent: None,
+            last_fs_check: Instant::now(),
+            fs_hidden: false,
+            fake_mouse: fake_mouse_from_env(),
+            fake_covered: fake_covered_from_env(),
+            last_near: None,
+            start,
+            _guard: guard,
+        };
+
+        // Smoke compute output is produced inside `run_ui`; FrameRenderer
+        // registers it with egui after the pass.
+        if let Some(layer) = app.smoke.layer() {
+            app.frame.set_smoke_layer(layer);
+        }
+
+        // Dock 指针挂到窗口上，供 wndproc 回传鼠标位置。
+        // 取的是 `Box` 里那块堆内存的地址，与 `App` 自身是否再移动无关。
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&raw mut *app.dock) as isize);
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = UpdateWindow(hwnd);
+        }
+        Ok(Some(app))
+    }
+
+    /// 消息循环。只在 `WM_QUIT` 时返回。
+    ///
+    /// 每一步返回"本轮是否需要出帧"。**顺序有意义**：菜单是模态的（会阻塞），
+    /// 必须排在点击之后、设置窗口之前；写盘放在设置之后，否则当轮改动还没
+    /// 落到 `cfg` 里。
+    fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut msg = MSG::default();
+        loop {
+            let mut need_frame = false;
+
+            // ① 抽干消息队列：一条消息一帧会造成抖动。
+            match pump(&mut msg) {
+                Pumped::Quit => return Ok(()),
+                Pumped::Frames => need_frame = true,
+                // 后台唤醒只打断等待；要不要画由下面几步的脏标记决定。
+                Pumped::Wake | Pumped::Idle => {}
+            }
+
+            // ② 重布局。**两个条件缺一不可**：`dirty`（鼠标进出/按下抬起
+            //    改变了输入状态，必须重算 `hot`）与 `anim`（放大曲线还在走）。
+            //    早先只写了 `anim`，结果动画一收敛鼠标再进来也不会放大 ——
+            //    因为 `hot` 只在 `update` 里算，而 `update` 不再被调用。
+            need_frame |= self.step_layout();
+            // ③ 窗口尺寸/位置跟着条目数走。
+            need_frame |= self.step_relayout()?;
+            // ④ 拖拽重排同步到配置副本（写盘走防抖，不在这里做）。
+            self.step_reorder();
+            // ④.5 分割线拖动改了 IconSize / ZoomSize：标脏，交给同一个防抖窗口。
+            // 一次拖动会连着改几十次，逐次写盘等于每帧一次 UTF-16 全量回写。
+            if self.dock.take_sep_dirty() {
+                self.touch_cfg();
+            }
+            // ⑤ 点击启动：交给工作线程，`ShellExecuteW` 不再阻塞 UI。
+            self.step_click();
+            // ⑥ 右键菜单（模态）。
+            need_frame |= self.step_menu()?;
+            // ⑦ 设置窗口（非模态）。
+            need_frame |= self.step_settings()?;
+            // ⑧ 后台结果：图标、运行状态、遮挡。全部 `try_recv`，不等。
+            need_frame |= self.step_icons();
+            need_frame |= self.step_scan();
+            // ⑧.5 资源监视器小组件：按秒刷新采样 + 详情面板。
+            need_frame |= self.step_sysinfo();
+            need_frame |= self.step_resmon()?;
+            self.sync_cover_target();
+            // ⑨ 写盘（防抖到期才发，写本身在别的线程，不需要出帧）。
+            self.step_disk();
+            self.step_tool_save();
+            // ⑩ 全屏时整体隐藏。
+            need_frame |= self.step_fullscreen();
+            // ⑪ 自动隐藏 / 智能隐藏。
+            need_frame |= self.step_auto_hide();
+            // ⑫ 点面板外面收起（轮询全局按键，见 `popup`）。
+            need_frame |= self.step_panel_dismiss();
+            // ⑬ 环境烟雾：自己控制帧率（见 `step_smoke`）。
+            need_frame |= self.step_smoke();
+
+            // ⑭ 出帧。**完全收起时一帧都不画**：内容全在窗口外，画了也看不见，
+            //    而智能隐藏的扫描线程每 100 ms 会唤醒一次主循环。
+            //    注意 `anim` 不受影响 —— 收起动画最后那一帧仍然会画出来。
+            if (need_frame || self.dock.anim) && !self.dock.fully_hidden() {
+                self.render()?;
+            }
+            self.wait();
+        }
+    }
+
+    /// 推进一帧布局。返回是否需要出帧。
+    fn step_layout(&mut self) -> bool {
+        // 无人值守截图用：`NOOKSILL_FAKE_MOUSE="u,v"` 把鼠标钉在指定位置。
+        // 自动化验证时物理光标会被用户挪走，靠它才能稳定复现悬停态。
+        if let Some((u, v)) = self.fake_mouse {
+            self.dock.mouse = (u, v);
+            self.dock.hover = true;
+        }
+        if !self.dock.take_dirty() && !self.dock.anim {
+            return false;
+        }
+        self.dock.update(self.dpi);
+        true
+    }
+
+    /// 配置热更新：条目数变了 → 栏体宽度变了 → 窗口尺寸与位置都要改。
+    ///
+    /// 这条路径的风险在于离屏纹理与 DIB 必须跟着换成新尺寸，否则
+    /// `UpdateLayeredWindow` 提交的还是一块旧尺寸的位图 —— 表现为
+    /// "只有左上角一部分被画出来"。
+    fn step_relayout(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let (nw, nh) = self.dock.physical_size_i32();
+        if nw == self.size.0 && nh == self.size.1 {
+            return Ok(false);
+        }
+        self.size = (nw, nh);
+        self.frame.resize(&self.gpu, nw as u32, nh as u32)?;
+        self.reposition();
+        if trace::geom() {
+            eprintln!(
+                "[relayout] 窗口 -> ({},{}) {nw}x{nh}",
+                self.pos.0, self.pos.1
+            );
+        }
+        Ok(true)
+    }
+
+    /// 把拖拽产生的重排同步到配置副本。
+    ///
+    /// **不在这里写盘**：一次拖拽会连着产生好几次重排，每次都读一遍 ini
+    /// 再 UTF-16 全量回写，拖动时能明显看出顿。改成标记脏 + 防抖，
+    /// 真正的写由 `DiskWriter` 线程做。
+    ///
+    /// 也不需要额外出帧：`move_item` 会把 `moved` 置真，下一轮 `update`
+    /// 据此补位移动画，而 `update` 自身就会要求出帧。
+    fn step_reorder(&mut self) {
+        let mut moved = false;
+        let mut dropped = false;
+        while let Some((from, to)) = self.dock.take_pending_move() {
+            if from < self.raw.len() && to < self.raw.len() {
+                let item = self.raw.remove(from);
+                self.raw.insert(to, item);
+                moved = true;
+            } else {
+                // 拖进了临时条目那一段（或从那儿拖出来）：配置里没有这一项，
+                // 只能丢弃。丢弃之后栏体上已经是"拖过"的顺序，必须按配置
+                // 重建一次，否则下一次点击会点到别的条目上。
+                dropped = true;
+            }
+        }
+        if dropped {
+            self.sync_items();
+        }
+        if moved || self.dock.take_order_changed() {
+            self.touch_items();
+        }
+    }
+
+    /// 打开起动台。菜单项与 Dock 上的 `nooksill:launchpad` 条目共用一条路径。
+    fn open_launchpad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // 主题跟着配置走（`UiTheme` 可能强制浅色），不是跟系统走。
+        let dark = self
+            .dock
+            .cfg
+            .dock_is_dark(nooksill_platform::theme::is_dark());
+        let lw = ensure_launchpad(
+            &self.gpu,
+            &mut self.launchpad_slot,
+            &self.paths,
+            self.ppp,
+            dark,
+        )?;
+        // 行列数每次打开都跟配置同步：设置窗口里可能刚改过。
+        lw.set_grid(
+            self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
+            self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
+        );
+        lw.open(frost_spec(&self.dock.cfg, Key::LP_FROST, 0.0));
+        Ok(())
+    }
+
+    /// 点击启动。放在主循环而不是窗口过程里：`ShellExecuteW` 可能阻塞
+    /// 几十毫秒，不该占着消息处理。
+    fn step_click(&mut self) {
+        let Some((i, force)) = self.dock.take_click() else {
+            return;
+        };
+        if trace::geom() {
+            eprintln!(
+                "[click] 第 {i} 项 force={force} mouse={:?} slot_l={:?}",
+                self.dock.mouse, self.dock.geom.slot_l
+            );
+        }
+        // 点条目 = 要切应用，面板该让位（点卡片的路径不走这里）。
+        self.hide_panels();
+        // 图标数与配置不一致时不要静默吞掉，这类错配要能看见。
+        let Some(item) = self.item_at(i) else {
+            eprintln!("点击了第 {i} 项，但配置里没有对应条目");
+            return;
+        };
+
+        // 内置条目不是文件：`ShellExecute` 对 `nooksill:` 只会失败（连错误都
+        // 不明显 —— 点上去像没反应）。这两条走自己的动作。
+        if let Some(kind) = nooksill_gpu::glyph::Builtin::from_path(&item.path) {
+            match kind {
+                nooksill_gpu::glyph::Builtin::Launchpad => {
+                    if let Err(e) = self.open_launchpad() {
+                        eprintln!("打开起动台失败：{e}");
+                    }
+                }
+                nooksill_gpu::glyph::Builtin::Start => nooksill_platform::sysact::open_start(),
+            }
+            self.dock.start_bounce(i);
+            return;
+        }
+
+        // `force`（Shift+点击 / 中键）= 不管有没有在跑，都新起一个。
+        // `force` 连"激活已有窗口"一起跳过，否则想开第二个实例永远开不出来。
+        let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+        // 交给工作线程：`ShellExecuteW` 冷启动时几十毫秒起步，而
+        // "激活已有窗口"要枚举一遍顶层窗口。两者都不该占着 UI 线程。
+        self.opener.submit(OpenJob {
+            item: Box::new(item.clone()),
+            force,
+            toggle,
+        });
+        self.last_launch_ms = Some(self.now_ms());
+        // 启动/切换之后弹一下，给一个"点到了"的反馈。
+        // 弹跳只在真的发生了动作时播，失败不弹（否则会误导）。
+        self.dock.start_bounce(i);
+    }
+
+    /// 右键菜单。**模态**：会阻塞到用户选择或取消。
+    fn step_menu(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some((u, v)) = self.dock.take_menu_request() else {
+            return Ok(false);
+        };
+        let hit = self.dock.hit_at(u, v);
+        let target = hit.and_then(|i| self.item_at(i));
+        let running = target.is_some_and(|it| it.running);
+        // 临时条目（运行中但没固定）不给"从 Dock 移除""加分割线"这类结构性
+        // 命令：它们不是配置的一部分，删了下一轮扫描还会回来；更要紧的是
+        // 那两个命令按 `raw` 的下标改配置，拿临时条目的下标去打会改错条目。
+        let temp = hit.is_some_and(|i| i >= self.raw.len());
+        let Some(menu) = Menu::build(target, running, temp) else {
+            return Ok(false);
+        };
+
+        // 光标位置决定菜单弹出点；工作区边界决定往哪边翻。
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&raw mut pt) };
+        let cursor = (pt.x as f32 / self.ppp, pt.y as f32 / self.ppp);
+        // 边界用**工作区**而不是整块屏幕：菜单不该压到任务栏上。
+        let w = self.work;
+        let bounds = (
+            w.left as f32 / self.ppp,
+            w.top as f32 / self.ppp,
+            w.right as f32 / self.ppp,
+            w.bottom as f32 / self.ppp,
+        );
+        let dark = self.dock.cfg.dock_is_dark(theme::is_dark());
+        let cmd = match show_menu(
+            &self.gpu,
+            &mut self.menu_slot,
+            menu,
+            cursor,
+            bounds,
+            dark,
+            self.ppp,
+            self.start,
+            frost_spec(&self.dock.cfg, Key::MENU_FROST, nooksill_gpu::menu::RADIUS),
+        ) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                eprintln!("菜单显示失败：{e}");
+                None
+            }
+        };
+
+        if let Some(cmd) = cmd {
+            if trace::geom() {
+                eprintln!(
+                    "[menu] 命中 hit={hit:?} name={:?} cmd={cmd:?}",
+                    hit.and_then(|i| self.item_at(i)).map(|it| it.name.clone())
+                );
+            }
+            if cmd == MenuCmd::Launchpad {
+                self.open_launchpad()?;
+            } else if cmd == MenuCmd::Settings {
+                // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
+                // 那儿没有 `gpu`，也不该有。
+                // 创建时就用配置算出的有效缩放 —— 上次会话改过缩放的话，
+                // 这次打开直接就是新尺寸。
+                let sw = ensure_settings(
+                    &self.gpu,
+                    &mut self.settings_slot,
+                    &self.paths,
+                    settings_win::effective_ppp(&self.dock.cfg),
+                )?;
+                // 每次打开都重读：用户可能刚在任务管理器里改过它。
+                sw.state.auto_start = theme::get_autostart();
+                sw.show(frost_spec(&self.dock.cfg, Key::UI_FROST, 20.0));
+            } else {
+                self.run_menu_cmd(cmd, hit);
+            }
+        }
+
+        // 菜单期间 Dock 没有重绘，回来后强制出帧并刷新悬停。
+        self.dock.mark_dirty();
+        // 取消悬停：光标多半已经不在图标上了。
+        self.dock.hover = false;
+        self.dock.mouse = (-1.0, -1.0);
+        Ok(true)
+    }
+
+    /// 设置窗口。**非模态**：改参数时要能一边拖动滑块一边看栏体的变化，
+    /// 所以不像菜单那样把整条消息循环堵住。
+    fn step_settings(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        // 停靠边 / 预留 / 隐藏模式变了要重新注册 AppBar 并重算窗口位置。
+        // 快照必须在执行命令**之前**取：`ResetDefaults` 会把停靠边也重置。
+        let before = self.mount_key();
+
+        let (changed, cmd) = tick_settings(&self.gpu, &mut self.settings_slot, &mut self.dock)?;
+        // 后台线程的结果每轮搬一次；它自己会 `wake` 设置窗口。
+        self.pump_update();
+        let mut need_frame = false;
+
+        if changed {
+            // 配置是 Dock 与设置窗口共用的同一份：`update()` 在下一轮用它
+            // 重算几何，这里只需要要求出帧 + 排一次写盘。
+            self.touch_cfg();
+            need_frame = true;
+            self.dock.mark_dirty();
+            if trace::geom() {
+                eprintln!("[settings] 配置有改动，排定写盘");
+            }
+        }
+        if let Some(cmd) = cmd {
+            need_frame |= self.run_settings_cmd(cmd);
+        }
+
+        if self.mount_key() != before {
+            // 停靠边 / 预留 / 隐藏模式变了：AppBar 得重新注册，窗口位置
+            // 得跟着新边算。尺寸若也变了（左右停靠要转置 lw/lh），下一轮
+            // `step_relayout` 会 resize —— 这里先按旧尺寸摆到新位置，差的是一帧。
+            self.dock.mode = self.dock.cfg.mode;
+            self.reserved = if appbar::should_reserve(
+                self.dock.cfg.reserve,
+                self.dock.mode == DockMode::Always,
+                self.dock.cfg.edge,
+                appbar::taskbar(),
+            ) {
+                self.appbar.apply(
+                    self.dock.cfg.edge,
+                    self.dock.reserve_thickness(),
+                    display::monitor_rect(0),
+                )
+            } else {
+                self.appbar.remove();
+                None
+            };
+            self.reposition();
+            if trace::geom() {
+                eprintln!(
+                    "[settings] 重挂 edge={:?} reserve={} mode={:?} -> pos=({},{}) reserved={:?}",
+                    self.dock.cfg.edge,
+                    self.dock.cfg.reserve,
+                    self.dock.mode,
+                    self.pos.0,
+                    self.pos.1,
+                    self.reserved
+                );
+            }
+            need_frame = true;
+        }
+
+        Ok(need_frame)
+    }
+
+    /// 决定"要不要重挂窗口"的三元组：停靠边、预留开关、隐藏模式。
+    fn mount_key(&self) -> (Edge, bool, DockMode) {
+        (
+            self.dock.cfg.edge,
+            self.dock.cfg.reserve,
+            self.dock.cfg.mode,
+        )
+    }
+
+    /// 执行右键菜单选中的命令。
+    fn run_menu_cmd(&mut self, cmd: MenuCmd, hit: Option<usize>) {
+        match cmd {
+            // 与左键点击同一条路径：已运行则激活，否则启动。
+            MenuCmd::Open => {
+                let Some(item) = hit.and_then(|i| self.item_at(i)) else {
+                    return;
+                };
+                let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+                self.opener.submit(OpenJob {
+                    item: Box::new(item.clone()),
+                    force: false,
+                    toggle,
+                });
+                self.last_launch_ms = Some(self.now_ms());
+            }
+            MenuCmd::OpenInExplorer => {
+                if let Some(item) = hit.and_then(|i| self.item_at(i)) {
+                    if let Err(e) = launch::open_folder(&item.path) {
+                        eprintln!("打开文件夹「{}」失败：{e}", item.name);
+                    }
+                }
+            }
+            MenuCmd::QuitApp => {
+                if let Some(exe) = hit
+                    .and_then(|i| self.item_at(i))
+                    .and_then(running::running_key)
+                {
+                    if !app_window::close_app(&exe) {
+                        eprintln!("退出「{exe}」失败");
+                    }
+                }
+            }
+            MenuCmd::ExitDock => {
+                // 走正常退出路径：`Drop` 会注销 AppBar、释放单实例锁。
+                unsafe { PostQuitMessage(0) };
+            }
+            // 入口在 `step_menu` 之前就被截走了（`Settings` 要 GPU 才能开窗口）。
+            // 这里是穷尽匹配要求的占位：真走到这里说明拦截失效了，那是一个 bug。
+            MenuCmd::Settings => {
+                eprintln!("`Settings` 命令走错了路径：它应当在主循环里被处理");
+            }
+            MenuCmd::Launchpad => {
+                eprintln!("`Launchpad` 命令走错了路径：它应当在主循环里被处理");
+            }
+            MenuCmd::AddSepAfter => {
+                let Some(i) = hit else { return };
+                if i >= self.raw.len() {
+                    return;
+                }
+                self.raw
+                    .insert(i + 1, Item::new(ItemKind::Separator, "", ""));
+                self.apply_item_change();
+            }
+            MenuCmd::RemoveItem | MenuCmd::RemoveSep => {
+                let Some(i) = hit else { return };
+                if i >= self.raw.len() {
+                    return;
+                }
+                // 最后一项不允许删：Dock 会变成一个空壳，而用户没有任何
+                // 可点的东西能把它恢复回来（拖放进来的入口还没做）。
+                if self.raw.len() <= 1 {
+                    eprintln!("这是最后一项，不能移除。");
+                    return;
+                }
+                self.raw.remove(i);
+                self.apply_item_change();
+            }
+        }
+    }
+
+    /// 条目列表变了之后的统一收尾：替换显示列表 + 排写盘 + 补图标。
+    ///
+    /// 写盘走防抖，这里只标记脏 —— 失败不回滚内存里的改动：宁可
+    /// "这次生效但没保存"，也不要"点了没反应"。
+    fn apply_item_change(&mut self) {
+        self.sync_items();
+        request_missing_icons(&self.icons, &self.dock, &self.raw);
+        self.touch_items();
+    }
+
+    /// 栏体上的第 `i` 个条目。
+    ///
+    /// 前 `raw.len()` 个是配置里的固定条目，之后是临时条目（运行中但没固定
+    /// 的应用）。所有"按下标取条目"的地方都必须走这里 —— 直接用
+    /// `raw.get(i)` 会在有临时条目时取到错的（或者一个都取不到）。
+    fn item_at(&self, i: usize) -> Option<&Item> {
+        self.raw
+            .get(i)
+            .or_else(|| self.temps.get(i.checked_sub(self.raw.len())?))
+    }
+
+    /// 把"固定条目 + 临时条目"重新拼成栏体列表。
+    ///
+    /// `replace_items` 会清掉 hover / 拖拽状态并置 `anim`，所以只在列表
+    /// 真的变了时调用 —— 每 1.2 秒重建一次的话，悬停会一直被打断。
+    fn sync_items(&mut self) {
+        let all: Vec<DockItem> = self
+            .raw
+            .iter()
+            .chain(self.temps.iter())
+            .map(DockItem::from_item)
+            .collect();
+        self.dock.replace_items(all);
+        self.request_temp_icons();
+    }
+
+    /// 为临时条目取图标。它们的下标从 `raw.len()` 开始。
+    fn request_temp_icons(&self) {
+        for (k, t) in self.temps.iter().enumerate() {
+            let i = self.raw.len() + k;
+            if self.dock.has_icon(i) {
+                continue;
+            }
+            self.icons.submit(IconRequest {
+                index: i,
+                kind: t.kind,
+                path: t.path.clone(),
+                fit: t.fit,
+            });
+        }
+    }
+
+    /// 同步"未固定的运行中应用"。
+    ///
+    /// 返回列表是否变了。三条规则：
+    ///
+    /// 1. **只追加不重排**：已有的临时条目保持原位。`EnumWindows` 给的是
+    ///    Z 序（最近用过的在前），每轮都按它重排会让图标互相穿插、还要重传
+    ///    图标纹理。
+    /// 2. 已经固定在 Dock 上的应用不重复出现（按 `running_key` 比）。
+    /// 3. 上限 [`MAX_TEMP`]：栏体会按条目数等比缩小，几十个临时图标会把
+    ///    整条 Dock 压成一条细线。
+    fn sync_temps(&mut self, running: &std::collections::HashSet<String>) -> bool {
+        let want = if self.dock.cfg.get_i32(Key::ShowRunning) != 0 {
+            // 固定条目占用的 exe。临时条目要排除它们，否则同一个应用出现两次。
+            let pinned: std::collections::HashSet<String> =
+                self.raw.iter().filter_map(running::running_key).collect();
+            running::temp_keys(running, &pinned, &self.temp_keys, MAX_TEMP, self.self_exe())
+        } else {
+            // 关掉开关时把已有的一次性清空。
+            Vec::new()
+        };
+        if want == self.temp_keys {
+            return false;
+        }
+        self.temps = want
+            .iter()
+            .map(|exe| {
+                let mut it = Item::new(ItemKind::File, temp_name(exe), exe.clone());
+                // 临时条目按定义就是"在运行"，指示点要亮。
+                it.running = true;
+                it
+            })
+            .collect();
+        self.temp_keys = want;
+        self.sync_items();
+        true
+    }
+
+    /// Dock 自己的 exe 路径（小写）。临时条目要跳过它。
+    fn self_exe(&self) -> &'static str {
+        static SELF_EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        SELF_EXE.get_or_init(|| {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        })
+    }
+
+    /// 标记 `[Items]` 段需要写回。
+    ///
+    /// 存的是**副本**：真正的写发生在另一个线程上，等它轮到的时候
+    /// `self.raw` 可能已经被下一次拖拽改了。
+    fn touch_items(&mut self) {
+        self.dirty_items = Some(self.raw.clone());
+        self.dirty_at.get_or_insert_with(Instant::now);
+    }
+
+    /// 标记 `[Settings]` 段需要写回。
+    fn touch_cfg(&mut self) {
+        self.dirty_cfg = Some(Box::new(self.dock.cfg.clone()));
+        self.dirty_at.get_or_insert_with(Instant::now);
+    }
+
+    /// 防抖到期就把待写内容交给写盘线程。
+    ///
+    /// 滑块一次拖动会连着产生几十次 `changed`，拖拽一次会连着改好几次顺序；
+    /// 逐次写等于每帧一次 UTF-16 全量回写。400 ms 是"停手就存、动着不存"
+    /// 的折中。条目与配置共用同一个窗口，所以一次 flush 只写一遍文件。
+    fn step_disk(&mut self) {
+        for result in self.disk.drain() {
+            match result {
+                Ok(()) => {
+                    // 不再提示"已保存"：每次改动都闪一次是噪音，失败才有
+                    // 提示的价值（Err 分支保留）。
+                    if trace::geom() {
+                        eprintln!("[disk] 已写回 {}", self.paths.ini.display());
+                    }
+                }
+                Err(e) => eprintln!("保存失败（改动仍在本进程内生效）：{e}"),
+            }
+        }
+
+        let Some(at) = self.dirty_at else {
+            return;
+        };
+        if at.elapsed() < Duration::from_millis(CFG_SAVE_DEBOUNCE_MS) {
+            return;
+        }
+        self.dirty_at = None;
+        let items = self.dirty_items.take();
+        let config = self.dirty_cfg.take();
+        if items.is_some() || config.is_some() {
+            self.disk.submit(WriteJob {
+                items,
+                config,
+                // 配置与条目这次不动 `[Tool]` 段：两段由各自的脏标记驱动，
+                // 一起写会让"改个滑块"也把计时器的剩余秒数刷一遍。
+                tool: None,
+            });
+        }
+    }
+
+    /// 计时器面板的改动落盘（同样防抖）。
+    ///
+    /// 单独一条路径而不是并进 `dirty_at`：面板打勾是"一次一下"的，
+    /// 与拖滑块那种高频改动节奏不同，共用一个窗口会让勾选延迟 400 ms
+    /// 才落盘 —— 观感上像丢了。
+    fn step_tool_save(&mut self) {
+        let Some(at) = self.tool_save_at else {
+            return;
+        };
+        if at.elapsed() < Duration::from_millis(TOOL_SAVE_DEBOUNCE_MS) {
+            return;
+        }
+        self.tool_save_at = None;
+        let Some(win) = self.tool_slot.as_ref() else {
+            return;
+        };
+        let now = nooksill_gpu::tool_win::now_ms();
+        self.disk.submit(WriteJob {
+            items: None,
+            config: None,
+            tool: Some((Box::new(win.state.clone()), now)),
+        });
+    }
+
+    /// 取走后台线程处理完的图标，上传成纹理。
+    ///
+    /// 像素处理在工作线程做完了，这里只剩 `load_texture` —— 那一步必须在
+    /// 有 `egui::Context` 的线程上执行。
+    fn step_icons(&mut self) -> bool {
+        let ready = self.icons.drain();
+        if ready.is_empty() {
+            return false;
+        }
+        let ctx = self.frame.ctx();
+        for icon in &ready {
+            // 排队时记的是"当时的第 i 项"。期间条目可能被增删，下标就不再
+            // 指向同一个条目 —— 用路径核对一遍，别把图标装到别人头上。
+            let same = self
+                .dock
+                .items
+                .get(icon.index)
+                .is_some_and(|it| it.path == icon.path);
+            if same {
+                self.dock.install_icon(icon.index, ctx, icon);
+            }
+        }
+        true
+    }
+
+    /// 取走扫描线程的结果：运行状态与遮挡。
+    fn step_scan(&mut self) -> bool {
+        let mut need_frame = false;
+        for out in self.scanner.drain() {
+            if let Some(running) = out.running {
+                if self.sync_temps(&running) {
+                    need_frame = true;
+                }
+                if running::refresh_running(&mut self.raw, &running) {
+                    // `Dock` 与 `raw` 是两份列表，指示点画在前者上。
+                    for (slot, item) in self.dock.items.iter_mut().zip(self.raw.iter()) {
+                        slot.running = item.running;
+                    }
+                    need_frame = true;
+                }
+            }
+            if let Some(covered) = out.covered {
+                self.covered = covered;
+                // 遮挡只影响智能隐藏的判定，不需要单独出帧 ——
+                // `step_auto_hide` 每 100 ms 会读到它。
+            }
+        }
+        need_frame
+    }
+
+    /// 刷新资源监视器小组件的采样。
+    ///
+    /// **按秒来**，不能每帧都调：`GetSystemTimes` 与
+    /// `GlobalMemoryStatusEx` 都不是便宜调用，而 CPU 占用率本身
+    /// 也只有秒级意义。
+    ///
+    /// 每次重绘都重新采样，采样频率本来就低；
+    /// 我们这边空闲时几乎不出帧，所以改成定时更合适。
+    fn step_sysinfo(&mut self) -> bool {
+        // 条带里没有资源监视器就不用采样。
+        if self
+            .dock
+            .metrics
+            .widgets
+            .iter()
+            .all(|(k, _)| k != nooksill_core::layout::WidgetKind::Resource)
+        {
+            return false;
+        }
+        if self.last_sysinfo.elapsed() < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        self.last_sysinfo = std::time::Instant::now();
+        let before = self.dock.sysinfo();
+        self.dock.refresh_sysinfo();
+        let after = self.dock.sysinfo();
+        // 数值没变就不用重画：CPU 占用率常年是 0，每秒重画一次太浪费。
+        before != after
+    }
+
+    /// 资源监视器详情面板。
+    ///
+    /// 面板是懒建的：第一次点卡片才建窗口（建窗口要编译渲染管线，
+    /// 几十毫秒，不能记在启动时间上）。
+    /// 调试用：`NOOKSILL_DEBUG_OPEN=cc|launchpad|calendar|tool|resmon|settings`
+    /// 时，启动后直接把那个面板打开。
+    ///
+    /// 为什么需要它：无人值守验收要点击卡片，而前台常常压着一个浏览器窗口
+    /// （全屏窗口比 TOPMOST 还高），点击会落到别人身上 —— 表现是"点了没反应"。
+    /// 直接开面板能绕开这一层，只看面板自己的渲染。
+    fn debug_open_once(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.debug_opened {
+            return Ok(false);
+        }
+        let Ok(what) = std::env::var("NOOKSILL_DEBUG_OPEN") else {
+            self.debug_opened = true;
+            return Ok(false);
+        };
+        self.debug_opened = true;
+        let kind = match what.as_str() {
+            "cc" => nooksill_core::layout::WidgetKind::CtrlCenter,
+            "calendar" => nooksill_core::layout::WidgetKind::Clock,
+            "tool" => nooksill_core::layout::WidgetKind::Tool,
+            "resmon" => nooksill_core::layout::WidgetKind::Resource,
+            "launchpad" => {
+                let dark = self
+                    .dock
+                    .cfg
+                    .dock_is_dark(nooksill_platform::theme::is_dark());
+                let lw = ensure_launchpad(
+                    &self.gpu,
+                    &mut self.launchpad_slot,
+                    &self.paths,
+                    self.ppp,
+                    dark,
+                )?;
+                lw.set_grid(
+                    self.dock.cfg.get_i32(Key::LP_COLS).max(3) as usize,
+                    self.dock.cfg.get_i32(Key::LP_ROWS).max(2) as usize,
+                );
+                lw.open(frost_spec(&self.dock.cfg, Key::LP_FROST, 0.0));
+                return Ok(true);
+            }
+            "settings" => {
+                let sw = ensure_settings(
+                    &self.gpu,
+                    &mut self.settings_slot,
+                    &self.paths,
+                    settings_win::effective_ppp(&self.dock.cfg),
+                )?;
+                sw.state.auto_start = nooksill_platform::theme::get_autostart();
+                sw.show(frost_spec(&self.dock.cfg, Key::UI_FROST, 20.0));
+                return Ok(true);
+            }
+            other => {
+                eprintln!("NOOKSILL_DEBUG_OPEN={other} 不认识");
+                return Ok(false);
+            }
+        };
+        // 走与点击同一条路径：构造 + 摆位。
+        self.dock.click_widget(kind);
+        Ok(true)
+    }
+
+    /// 四块面板各自的「可见 / 句柄」。
+    ///
+    /// 三处判定（有没有面板开着、点是不是落在面板里、全部收起）都按同一份
+    /// 清单走 —— 加第五块面板时只需要在这里补一项。
+    fn panels(&self) -> [Option<(bool, HWND)>; 4] {
+        [
+            self.calendar_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.cc_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.resmon_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.tool_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+        ]
+    }
+
+    /// 有面板开着吗。
+    fn panel_open(&self) -> bool {
+        self.panels().iter().flatten().any(|(visible, _)| *visible)
+    }
+
+    /// 现在有没有"正在操作 Dock"的事。这类状态下自动隐藏一律保持展开。
+    ///
+    /// 比"拖动中"多三件，都是实测出来的：
+    ///
+    /// - **面板开着**：光标在面板里，按几何已经离开 Dock —— 可面板就是
+    ///   Dock 的一部分，收起会让它凭空悬在半空。
+    /// - **设置窗口开着**：用户常一边调参数一边看栏体变化，收起等于把
+    ///   正在预览的东西藏起来。
+    /// - **起动台开着**：全屏盖住了 Dock，收起再展开只是白做一段动画。
+    fn dock_busy(&self) -> bool {
+        self.dock.dragging().is_some()
+            || self.panel_open()
+            || self.settings_slot.as_ref().is_some_and(|w| w.visible())
+            || self.launchpad_slot.as_ref().is_some_and(|w| w.visible())
+    }
+
+    /// 这个屏幕点是否落在某个**可见**面板里。
+    fn panel_covers(&self, x: i32, y: i32) -> bool {
+        self.panels()
+            .iter()
+            .flatten()
+            .any(|(visible, hwnd)| *visible && nooksill_gpu::popup::hits(*hwnd, x, y))
+    }
+
+    /// 收起全部面板。返回是否真的收了什么。
+    fn hide_panels(&mut self) -> bool {
+        let mut any = false;
+        if let Some(w) = self.calendar_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.cc_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.resmon_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.tool_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// 点面板外面收起（`[widgets] PanelDismiss`）。返回是否收起。
+    ///
+    /// 三处命中都不关：
+    ///
+    /// - **落在 Dock 上**：交给点击逻辑自己处理 —— 点卡片是切换、点图标是
+    ///   启动。放行之后"点一下就把面板收掉、应用却没动静"就不会发生。
+    /// - **落在面板里**：用户在操作面板。
+    /// - **配置关掉了**：这一项就是让用户不要自动收起。
+    fn step_panel_dismiss(&mut self) -> bool {
+        // 刚打开：把"打开它的那一下"的边沿丢掉，否则鼠标一离开 Dock
+        // 就会被读成一次新的点击，面板立刻自己关掉。
+        let open = self.panel_open();
+        if open && !self.panel_was_open {
+            self.watcher.reset();
+        }
+        self.panel_was_open = open;
+        // 没面板就什么都不做，连按键状态都不问。
+        if !open {
+            return false;
+        }
+        let Some((x, y)) = self.watcher.poll() else {
+            return false;
+        };
+        if self.dock.cfg.get_i32(Key::PANEL_DISMISS) == 0 {
+            return false;
+        }
+        if nooksill_gpu::popup::hits(self.hwnd, x, y) || self.panel_covers(x, y) {
+            return false;
+        }
+        if trace::popup() {
+            eprintln!("[popup] 面板外点了 ({x}, {y})，收起");
+        }
+        self.hide_panels()
+    }
+
+    fn step_resmon(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.debug_open_once()? {
+            // 这一帧先把面板建出来，下一帧再画。
+            return Ok(true);
+        }
+        // 卡片被点了 → 打开对应的面板。
+        //
+        // **点击只取一次**：`take_widget_click` 会清空标志，
+        // 两个面板各自 take 的话，先跑的那个会把点击吃掉。
+        if let Some(kind) = self.dock.take_widget_click() {
+            let dark = self
+                .dock
+                .cfg
+                .dock_is_dark(nooksill_platform::theme::is_dark());
+            if trace::geom() {
+                eprintln!("[widget] 卡片被点：{kind:?}");
+            }
+            // 面板之间互斥：打开别的面板就把别的收起来，免得几块叠在一起。
+            if kind != nooksill_core::layout::WidgetKind::Clock {
+                if let Some(w) = self.calendar_slot.as_mut() {
+                    w.hide();
+                }
+            }
+            if kind != nooksill_core::layout::WidgetKind::CtrlCenter {
+                if let Some(w) = self.cc_slot.as_mut() {
+                    w.hide();
+                }
+            }
+            match kind {
+                nooksill_core::layout::WidgetKind::Clock => {
+                    // 日历弹层：同一个卡片点第二下就是关掉。
+                    let open = self.calendar_slot.as_ref().is_some_and(|w| w.visible());
+                    if open {
+                        if let Some(w) = self.calendar_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        let today = nooksill_gpu::calendar_win::today();
+                        if self.calendar_slot.is_none() {
+                            let win = CalendarWindow::new(&self.gpu, self.ppp, dark, today)?;
+                            self.calendar_slot = Some(win);
+                        }
+                        let anchor = self.dock.widget_screen_rect(
+                            nooksill_core::layout::WidgetKind::Clock,
+                            self.pos.0,
+                            self.pos.1,
+                        );
+                        if let (Some(win), Some(anchor)) = (self.calendar_slot.as_mut(), anchor) {
+                            win.set_today(today);
+                            win.show_at(anchor, self.dock.cfg.edge);
+                        }
+                    }
+                }
+                nooksill_core::layout::WidgetKind::Resource => {
+                    // 与日历一样：卡片点第二下就收起。
+                    if self.resmon_slot.as_ref().is_some_and(|w| w.visible()) {
+                        if let Some(w) = self.resmon_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        if self.resmon_slot.is_none() {
+                            let mut win = ResMonWindow::new(&self.gpu, self.ppp, dark)?;
+                            win.attach_public();
+                            self.resmon_slot = Some(win);
+                        }
+                        if let Some(win) = self.resmon_slot.as_mut() {
+                            win.show();
+                        }
+                    }
+                }
+                nooksill_core::layout::WidgetKind::CtrlCenter => {
+                    let open = self.cc_slot.as_ref().is_some_and(|w| w.visible());
+                    if open {
+                        if let Some(w) = self.cc_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        let energy =
+                            self.dock.cfg.get_i32(nooksill_core::config::Key::CC_ENERGY) != 0;
+                        let hotspot = self
+                            .dock
+                            .cfg
+                            .get_i32(nooksill_core::config::Key::CC_HOTSPOT)
+                            != 0;
+                        if self.cc_slot.is_none() {
+                            // 磁贴顺序是用户拖出来的，存在 `[widgets] Order`。
+                            let order =
+                                nooksill_core::control::parse_order(&self.dock.cfg.cc_order);
+                            let win =
+                                CcWindow::new(&self.gpu, self.ppp, dark, energy, hotspot, &order)?;
+                            self.cc_slot = Some(win);
+                        }
+                        let anchor = self.dock.widget_screen_rect(
+                            nooksill_core::layout::WidgetKind::CtrlCenter,
+                            self.pos.0,
+                            self.pos.1,
+                        );
+                        if let (Some(win), Some(anchor)) = (self.cc_slot.as_mut(), anchor) {
+                            win.show_at(anchor, self.dock.cfg.edge);
+                        }
+                    }
+                }
+                nooksill_core::layout::WidgetKind::Tray => {
+                    // `Win+B` + Enter。不开面板、不改配置，纯键盘模拟。
+                    if trace::geom() {
+                        eprintln!("[widget] 打开系统托盘");
+                    }
+                    nooksill_platform::sysact::open_tray();
+                }
+                nooksill_core::layout::WidgetKind::Tool => {
+                    // 卡片点第二下收起。
+                    if self.tool_slot.as_ref().is_some_and(|w| w.visible()) {
+                        if let Some(w) = self.tool_slot.as_mut() {
+                            w.hide();
+                        }
+                    } else {
+                        if self.tool_slot.is_none() {
+                            // 第一次打开才读 `[Tool]` 段：面板关着时它不在内存里，
+                            // 也不该在 —— 没人看的东西没必要常驻。
+                            let ini = Ini::load(&self.paths.ini)?;
+                            let state = nooksill_core::tool::ToolState::load(&ini);
+                            let win = ToolWindow::new(&self.gpu, self.ppp, dark, state)?;
+                            self.tool_slot = Some(win);
+                        }
+                        if let Some(win) = self.tool_slot.as_mut() {
+                            win.show();
+                            if trace::geom() {
+                                eprintln!("[widget] 计时器面板已显示");
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 面板到期就重绘（数据每秒变一次）。
+        let mut need = false;
+        if let Some(win) = self.resmon_slot.as_mut() {
+            if win.visible() && win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+        }
+        // 起动台：全屏窗口，交互才重绘（图标线程到货时会 PostMessage 催）。
+        // 起动台自己改不了 Dock 的配置，把动作交回来执行。先收齐再处理：
+        // 处理时要 `&mut self`，不能和 `launchpad_slot` 的借用叠在一起。
+        let mut lp_cmds: Vec<nooksill_gpu::launchpad_win::LaunchpadCmd> = Vec::new();
+        if let Some(win) = self.launchpad_slot.as_mut() {
+            if win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+            while let Some(cmd) = win.take_cmd() {
+                lp_cmds.push(cmd);
+            }
+        }
+        for cmd in lp_cmds {
+            match cmd {
+                nooksill_gpu::launchpad_win::LaunchpadCmd::AddToDock { name, path } => {
+                    self.raw.push(Item::new(ItemKind::File, name, path));
+                    self.apply_item_change();
+                    need = true;
+                }
+            }
+        }
+        // 控制中心：只在交互后重绘；改过主题就通知主循环重读一次。
+        let mut cc_order: Option<Vec<nooksill_core::control::Tile>> = None;
+        if let Some(win) = self.cc_slot.as_mut() {
+            if win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+            if win.dirty_theme {
+                // 主题没有缓存：`theme::is_dark()` 每次都读注册表，下一帧
+                // 自然就是新配色。这里只需要保证"下一帧会发生"。
+                win.dirty_theme = false;
+                need = true;
+            }
+            cc_order = win.take_order();
+        }
+        if let Some(order) = cc_order {
+            // 只改内存副本 + 标脏：写盘走防抖队列（一次拖拽会连着换好几次位）。
+            self.dock.cfg.cc_order = nooksill_core::control::order_text(&order);
+            self.touch_cfg();
+            if trace::geom() {
+                eprintln!("[cc] 磁贴顺序 -> {}", self.dock.cfg.cc_order);
+            }
+            need = true;
+        }
+        // 日历弹层：只在交互后重绘一次，不跑定时器。
+        if let Some(win) = self.calendar_slot.as_mut() {
+            if win.due() {
+                win.render(&self.gpu)?;
+                need = true;
+            }
+        }
+        // 计时器面板：跑着的时候 50 ms 一帧。
+        let now = nooksill_gpu::tool_win::now_ms();
+        if let Some(win) = self.tool_slot.as_mut() {
+            if win.visible() && win.due() {
+                win.render(&self.gpu, now)?;
+                need = true;
+            }
+            if win.dirty {
+                win.dirty = false;
+                self.tool_save_at = Some(std::time::Instant::now());
+            }
+        }
+        Ok(need)
+    }
+
+    /// 把"该检测哪块矩形被遮挡"同步给扫描线程。
+    ///
+    /// 只在矩形真的变了时才发：主循环一秒跑几十轮，每轮都发会把队列灌满，
+    /// 而扫描线程是按"最新值有效"消费的。
+    fn sync_cover_target(&mut self) {
+        // 动画中栏体每帧都在变（放大、隐藏位移），矩形会抖一两个像素，
+        // 但遮挡结论不会变。等它停下来再同步，否则主循环每帧发一条，
+        // 队列会被灌满，扫描线程也一直在"收到新参数"里空转。
+        if self.dock.anim {
+            return;
+        }
+        // 注入了假结果就不用再算。
+        let cover = if self.dock.mode == DockMode::SmartHide && self.fake_covered.is_none() {
+            Some(self.bar_screen_rect())
+        } else {
+            None
+        };
+        // 指示点与"正在运行"气泡都关掉时不必扫运行状态（见 `ScanInput`）。
+        let want = ScanInput {
+            cover,
+            want_running: self.dock.cfg.scan_enabled(),
+        };
+        if Some(want) != self.scan_sent {
+            self.scan_sent = Some(want);
+            self.scanner.update(want);
+        }
+    }
+
+    /// 停靠带在**屏幕**坐标下的矩形（图标条 + 小组件条带 + 投影留白）。
+    ///
+    /// 遮挡判定必须覆盖整条带子：只看图标条的话，一个盖住时钟的窗口不会被
+    /// 当成"挡住"，智能隐藏就不会让位，Dock 与窗口叠在一起。
+    fn bar_screen_rect(&self) -> LRect {
+        let (x, y, w, h) = self.dock.hot_phys();
+        LRect::new(
+            self.pos.0 + x.round() as i32,
+            self.pos.1 + y.round() as i32,
+            self.pos.0 + (x + w).round() as i32,
+            self.pos.1 + (y + h).round() as i32,
+        )
+    }
+
+    /// 前台是沉浸式全屏（视频/游戏）时整体隐藏 Dock。
+    ///
+    /// 一秒查一次足够 —— 从全屏切回来到 Dock 重新出现，1 秒内感知不到延迟，
+    /// 而检查本身只是两个只读查询，不触发任何渲染。
+    /// 距进程启动的毫秒数。多处计时用它，保证同一个基准。
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(0)
+    }
+
+    fn step_fullscreen(&mut self) -> bool {
+        // 刚启动过应用就先不判定：见 `occlusion::LAUNCH_GRACE_MS`。
+        if occlusion::in_launch_grace(self.last_launch_ms, self.now_ms()) {
+            return false;
+        }
+        if self.last_fs_check.elapsed() < Duration::from_millis(u64::from(FS_CHECK_MS)) {
+            return false;
+        }
+        self.last_fs_check = Instant::now();
+        let fs = occlusion::is_fullscreen_foreground();
+        if trace::fs() {
+            eprintln!("[fs] {} -> {}", occlusion::fullscreen_trace(), fs);
+        }
+        if fs == self.fs_hidden {
+            return false;
+        }
+        self.fs_hidden = fs;
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
+        }
+        if trace::geom() {
+            eprintln!(
+                "[fullscreen] {}",
+                if fs { "隐藏 Dock" } else { "恢复 Dock" }
+            );
+        }
+        // 显示回来时立刻画一帧，否则会白屏到下一次事件。
+        !fs
+    }
+
+    /// 自动隐藏 / 智能隐藏。**必须轮询光标**，不能只靠窗口消息：收起后
+    /// 窗口内容被推到可视区外，那片区域的 alpha 是 0，鼠标事件会直接穿透，
+    /// 永远等不到 `WM_MOUSEMOVE`。
+    fn step_auto_hide(&mut self) -> bool {
+        if !self.dock.needs_hide_tick() {
+            return false;
+        }
+        let now_ms = self.now_ms();
+        let near = cursor_near(&self.dock, self.hwnd);
+        let busy = self.dock_busy();
+        // 智能隐藏才需要枚举窗口。按需调用：`EnumWindows` 要遍历桌面上
+        // 所有顶层窗口，100 ms 一次也吃不住白跑的代价。
+        // `NOOKSILL_FAKE_COVERED=0/1` 覆盖遮挡判定结果：桌面环境不可控，
+        // 要验证"遮挡消失就展开"这条分支不能真去最小化别人的窗口。
+        // 遮挡由扫描线程算（`EnumWindows` 一遍要遍历所有顶层窗口，
+        // 100 ms 一次不能压在 UI 线程上）。注入的假结果优先。
+        let covered =
+            self.dock.mode == DockMode::SmartHide && self.fake_covered.unwrap_or(self.covered);
+        let before = self.dock.hide_target;
+        self.dock.tick_auto_hide(near.hit, busy, covered, now_ms);
+        if trace::geom() && self.last_near != Some(near.hit) {
+            self.last_near = Some(near.hit);
+            eprintln!(
+                "[near] {} cursor=({},{}) hot=({:.0},{:.0},{:.0}x{:.0}) busy={busy} covered={covered}",
+                near.hit, near.cursor.0, near.cursor.1, near.hot.0, near.hot.1, near.hot.2, near.hot.3
+            );
+        }
+        if before == self.dock.hide_target {
+            return false;
+        }
+        if trace::geom() {
+            // 智能隐藏时点名盖住者："为什么躲起来"要能一眼看出，
+            // 否则只能对着一个 bool 猜是哪个窗口。
+            let by = if self.dock.mode == DockMode::SmartHide {
+                occlusion::covering_window(self.bar_screen_rect(), &[self.hwnd])
+                    .1
+                    .map_or_else(String::new, |t| format!(" by {t:?}"))
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "[hide] target={} near={} busy={busy} covered={covered}{by} cur={:.3} \
+                 cursor=({},{}) hot=({:.0},{:.0},{:.0}x{:.0})",
+                self.dock.hide_target,
+                near.hit,
+                self.dock.hide_cur,
+                near.cursor.0,
+                near.cursor.1,
+                near.hot.0,
+                near.hot.1,
+                near.hot.2,
+                near.hot.3
+            );
+        }
+        true
+    }
+
+    /// 画一帧：egui 画 Dock → 离屏 → 回读 → 分层窗口。
+    /// 打印小组件条带里每个卡片的**屏幕**坐标。
+    ///
+    /// 栏体坐标是窗口内的，自动化脚本要点击就得知道屏幕坐标 ——
+    /// 让程序自己报，比脚本自己推算靠谱（推算过一次，忘了加窗口偏移，
+    /// 点在了空气里）。
+    fn dump_widgets(&mut self) {
+        if !trace::geom() {
+            return;
+        }
+        let dock = &*self.dock;
+        // 只在**几何变了**的时候打印。每次重绘都打一遍会把日志淹掉
+        // （秒表跑着的时候 50 ms 一帧）。
+        let mut line = String::new();
+        for (i, (kind, w)) in dock.metrics.widgets.iter().enumerate() {
+            if let Some(left) =
+                dock.metrics
+                    .widgets
+                    .left_of(i, dock.geom.bar_l, dock.geom.bar_w, dock.metrics.gap)
+            {
+                line.push_str(&format!(
+                    "GEOM widget={kind:?} screen=({x},{y}) size=({w},{h})\n",
+                    x = left as i32 + self.pos.0,
+                    y = dock.geom.bar_top as i32 + self.pos.1,
+                    w = w,
+                    h = dock.metrics.bar_h as i32
+                ));
+            }
+        }
+        if line != self.widgets_dump {
+            self.widgets_dump = line.clone();
+            eprint!("{line}");
+        }
+    }
+
+    fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if trace::fps() {
+            self.fps_frames += 1;
+            let dt = self.fps_at.elapsed();
+            if dt >= Duration::from_secs(1) {
+                eprintln!(
+                    "[fps] {:.1} 帧/秒（hidden={} anim={}）",
+                    f32::from(u16::try_from(self.fps_frames).unwrap_or(u16::MAX))
+                        / dt.as_secs_f32(),
+                    self.dock.fully_hidden(),
+                    self.dock.anim
+                );
+                self.fps_frames = 0;
+                self.fps_at = Instant::now();
+            }
+        }
+        // **Dock 主题**，不是设置窗口主题：`UiTheme` 与 `DockTheme` 的 0/1
+        // 含义相反（见 `config.rs` 里那条防回归测试）。用错会把整个 Dock
+        // 画成另一套配色，而且看起来"只是颜色不对"，很难察觉是取值取错了。
+        let dark = self.dock.cfg.dock_is_dark(theme::is_dark());
+        // 文字由 `core::clock` 生成：日期格式、周几、行数、顺序都在那里，
+        // 日期格式、周几、行数、顺序都在那里（曾经在 bin 里手拼，少了年份）。
+        let clock: Option<Vec<ClockLine>> = if self.dock.cfg.clock {
+            Some(clock::clock_lines(&self.dock.cfg, &now_parts()))
+        } else {
+            None
+        };
+        // 系统外观变过就重读强调色（烟雾的 `accent` 色档要用）。
+        if self.dock.look_epoch != self.look_epoch {
+            self.look_epoch = self.dock.look_epoch;
+            self.accent = theme::accent().unwrap_or(PALETTE[0]);
+        }
+
+        let ppp = self.ppp;
+        // 主题色同步到 Dock：运行时值不写 ini，每帧出图时重算一次
+        // （空闲时本就不出帧，DWM 调用可以忽略）。必须在下面取 `&Dock`
+        // 之前写 —— 之后 cfg 就被不可变借用了。
+        self.dock.cfg.runtime_accent = if self.dock.cfg.get_i32(Key::UI_ACCENT_DOCK) != 0 {
+            nooksill_gpu::accent::resolve(&self.dock.cfg)
+        } else {
+            None
+        };
+        // 图标主题色：两个独立开关任一开启才解析一次（DWM 调用不重复）。
+        // 存运行时字段，Dock / 控制中心共用；各自再按自己的开关决定上色。
+        let icon_on = self.dock.cfg.get_i32(Key::UI_ACCENT_DOCK_ICONS) != 0
+            || self.dock.cfg.get_i32(Key::UI_ACCENT_CC_ICONS) != 0;
+        self.dock.cfg.runtime_icon_accent = if icon_on {
+            nooksill_gpu::accent::resolve(&self.dock.cfg)
+        } else {
+            None
+        };
+        let cc_accent = if self.dock.cfg.get_i32(Key::UI_ACCENT_CC_ICONS) != 0 {
+            self.dock.cfg.runtime_icon_accent
+        } else {
+            None
+        };
+        if let Some(win) = self.cc_slot.as_mut() {
+            win.set_icon_accent(cc_accent);
+        }
+        let dock = &*self.dock;
+        // 烟雾的输入全部在闭包外取好：闭包里同时持有 `&Dock` 与
+        // `&mut SmokeFx`，再读 `self` 的其它字段就会撞借用。
+        let tune = Tuning::from_config(&dock.cfg, self.accent);
+        let view = SmokeView {
+            // 光晕要罩住**整条停靠带**（图标条 + 小组件条带），不只是图标条 ——
+            // 光标判定与遮挡判定用的也是这一条并集。
+            bar: dock.hot_phys(),
+            offset: dock.hide_offset(),
+            cursor: dock.hover.then_some(dock.mouse),
+            now_s: self.start.elapsed().as_secs_f64(),
+        };
+        let smoke = &mut self.smoke;
+        let raw = raw_input(self.frame.size(), ppp, self.start);
+        self.frame
+            .render(&self.gpu, raw, self.hwnd, self.pos, |ui| {
+                // 烟必须先画：它是**背景**光晕，栏体要盖在它上面
+                // （画在上面会把图标染紫）。
+                smoke.paint(ui, ppp, &tune, view);
+                dock.paint(ui, ppp, dark, clock.as_deref());
+            })?;
+        self.dump_widgets();
+        Ok(())
+    }
+
+    /// Smoke needs a frame whenever visible. Pacing comes from the global
+    /// frame cap / VSync setting, not a per-effect timer.
+    fn step_smoke(&mut self) -> bool {
+        let tune = Tuning::from_config(&self.dock.cfg, self.accent);
+        if !tune.enabled || self.fs_hidden || self.dock.fully_hidden() {
+            return false;
+        }
+        true
+    }
+
+    /// 按当前停靠边 / 预留区 / 尺寸重算窗口位置并移动。
+    fn reposition(&mut self) {
+        self.pos = layout::window_origin(
+            self.dock.cfg.edge,
+            self.work,
+            self.reserved,
+            self.size.0,
+            self.size.1,
+        );
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                self.pos.0,
+                self.pos.1,
+                self.size.0,
+                self.size.1,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    /// 等下一个事件。有消息就醒；动画中按 16 ms 醒一次；自动隐藏 / 强制
+    /// 收起开着时按 100 ms 轮询光标；开着烟雾时按到点叫醒。
+    ///
+    /// 后台线程的结果**不用轮询**：它们各自 `PostMessage(WM_APP_WAKE)`
+    /// 打断这次等待，所以这里可以真的睡到 `FS_CHECK_MS`（全屏检测周期）。
+    fn wait(&self) {
+        let smoke_on = Tuning::from_config(&self.dock.cfg, self.accent).enabled
+            && !self.fs_hidden
+            && !self.dock.fully_hidden();
+        // Active = continuous repaint. Idle keeps the "zero frames" promise.
+        let mut timeout = if self.dock.anim || smoke_on {
+            self.frame_interval_ms()
+        } else if self.dock.needs_hide_tick() {
+            100
+        } else {
+            FS_CHECK_MS
+        };
+        // Panel dismissal polls global key state.
+        if self.panel_open() && self.dock.cfg.get_i32(Key::PANEL_DISMISS) != 0 {
+            timeout = timeout.min(nooksill_gpu::popup::POLL_MS);
+        }
+        // The settings window owns an egui repaint deadline. Without this the
+        // main loop could sleep a full second and stall its UI.
+        if let Some(sw) = &self.settings_slot {
+            if let Some(left) = sw.repaint_in() {
+                if left != Duration::MAX {
+                    timeout = timeout.min(left.as_millis().clamp(1, u128::from(u32::MAX)) as u32);
+                }
+            }
+        }
+        unsafe {
+            MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+    }
+
+    /// Frame pacing. 0 = unlimited (1 ms pump); VSync overrides the cap.
+    fn frame_interval_ms(&self) -> u32 {
+        let cfg = &self.dock.cfg;
+        let vsync = cfg.get_i32(Key::VSYNC) != 0;
+        let vsync_ms = if vsync {
+            nooksill_gpu::perf::vsync_interval_ms(self.hwnd)
+        } else {
+            16
+        };
+        nooksill_gpu::perf::pacing_ms(cfg.get_i32(Key::FRAME_CAP), vsync, vsync_ms)
+    }
+}
+
+/// 把队列里的消息一次处理完：逐条唤醒会造成"一帧一消息"的抖动。
+///
+/// 做成自由函数而不是 `App` 的方法：处理消息期间不需要碰 `App`，
+/// 少一层借用关系。
+fn pump(msg: &mut MSG) -> Pumped {
+    let mut saw = false;
+    // 这一批里有没有"真消息"（非后台唤醒）。全是唤醒就只是打断等待。
+    let mut real = false;
+    loop {
+        let has = unsafe { PeekMessageW(msg, None, 0, 0, PM_REMOVE) };
+        if !has.as_bool() {
+            break;
+        }
+        saw = true;
+        if msg.message == WM_QUIT {
+            return Pumped::Quit;
+        }
+        if msg.message != WM_APP_WAKE {
+            real = true;
+        }
+        unsafe {
+            let _ = TranslateMessage(msg);
+            DispatchMessageW(msg);
+        }
+    }
+    if real {
+        Pumped::Frames
+    } else if saw {
+        Pumped::Wake
+    } else {
+        Pumped::Idle
+    }
+}
+
+/// `NOOKSILL_FAKE_MOUSE="u,v"`：解析成钉住的光标位置（逻辑/物理同单位的
+/// Dock 内部坐标）。格式不对就当没设。
+fn fake_mouse_from_env() -> Option<(f32, f32)> {
+    let s = std::env::var("NOOKSILL_FAKE_MOUSE").ok()?;
+    let (a, b) = s.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// `NOOKSILL_FAKE_COVERED=0/1`：覆盖智能隐藏的遮挡判定。
+fn fake_covered_from_env() -> Option<bool> {
+    let s = std::env::var("NOOKSILL_FAKE_COVERED").ok()?;
+    match s.trim() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// `NOOKSILL_GEOM=1` 时打印度量与槽位，用于定位几何偏差（验收线 ≤1 px）。
+fn dump_geometry(dock: &Dock, dpi: i32) {
+    if !trace::geom() {
+        return;
+    }
+    let m = &dock.metrics;
+    eprintln!(
+        "GEOM dpi={dpi} S={:.1} Z={:.1} g={:.1} sep={:.1} pad={:.1} padX={:.1} barH={:.1} \
+         over={:.1} margin={:.1} clockW={} clockExtra={:.1} reflH={:.1} lw={} lh={}",
+        m.s,
+        m.z,
+        m.gap,
+        m.sep_w,
+        m.pad,
+        m.pad_x,
+        m.bar_h,
+        m.overhang,
+        m.margin,
+        m.clock_w,
+        m.widget_extra,
+        m.refl_h,
+        m.lw,
+        m.lh
+    );
+    eprintln!(
+        "GEOM bar_l={:.1} bar_w={:.1} bar_top={:.1} bar_bottom={:.1} icon_bottom={:.1}",
+        dock.geom.bar_l,
+        dock.geom.bar_w,
+        dock.geom.bar_top,
+        dock.geom.bar_bottom,
+        dock.geom.icon_bottom
+    );
+    eprintln!("GEOM slot_l={:?}", dock.geom.slot_l);
+}
+
+/// 取本地时间，转成 `core` 用的结构（去掉 Win32 依赖）。
+fn now_parts() -> clock::ClockParts {
+    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    clock::ClockParts {
+        year: st.wYear,
+        month: st.wMonth as u8,
+        day: st.wDay as u8,
+        weekday: st.wDayOfWeek as u8,
+        hour: st.wHour as u8,
+        minute: st.wMinute as u8,
+        second: st.wSecond as u8,
+    }
+}
+
+/// 取 `Dock` 指针。窗口数据没设好时返回空，调用方各自判空。
+fn dock_ptr(hwnd: HWND) -> *mut Dock {
+    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dock }
+}
+
+/// 客户区坐标（`WM_*MOUSE*` 给的就是物理像素）。
+///
+/// **不除以 ppp**：Dock 的几何（槽位、栏体、`lh`）全是物理像素，
+/// 鼠标也必须同单位，否则命中会整体偏移一个 DPI 缩放因子。
+fn physical_xy(lparam: LPARAM) -> (f32, f32) {
+    let x = (lparam.0 & 0xFFFF) as f32;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as f32;
+    (x, y)
+}
+
+/// 申请一次 `WM_MOUSELEAVE`。系统只发一次，所以每次移动都要重新申请。
+fn arm_mouse_leave(hwnd: HWND) {
+    let mut tme = TRACKMOUSEEVENT {
+        cbSize: u32::try_from(std::mem::size_of::<TRACKMOUSEEVENT>()).unwrap_or(0),
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    unsafe {
+        let _ = TrackMouseEvent(&raw mut tme);
+    }
+}
+
+/// 光标下面是"能点的东西"吗（条目图标 / 小组件卡片）。
+///
+/// `WM_SETCURSOR` 与 `WM_MOUSEMOVE` 都要用同一套判断 —— 前者在没捕获时
+/// 生效，后者在按住拖拽（捕获）时生效，两者必须给出一样的答案。
+fn dock_on_item(dock: &Dock, u: f32, v: f32) -> bool {
+    dock.hit_at(u, v).is_some() || dock.widget_at(u, v).is_some()
+}
+
+/// 光标形状：分割线上给上下双箭头（可拖动缩放），其余可点的是手型。
+///
+/// 必须和 `WM_MOUSEMOVE` / `WM_SETCURSOR` 共用这一处 —— 按住拖动时系统
+/// 不发 `WM_SETCURSOR`，两条路径各写一遍就会在拖拽中退回箭头。
+fn dock_cursor(dock: &Dock, u: f32, v: f32) {
+    if dock.sep_cursor(u, v) {
+        nooksill_gpu::cursor::set(nooksill_gpu::cursor::size_ns());
+    } else {
+        nooksill_gpu::cursor::set_hand_if(dock_on_item(dock, u, v));
+    }
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut ps);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_MOUSEMOVE => {
+            let (u, v) = physical_xy(lparam);
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).mouse = (u, v);
+                    (*ptr).hover = true;
+                    // 按住时把移动喂给拖拽状态机；没按住时它自己会早退。
+                    (*ptr).drag_to(u, v);
+                    (*ptr).mark_dirty();
+                }
+                // 光标也要在这里设一次：**按住时（SetCapture）系统不发
+                // `WM_SETCURSOR`**，只靠那条的话整段拖拽期间都是忙光标。
+                dock_cursor(&*ptr, u, v);
+                // 让系统在鼠标离开时发 `WM_MOUSELEAVE`：不装这个钩子，
+                // `hover` 会永远是 true，Dock 停在放大状态不回去。
+                arm_mouse_leave(hwnd);
+            }
+            LRESULT(0)
+        }
+        // 鼠标离开窗口：取消悬停。没有这一段，移开鼠标后图标会一直放大。
+        WM_MOUSELEAVE => {
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).mouse = (-1.0, -1.0);
+                    (*ptr).hover = false;
+                    (*ptr).mark_dirty();
+                }
+            }
+            LRESULT(0)
+        }
+        // 光标：类光标只管"刚进入窗口"这一瞬间，之后每次移动、点击、
+        // Alt+Tab 回来，系统都会再发这一条。不回它就退回系统默认 ——
+        // 实测那个默认是**忙光标**（沙漏），也就是这个 bug 的成因。
+        WM_SETCURSOR => {
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                if let Some((u, v)) = nooksill_gpu::cursor::client_pos(hwnd) {
+                    dock_cursor(&*ptr, u, v);
+                }
+            }
+            LRESULT(1)
+        }
+        WM_LBUTTONDOWN => {
+            let (u, v) = physical_xy(lparam);
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                // 命中时 `SetCapture`：把后续消息都收到自己这里，鼠标移出
+                // 窗口也不会丢抬起事件（否则 Dock 会"卡住"）。
+                // Shift 必须在**按下**时读：抬起那一刻用户可能已经松开，
+                // 而 Shift+点击的语义是"我要开第二个实例"，读晚了就丢。
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                if unsafe { (*ptr).press_at(u, v, shift) } {
+                    unsafe {
+                        let _ = SetCapture(hwnd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (u, v) = physical_xy(lparam);
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    // **先结算点击，再释放捕获。** 顺序反了会把每一次点击都
+                    // 吞掉：`ReleaseCapture()` 会**同步**送一条
+                    // `WM_CAPTURECHANGED` 给本窗口（见下面那条分支），而那条
+                    // 分支会 `cancel_drag()` 清掉 `press` —— 等轮到
+                    // `release_at()` 时"按在哪个图标上"已经没人记得了。
+                    // 这个 bug 从 M1 就存在，表现为"点图标没有任何反应"。
+                    // 小组件卡片在栏体外侧，不在条目槽位里 ——
+                    // 先判它，命中就记卡片点击，不当条目点击。
+                    if let Some(kind) = (*ptr).widget_at(u, v) {
+                        (*ptr).click_widget(kind);
+                    } else {
+                        // 只记录"点了哪个"，真正的启动放在主循环里做：
+                        // `ShellExecuteW` 可能阻塞几十毫秒，不该占着窗口过程。
+                        let _ = (*ptr).release_at(u, v);
+                    }
+                    (*ptr).mark_dirty();
+                    // 结算完再交还捕获（此时 `WM_CAPTURECHANGED` 已经没有
+                    // 状态可清了）。
+                    if GetCapture() == hwnd {
+                        let _ = ReleaseCapture();
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        // **不要抢焦点**。Dock 是常驻工具窗，点图标时如果把焦点从用户
+        // 正在用的窗口抢走，接着启动的应用反而拿不到预期的前台位置，
+        // 观感是"点一下整个桌面闪一下"。
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        // 鼠标捕获被抢走（UAC 弹窗、Alt+Tab、别的程序 SetCapture）：
+        // 抬起事件永远不会到，必须主动取消拖拽，否则下次点击会带着
+        // 上一次的"按下"状态，表现为点一下启动了上一个图标。
+        WM_CAPTURECHANGED => {
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).cancel_drag();
+                }
+            }
+            LRESULT(0)
+        }
+        // 中键 = 强制新实例。
+        WM_MBUTTONUP => {
+            let (u, v) = physical_xy(lparam);
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).force_click(u, v);
+                    (*ptr).mark_dirty();
+                }
+            }
+            LRESULT(0)
+        }
+        // `Ctrl+Alt+D` 强制收起 / 恢复。常显模式下也能用。
+        WM_HOTKEY => {
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                let hidden = unsafe { (*ptr).toggle_force_hide() };
+                eprintln!("[hotkey] {}", if hidden { "已收起" } else { "已恢复" });
+            }
+            LRESULT(0)
+        }
+        // 系统深浅色切换（`ImmersiveColorSet`）要**立即**生效。
+        // 只在启动时读一次主题的话，用户切到深色后 Dock 会一直是浅色，
+        // 直到重启 —— 这是最容易被当成 bug 报上来的那种问题。
+        WM_SETTINGCHANGE => {
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).mark_dirty();
+                    (*ptr).anim = true;
+                    // 强调色 / 深浅色都在 `App` 里，窗口过程够不着 ——
+                    // 用计数把"该重读了"这件事传上去。
+                    (*ptr).look_epoch = (*ptr).look_epoch.wrapping_add(1);
+                }
+            }
+            LRESULT(0)
+        }
+        // 右键：只记位置，菜单由主循环弹（模态，不能在窗口过程里阻塞）。
+        WM_RBUTTONDOWN => LRESULT(0),
+        WM_RBUTTONUP => {
+            let (u, v) = physical_xy(lparam);
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).request_menu(u, v);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            if wparam.0 as u32 == 0x1B {
+                unsafe { PostQuitMessage(0) };
+            }
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// 全屏检测的最小间隔（毫秒）。
+///
+/// 只做两个只读查询、不触发渲染，所以下限就是"多久能发现自己该让开"。
+/// 1 秒对用户感知足够快，同时把空闲唤醒压到每秒一次。
+const FS_CHECK_MS: u32 = 1000;
+
+/// 临时条目（未固定的运行中应用）最多显示几个。
+///
+/// 条目多时栏体会整体等比缩小（下限 25%），几十个临时图标会把 Dock 压成
+/// 一条细线。16 已经覆盖"浏览器 + 编辑器 + 聊天 + 几个工具"的常见桌面。
+const MAX_TEMP: usize = 16;
+
+/// 给临时条目起名：优先 shell 的显示名（"Google Chrome"），退回文件名。
+fn temp_name(exe: &str) -> String {
+    if let Some(n) = nooksill_platform::icon::display_name(exe) {
+        if !n.is_empty() {
+            return n;
+        }
+    }
+    std::path::Path::new(exe)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(exe)
+        .to_owned()
+}
+
+/// 设置面板改动到写盘的防抖窗口（毫秒）。
+///
+/// 拖一下滑块会产生几十次 `changed`；ini 是 UTF-16 全量回写，逐次写盘
+/// 会让一次拖动变成几十次文件重写。400 ms 是"停手就存、拖着不存"的折中。
+const CFG_SAVE_DEBOUNCE_MS: u64 = 400;
+
+/// 计时器面板的落盘防抖（毫秒）。
+///
+/// 比配置短：勾一条待办是一次一下的动作，400 ms 会让人觉得没生效。
+/// 但仍要防抖 —— 秒表跑着的时候每一帧的剩余量都不同。
+const TOOL_SAVE_DEBOUNCE_MS: u64 = 120;
+
+/// 给每个条目装图标。
+///
+/// 只覆盖能拿到图标的几类：
+///
+/// | 条目 | 做法 |
+/// |---|---|
+/// | 分割线 | 不装（画竖线） |
+/// | 有 `icon_src` 且文件存在 | **暂不支持** —— 需要 PNG/JPEG 解码器 |
+/// | 网址 | **暂不支持**（要联网抓 favicon）|
+/// | 其余（文件 / 文件夹 / 快捷方式 / 回收站） | 交给 shell 图像列表 |
+///
+/// 后两条退化为首字占位。
+fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
+    for (i, item) in raw.iter().enumerate() {
+        // 分割线不画图标；已经有图标的跳过 —— `replace_items` 会按路径把
+        // 旧图标搬过来，全量重排会让整条 Dock 闪一次"首字占位"。
+        if item.kind == ItemKind::Separator
+            || dock.has_icon(i)
+            || nooksill_gpu::glyph::Builtin::from_path(&item.path).is_some()
+        {
+            continue;
+        }
+        loader.submit(IconRequest {
+            index: i,
+            kind: item.kind,
+            path: item.path.clone(),
+            fit: item.fit,
+        });
+    }
+}
+
+/// 一次"靠近"判定的输入与结论。
+///
+/// 带上光标与热区是为了诊断：只打一个 `near=false` 说明不了是光标没到、
+/// 还是热区算错了 —— 这两种情况在这个项目里都真实发生过。
+#[derive(Clone, Copy, Debug)]
+struct Near {
+    hit: bool,
+    cursor: (i32, i32),
+    /// 热区在屏幕坐标下的外接矩形。
+    hot: (f32, f32, f32, f32),
+}
+
+/// 光标是否算"贴着 Dock"。
+///
+/// 这里只负责取屏幕/窗口坐标，**判定本身在
+/// [`layout::near_dock`]** —— 纯函数才能用单元测试把"光标在时钟上"这类
+/// 情况钉死，而不是靠人挪鼠标看它抖不抖。
+fn cursor_near(dock: &Dock, hwnd: HWND) -> Near {
+    let mut p = POINT::default();
+    let mut wr = RECT::default();
+    if unsafe { GetCursorPos(&raw mut p) }.is_err()
+        || unsafe { GetWindowRect(hwnd, &raw mut wr) }.is_err()
+    {
+        return Near {
+            hit: false,
+            cursor: (p.x, p.y),
+            hot: (0.0, 0.0, 0.0, 0.0),
+        };
+    }
+    let (hx, hy, hw, hh) = dock.hot_phys();
+    let hot = (wr.left as f32 + hx, wr.top as f32 + hy, hw, hh);
+    Near {
+        hit: layout::near_dock(
+            dock.cfg.edge,
+            (p.x, p.y),
+            hot,
+            dock.work,
+            dock.inner_reach(),
+            !dock.hide_target,
+        ),
+        cursor: (p.x, p.y),
+        hot,
+    }
+}
+
+/// 把 `.lnk` 条目解析成真实 exe 路径，缓存在 `Item.target`。
+///
+/// 只在启动时跑一次：解析要初始化 COM 并创建 shell 对象，
+/// 每次都做的话 1.2 秒一轮的扫描会明显变重。解析失败（指向文档、
+/// 指向 URL、文件已删除）就保持空 —— 那种条目本来就没有可匹配的 exe。
+fn resolve_targets(items: &mut [Item]) {
+    let mut resolved = 0usize;
+    for item in items.iter_mut() {
+        // 只有文件类条目才有可执行目标；分割线/网址/文件夹/回收站跳过。
+        if item.kind != ItemKind::File {
+            continue;
+        }
+        if let Some(sc) = shortcut::resolve(&item.path) {
+            item.target = sc.target;
+            resolved += 1;
+        }
+    }
+    if trace::geom() {
+        eprintln!("[scan] 解析出 {resolved} 个可执行目标");
+    }
+}
+
+// ============================ 右键菜单 ============================
+
+/// 菜单窗口状态。放在堆上，指针挂到 `GWLP_USERDATA`。
+struct MenuWindow {
+    menu: Menu,
+    dark: bool,
+    /// 模态循环的退出标志。
+    done: bool,
+    /// 被选中的命令。`None` + `done` = 取消。
+    cmd: Option<MenuCmd>,
+    /// DPI 缩放。物理尺寸按它算，命中也要用它换算回逻辑坐标。
+    ppp: f32,
+    /// 实时背景来了新帧，下一轮重绘一次。
+    wake: bool,
+}
+
+fn menu_ptr(hwnd: HWND) -> *mut MenuWindow {
+    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuWindow }
+}
+
+/// 客户区物理坐标 → 逻辑坐标（`Menu::hit` 吃的是逻辑坐标）。
+fn menu_logical(lparam: LPARAM, ppp: f32) -> (f32, f32) {
+    let (x, y) = physical_xy(lparam);
+    (x / ppp, y / ppp)
+}
+
+unsafe extern "system" fn menu_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        if trace::menu() {
+            eprintln!("[menu-proc] msg=0x{msg:04X} wparam=0x{:X}", wparam.0);
+        }
+        match msg {
+            // 与 Dock 一样不抢焦点：菜单是工具窗，抢焦点会让用户原本正在
+            // 用的窗口失焦，关闭菜单后还得再点一次才能继续。
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            // 实时背景线程有新帧：标一下，下一轮画一帧。
+            WM_APP_WAKE => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    (*ptr).wake = true;
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    let (u, v) = menu_logical(lparam, (*ptr).ppp);
+                    let hit = (*ptr).menu.hit(u, v);
+                    (*ptr).menu.set_hover(hit);
+                    // 菜单一开就 `SetCapture`，捕获期间没有 `WM_SETCURSOR`，
+                    // 光标只能在这里设（ADR-045）。
+                    nooksill_gpu::cursor::set_hand_if(hit.is_some());
+                }
+                LRESULT(0)
+            }
+            // 菜单也要自己回光标（ADR-045：类光标留空的窗口会显示忙光标）。
+            // 悬停在可选项上给手型，分隔带/空白给箭头。
+            WM_SETCURSOR => {
+                let mut on_item = false;
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    if let Some((u, v)) = nooksill_gpu::cursor::client_pos(hwnd) {
+                        let ppp = (*ptr).ppp;
+                        on_item = (*ptr).menu.hit(u / ppp, v / ppp).is_some();
+                    }
+                }
+                nooksill_gpu::cursor::set_hand_if(on_item);
+                LRESULT(1)
+            }
+            // 点在菜单矩形之外 = 取消。这条依赖 `SetCapture`：
+            // 菜单没有焦点，别的窗口上的点击不会转发过来。
+            WM_LBUTTONDOWN => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    let (u, v) = menu_logical(lparam, (*ptr).ppp);
+                    let (w, h) = (*ptr).menu.logical_size();
+                    if u < 0.0 || v < 0.0 || u > w || v > h {
+                        (*ptr).done = true;
+                    }
+                }
+                LRESULT(0)
+            }
+            // 抬起即选中。注意 `hit` 返回 `None` 时也要结束 ——
+            // 落在分隔带上的点击等于"什么也没选"，菜单应当收起。
+            WM_LBUTTONUP => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    let (u, v) = menu_logical(lparam, (*ptr).ppp);
+                    (*ptr).cmd = (*ptr).menu.hit(u, v).and_then(|i| (*ptr).menu.cmd_at(i));
+                    (*ptr).done = true;
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                // Esc 取消。其他键忽略：菜单没有键盘导航，别装作有。
+                if wparam.0 as u32 == 0x1B {
+                    let ptr = menu_ptr(hwnd);
+                    if !ptr.is_null() {
+                        (*ptr).done = true;
+                    }
+                }
+                LRESULT(0)
+            }
+            // 捕获被别人抢走（弹窗、Alt+Tab）：已经收不到点击了，
+            // 必须收起，否则会挂在屏幕上等一个永远不会到来的"取消"。
+            WM_CAPTURECHANGED => {
+                let ptr = menu_ptr(hwnd);
+                if !ptr.is_null() {
+                    (*ptr).done = true;
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+/// 注册菜单窗口类。已注册时 `RegisterClassW` 返回 0，忽略即可。
+fn register_menu_class() -> Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        let hinst = GetModuleHandleW(None)?;
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(menu_proc),
+            hInstance: HINSTANCE(hinst.0),
+            lpszClassName: w!("NookSillMenuWindow"),
+            // 同上：类光标留空 = 忙光标（ADR-045）。
+            hCursor: nooksill_gpu::cursor::class_cursor(),
+            hIcon: nooksill_gpu::app_icon().unwrap_or_default(),
+            ..Default::default()
+        };
+        RegisterClassW(&raw const wc);
+    }
+    Ok(())
+}
+
+/// 菜单窗口的复用槽：窗口句柄 + 专属渲染器。
+///
+/// 为什么渲染器要独立：Dock 的 `FrameRenderer` 尺寸固定为栏体大小，
+/// 菜单尺寸完全不同。而 `resize` 只重建离屏目标与 DIB，
+/// egui 上下文与 wgpu 管线（最贵的两步）都保留。
+type MenuSlot = Option<(HWND, FrameRenderer)>;
+
+/// Return the frost config for one panel, if enabled.
+/// `frost::blur_rgba` clamps the radius again (1..12).
+fn frost_spec(cfg: &Config, key: Key, corner_pt: f32) -> Option<FrostSpec> {
+    if cfg.get_i32(key) == 0 {
+        return None;
+    }
+    Some(FrostSpec {
+        radius: cfg.get_i32(Key::Blur).max(1) as u32,
+        corner_pt,
+    })
+}
+
+/// Show a menu and block until the user picks or dismisses it.
+/// Modal: Dock input is ignored. `SetCapture` closes on outside click
+/// without stealing focus.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "argument group is the API boundary"
+)]
+fn show_menu(
+    gpu: &Gpu,
+    slot: &mut MenuSlot,
+    menu: Menu,
+    cursor: (f32, f32),
+    bounds: (f32, f32, f32, f32),
+    dark: bool,
+    ppp: f32,
+    start: Instant,
+    frost: Option<FrostSpec>,
+) -> Result<Option<MenuCmd>, Box<dyn std::error::Error>> {
+    let (lw, lh) = menu.logical_size();
+    // 向上取整：少一个像素会把最后一行的圆角裁掉。
+    let pw = (lw * ppp).ceil() as i32;
+    let ph = (lh * ppp).ceil() as i32;
+    let (lx, ly) = Menu::place(cursor, (lw, lh), bounds);
+    let (px, py) = ((lx * ppp).round() as i32, (ly * ppp).round() as i32);
+
+    // 懒建：第一次开菜单时建窗口与渲染器，之后复用。
+    // 第一次会慢一点（装 CJK 字体 + 编译 wgpu 管线），之后只剩 resize。
+    if slot.is_none() {
+        register_menu_class()?;
+        let hinst = unsafe { GetModuleHandleW(None)? };
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("NookSillMenuWindow"),
+                w!("NookSillMenu"),
+                WS_POPUP,
+                px,
+                py,
+                pw,
+                ph,
+                None,
+                None,
+                Some(HINSTANCE(hinst.0)),
+                None,
+            )?;
+            let renderer = FrameRenderer::new(gpu, pw as u32, ph as u32, ppp)?;
+            *slot = Some((hwnd, renderer));
+        }
+    }
+
+    // 上面刚保证 `Some`；用 `ok_or` 而不是 `expect`：万一将来改动破坏了这个
+    // 不变量，应当报错而不是把进程打崩。
+    let Some((hwnd, renderer)) = slot.as_mut() else {
+        return Err("菜单窗口未初始化".into());
+    };
+    renderer.resize(gpu, pw as u32, ph as u32)?;
+
+    // 位置与尺寸一起改：菜单每次打开的高度都可能不同。
+    unsafe {
+        let _ = SetWindowPos(*hwnd, Some(HWND_TOPMOST), px, py, pw, ph, SWP_NOACTIVATE);
+    }
+
+    if trace::geom() {
+        eprintln!(
+            "[menu] items={} labels={:?} logical=({lw},{lh}) physical=({pw},{ph}) at=({px},{py})",
+            menu.entries.len(),
+            menu.entries
+                .iter()
+                .map(|e| e.label.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+    // 位置尺寸刚设好、窗口还没显示 —— 这时抓桌面不会抓到自己。
+    if let Some(spec) = frost {
+        spec.apply(renderer, *hwnd, ppp);
+        // 显示后由抓取线程持续更新背景；先把自己排除出屏幕捕获，
+        // 否则它抓到的就是菜单本身。
+        nooksill_gpu::frost::exclude_from_capture(*hwnd);
+        renderer.start_live_frost(*hwnd, spec, ppp);
+    } else {
+        renderer.clear_frost();
+        renderer.stop_live_frost();
+    }
+    let frost_on = renderer.frost_on();
+
+    let mut state = Box::new(MenuWindow {
+        menu,
+        dark,
+        done: false,
+        cmd: None,
+        ppp,
+        wake: false,
+    });
+    unsafe {
+        SetWindowLongPtrW(*hwnd, GWLP_USERDATA, (&raw mut *state) as isize);
+        let _ = ShowWindow(*hwnd, SW_SHOWNA);
+        SetCapture(*hwnd);
+    }
+
+    // 首帧必画：窗口是重新显示的，之前那块内容已经无效。
+    let mut painted: Option<Option<usize>> = None;
+    let mut msg = MSG::default();
+    loop {
+        // 只取本窗口的消息：模态期间 Dock 的输入要压住。
+        while unsafe { PeekMessageW(&raw mut msg, Some(*hwnd), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        if state.done {
+            break;
+        }
+        // 高亮变了才重绘。菜单很小，但没必要鼠标每动一像素就跑一遍 GPU。
+        // 毛玻璃的实时背景来了也要重绘一次（`wake` 由窗口过程置起）。
+        if painted != Some(state.menu.hover) || state.wake {
+            painted = Some(state.menu.hover);
+            state.wake = false;
+            let menu = &state.menu;
+            let dark = state.dark;
+            renderer.render(
+                gpu,
+                raw_input(renderer.size(), ppp, start),
+                *hwnd,
+                (px, py),
+                |ui| menu.paint(ui, dark, frost_on),
+            )?;
+        }
+        unsafe {
+            MsgWaitForMultipleObjectsEx(None, 200, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+    }
+
+    if trace::geom() {
+        eprintln!("[menu] 关闭 cmd={:?}", state.cmd);
+    }
+    renderer.stop_live_frost();
+    nooksill_gpu::frost::allow_capture(*hwnd);
+    unsafe {
+        if GetCapture() == *hwnd {
+            let _ = ReleaseCapture();
+        }
+        SetWindowLongPtrW(*hwnd, GWLP_USERDATA, 0);
+        let _ = ShowWindow(*hwnd, SW_HIDE);
+    }
+    Ok(state.cmd)
+}
+
+// ============================ 设置窗口 ============================
+
+/// 首次打开时建窗，之后一直复用同一个窗口与渲染器。
+///
+/// 懒建是为了别把"装字体 + 编译 GPU 管线"那几十毫秒记在 Dock 的启动时间上：
+/// 大部分会话压根不会打开设置。
+/// 懒建起动台窗口。只在第一次打开时建（里面有一条取图标的线程）。
+fn ensure_launchpad<'a>(
+    gpu: &Gpu,
+    slot: &'a mut Option<Pin<Box<LaunchpadWindow>>>,
+    paths: &Paths,
+    ppp: f32,
+    dark: bool,
+) -> Result<&'a mut LaunchpadWindow, Box<dyn std::error::Error>> {
+    if slot.is_none() {
+        let dat = paths.dir.join("launchpad.dat");
+        *slot = Some(LaunchpadWindow::new(gpu, ppp, dark, &dat)?);
+    }
+    Ok(slot.as_mut().expect("上面刚保证过"))
+}
+
+fn ensure_settings<'a>(
+    gpu: &Gpu,
+    slot: &'a mut Option<Pin<Box<SettingsWindow>>>,
+    paths: &Paths,
+    ppp: f32,
+) -> Result<&'a mut SettingsWindow, Box<dyn std::error::Error>> {
+    if slot.is_none() {
+        let monitors = display::monitors();
+        let state = SettingsState {
+            config_dir: paths.dir.display().to_string(),
+            monitors: monitors
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    if i == 0 {
+                        "主显示器".to_owned()
+                    } else {
+                        format!("显示器 {}", i + 1)
+                    }
+                })
+                .collect(),
+            // 显示的是注册表里的真值，不是配置项：用户可以在任务管理器里改它。
+            auto_start: theme::get_autostart(),
+            // 软件光栅器不进下拉框：选它只会得到一帧几十毫秒的结果。
+            adapters: nooksill_platform::gpu::adapters()
+                .into_iter()
+                .filter(|a| a.kind != nooksill_platform::AdapterKind::Software)
+                .map(|a| a.name)
+                .collect(),
+            ..SettingsState::default()
+        };
+        // `new` 返回的是 pin 住的装箱值：窗口过程按地址找它，地址不能变。
+        *slot = Some(SettingsWindow::new(gpu, state, ppp)?);
+    }
+    // 同上：刚塞进去就取不出来说明逻辑有 bug，返回错误比 panic 好定位。
+    let sw = slot.as_mut().ok_or("设置窗口未初始化")?;
+    Ok(&mut **sw)
+}
+
+/// 每轮给设置窗口一次机会：渲染一帧，取走它产出的命令。
+///
+/// 返回 `(界面直接改过配置, 待执行的命令)`。命令交给调用方执行 —— 它要改
+/// `cfg` 或条目，而这里只借到了 `dock`；把整条 `App` 传进来会让这个函数
+/// 和主循环耦合死。
+fn tick_settings(
+    gpu: &Gpu,
+    slot: &mut Option<Pin<Box<SettingsWindow>>>,
+    dock: &mut Dock,
+) -> Result<(bool, Option<Command>), Box<dyn std::error::Error>> {
+    let Some(sw) = slot.as_mut() else {
+        return Ok((false, None));
+    };
+    let mut changed = false;
+    let mut cmd = None;
+    if sw.visible() && sw.due() {
+        // 关键点：`cfg` 就是 Dock 用的那一份。设置窗口改它等于改 Dock，
+        // 没有 IPC、没有复制、也没有"保存后重启"。
+        sw.render(gpu, &mut dock.cfg)?;
+        let out = std::mem::take(&mut sw.outcome);
+        changed = out.changed;
+        cmd = out.command;
+
+        // 自定义缩放：配置变了就地把窗口重建到新 DPI。放在 render 之后，
+        // 用户在界面里一改下拉、下一帧就是新尺寸，不用重开。
+        let want = settings_win::effective_ppp(&dock.cfg);
+        if (sw.ppp() - want).abs() > f32::EPSILON {
+            sw.rescale(gpu, want)?;
+        }
+    }
+    // Esc 与"关闭"都走这个标志。命令已经取出来了，由调用方在隐藏之后
+    // 结算 —— 隐藏不影响命令本身（它要改的是 `cfg` 与条目）。
+    if sw.close_requested {
+        sw.hide();
+    }
+    Ok((changed, cmd))
+}
+
+/// 执行设置界面发出的命令。返回值表示"配置是否需要重绘与写盘"。
+///
+/// 只改条目的命令（加分割线 / 回收站）在内部走 [`App::apply_item_change`]，
+/// 这里返回 `false` —— 它们不涉及 `[Settings]` 段。
+///
+/// 还没接通的能力在最后一支里给出明确提示 —— 什么都不做会让用户以为按钮
+/// 坏了，而那几项本来就在 `PORTING.md` 的待办里。
+impl App {
+    fn run_settings_cmd(&mut self, cmd: Command) -> bool {
+        match cmd {
+            // 关闭由 `tick_settings` 处理（窗口要藏起来），这里不再做事。
+            Command::Close => false,
+            Command::OpenConfigDir => {
+                let dir = self.paths.dir.display().to_string();
+                if let Err(e) = launch::open_folder(&dir) {
+                    self.status(format!("打开配置目录失败：{e}"));
+                }
+                false
+            }
+            Command::OpenUrl(url) => {
+                sysact::open_uri(url);
+                false
+            }
+            Command::CheckUpdate => {
+                self.start_update_check();
+                false
+            }
+            Command::DownloadUpdate => {
+                self.start_update_download();
+                false
+            }
+            Command::ApplyUpdate => {
+                self.apply_update();
+                false
+            }
+            Command::ToggleAutostart(on) => {
+                if theme::set_autostart(on) {
+                    // 写完重新读真值：策略把写入拦下来时，写函数也可能返回成功。
+                    let real = theme::get_autostart();
+                    let text = if real {
+                        "已设置开机自启动"
+                    } else {
+                        "已取消开机自启动"
+                    };
+                    if let Some(sw) = self.settings_slot.as_mut() {
+                        sw.state.auto_start = real;
+                        sw.state.status = text.to_owned();
+                    }
+                } else {
+                    let err = theme::last_registry_error();
+                    let real = theme::get_autostart();
+                    if let Some(sw) = self.settings_slot.as_mut() {
+                        sw.state.status = format!("写入注册表失败（错误码 {err}）");
+                        sw.state.auto_start = real;
+                    }
+                }
+                false
+            }
+            Command::ResetDefaults => {
+                self.dock.cfg = Config::defaults(self.dpi);
+                self.status("已恢复默认设置");
+                true
+            }
+            Command::Recommended => {
+                apply_recommended(&mut self.dock.cfg);
+                self.status("已套用推荐设置（尺寸与停靠边没动）");
+                true
+            }
+            Command::LowPower => {
+                apply_low_power(&mut self.dock.cfg);
+                self.status("已关闭高开销视觉效果");
+                true
+            }
+            // 这两项与右键菜单里的同一条路径共用收尾：改 `raw` → 换列表 → 排写盘。
+            Command::AddSeparator => {
+                self.raw.push(Item::new(ItemKind::Separator, "", ""));
+                self.apply_item_change();
+                false
+            }
+            Command::AddTrash => {
+                self.raw.push(Item::new(ItemKind::Trash, "回收站", ""));
+                self.apply_item_change();
+                false
+            }
+            _ => {
+                self.status("这项能力还没接进 Dock（见 PORTING.md 待办）");
+                false
+            }
+        }
+    }
+
+    /// 往设置窗口的底部状态条写一句话（窗口没建过就什么都不做）。
+    fn status(&mut self, text: impl Into<String>) {
+        if let Some(sw) = self.settings_slot.as_mut() {
+            sw.state.status = text.into();
+        }
+    }
+}
+
+/// 推荐设置：只动"要不要这些效果"，尺寸、颜色与停靠边一概不碰 ——
+/// 那些是用户已经调好、一改就得从头再来的东西。
+fn apply_recommended(cfg: &mut Config) {
+    for (key, v) in [
+        (Key::Labels, 1),
+        (Key::Zoom, 1),
+        (Key::Reflect, 1),
+        (Key::Dots, 1),
+        (Key::Bounce, 1),
+        (Key::MinAnim, 1),
+        (Key::Border, 1),
+        (Key::Preview, 1),
+    ] {
+        cfg.apply_i32(key, v);
+    }
+}
+
+/// 低占用：关掉所有"每帧都要多干一遍"的效果。磨砂（`Blur` + `BgMode`）是
+/// 这里面唯一的常驻开销，其余只是少几次在特定时机额外做的事。
+fn apply_low_power(cfg: &mut Config) {
+    for (key, v) in [
+        (Key::Reflect, 0),
+        (Key::Blur, 0),
+        (Key::MinAnim, 0),
+        (Key::Bounce, 0),
+        (Key::Preview, 0),
+        (Key::FolderFan, 0),
+        (Key::ShowRunning, 0),
+        (Key::BgMode, 0),
+    ] {
+        cfg.apply_i32(key, v);
+    }
+}
+
+/// 构造单帧 `RawInput`。Dock 与菜单共用同一口径 —— 这两处原来各写一遍。
+///
+/// - `screen_rect` 必须给对：egui 用它决定根 Ui 的尺寸，给错栏体会被画在
+///   错误的位置（M1 第一版就踩了）。
+/// - `native_pixels_per_point` 决定原生缩放，不设的话 egui 按 1.0 算，
+///   画面只占表面的 1/ppp（偏左上、尺寸偏小）。
+fn raw_input(size: (u32, u32), ppp: f32, start: Instant) -> egui::RawInput {
+    let (w, h) = size;
+    let mut raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w as f32 / ppp, h as f32 / ppp),
+        )),
+        time: Some(start.elapsed().as_secs_f64()),
+        ..Default::default()
+    };
+    raw.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            native_pixels_per_point: Some(ppp),
+            ..Default::default()
+        },
+    );
+    raw
+}
+
+/// 更新器线程发回主线程的消息。
+///
+/// 一律带 `String` / `PathBuf`：后台线程不认识 UI 状态，翻译是主线程的事。
+enum UpdateMsg {
+    /// 一行进度文字（"正在检查…"）。
+    Status(String),
+    /// 发现新版本，附带发布信息（下载要用它的资产地址）。
+    Available(Box<nooksill_platform::update::Release>),
+    /// 已经是最新，没有可下的。
+    UpToDate,
+    /// 下载 + 校验完成，落在磁盘上等替换。
+    Staged(std::path::PathBuf),
+    /// 任何一步失败，内容是给用户看的原因。
+    Failed(String),
+}
+
+impl App {
+    /// 检查更新：起一条线程，主线程继续跑。
+    fn start_update_check(&mut self) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateMsg::Status("正在检查…".to_owned()));
+            match nooksill_platform::update::latest_release() {
+                Ok(rel) => {
+                    let installed =
+                        nooksill_platform::update::Version::parse(nooksill_core::VERSION);
+                    if installed.is_some_and(|v| rel.version.is_newer_than(&v)) {
+                        let _ = tx.send(UpdateMsg::Available(Box::new(rel)));
+                    } else {
+                        let _ = tx.send(UpdateMsg::UpToDate);
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(UpdateMsg::Failed(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// 下载：先按开关选镜像（安全 DNS 判定污染时不允许直连），再下 + 校验。
+    fn start_update_download(&mut self) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let Some(release) = self.update_release.clone() else {
+            return;
+        };
+        let secure_dns = self.dock.cfg.get_i32(Key::NET_SECURE_DNS) != 0;
+        let test_all = self.dock.cfg.get_i32(Key::NET_MIRROR_ALL) != 0;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let allow_direct =
+                !(secure_dns && nooksill_platform::update::dns_looks_poisoned("github.com"));
+            let _ = tx.send(UpdateMsg::Status(if allow_direct {
+                "正在测速选镜像…".to_owned()
+            } else {
+                "系统 DNS 疑似被污染，只用镜像…".to_owned()
+            }));
+            let base =
+                nooksill_platform::update::pick_mirror(&release.sha256.url, test_all, allow_direct);
+            let Some(base) = base else {
+                let _ = tx.send(UpdateMsg::Failed("没有可用镜像".to_owned()));
+                return;
+            };
+            let label = if base.is_empty() {
+                "GitHub 直连"
+            } else {
+                base.as_str()
+            };
+            let _ = tx.send(UpdateMsg::Status(format!("从 {label} 下载…")));
+            match nooksill_platform::update::stage(&base, &release) {
+                Ok(path) => {
+                    let _ = tx.send(UpdateMsg::Staged(path));
+                }
+                Err(e) => {
+                    let _ = tx.send(UpdateMsg::Failed(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// 把后台线程的消息搬进设置窗口的状态里。
+    fn pump_update(&mut self) {
+        let Some(rx) = self.update_rx.as_ref() else {
+            return;
+        };
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        if messages.is_empty() {
+            return;
+        }
+
+        let mut finished = false;
+        for msg in messages {
+            let mut view = self
+                .settings_slot
+                .as_ref()
+                .map(|sw| sw.state.update.clone())
+                .unwrap_or_default();
+            match msg {
+                UpdateMsg::Status(text) => {
+                    view.status = text;
+                    view.busy = true;
+                }
+                UpdateMsg::Available(release) => {
+                    view.status = format!("发现新版本 {}", release.version.text);
+                    view.available = true;
+                    view.busy = false;
+                    self.update_release = Some(*release);
+                    finished = true;
+                }
+                UpdateMsg::UpToDate => {
+                    view.status = "已是最新版本".to_owned();
+                    view.available = false;
+                    view.busy = false;
+                    finished = true;
+                }
+                UpdateMsg::Staged(path) => {
+                    view.status = "已下载并校验通过，重启后生效".to_owned();
+                    view.ready = true;
+                    view.busy = false;
+                    self.update_staged = Some(path);
+                    finished = true;
+                }
+                UpdateMsg::Failed(why) => {
+                    view.status = format!("失败：{why}");
+                    view.busy = false;
+                    finished = true;
+                }
+            }
+            if let Some(sw) = self.settings_slot.as_mut() {
+                sw.state.update = view;
+                sw.wake();
+            }
+        }
+        if finished {
+            self.update_rx = None;
+        }
+    }
+
+    /// 用下载好的文件替换自己并重启。成功时不返回（进程退出）。
+    fn apply_update(&mut self) {
+        let Some(staged) = self.update_staged.clone() else {
+            return;
+        };
+        match nooksill_platform::update::apply_and_restart(&staged) {
+            Ok(()) => {
+                // 走正常退出：AppBar 注销、配置写盘都在析构里。
+                std::process::exit(0);
+            }
+            Err(e) => {
+                if let Some(sw) = self.settings_slot.as_mut() {
+                    sw.state.update.status = format!("替换失败：{e}");
+                    sw.wake();
+                }
+            }
+        }
+    }
+}

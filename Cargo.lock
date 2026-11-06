@@ -703,44 +703,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
-name = "minidock-core"
-version = "1.1.0"
-
-[[package]]
-name = "minidock-gpu"
-version = "1.1.0"
-dependencies = [
- "egui",
- "egui-wgpu",
- "glass-backdrop",
- "minidock-core",
- "minidock-platform",
- "minidock-settings",
- "pollster",
- "rayon",
- "windows",
- "winresource",
-]
-
-[[package]]
-name = "minidock-platform"
-version = "1.1.0"
-dependencies = [
- "minidock-core",
- "sha2",
- "windows",
-]
-
-[[package]]
-name = "minidock-settings"
-version = "1.1.0"
-dependencies = [
- "egui",
- "egui_kittest",
- "minidock-core",
-]
-
-[[package]]
 name = "naga"
 version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -792,6 +754,44 @@ name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
+name = "nooksill-core"
+version = "2.0.0"
+
+[[package]]
+name = "nooksill-gpu"
+version = "2.0.0"
+dependencies = [
+ "egui",
+ "egui-wgpu",
+ "glass-backdrop",
+ "nooksill-core",
+ "nooksill-platform",
+ "nooksill-settings",
+ "pollster",
+ "rayon",
+ "windows",
+ "winresource",
+]
+
+[[package]]
+name = "nooksill-platform"
+version = "2.0.0"
+dependencies = [
+ "nooksill-core",
+ "sha2",
+ "windows",
+]
+
+[[package]]
+name = "nooksill-settings"
+version = "2.0.0"
+dependencies = [
+ "egui",
+ "egui_kittest",
+ "nooksill-core",
+]
 
 [[package]]
 name = "num-traits"

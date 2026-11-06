@@ -1,6 +1,6 @@
 # 配置文件规范
 
-`MiniDock.ini` 的格式以这份文档为唯一权威；改动前先读第六节。
+`NookSill.ini` 的格式以这份文档为唯一权威；改动前先读第六节。
 
 **格式版本 3**（`[meta] version=3`）起，配置按语义分段、键名改为小写下划线，
 不再照抄上游。上游格式（单 `[Settings]` 段 + 驼峰名）**仍能直接读**，
@@ -10,8 +10,8 @@
 
 | 模式 | 目录 | 触发条件 |
 |---|---|---|
-| 默认 | `%APPDATA%\MiniDock\` | 默认 |
-| 便携 | exe 同目录 | exe 旁边存在 `MiniDock.portable`（空文件即可） |
+| 默认 | `%APPDATA%\NookSill\` | 默认 |
+| 便携 | exe 同目录 | exe 旁边存在 `NookSill.portable`（空文件即可） |
 
 - 编码 **UTF-16LE + BOM**（`FF FE`）。没有 BOM 时按 UTF-8 读，再失败按 UTF-16LE 猜测。
 - 行尾 CRLF；`;` 或 `#` 开头为注释。
@@ -45,7 +45,7 @@
 键表由代码生成，不要手改：
 
 ```bash
-cargo run -q -p minidock-core --example config_table
+cargo run -q -p nooksill-core --example config_table
 ```
 
 说明文字（`含义` 列）沿用上游设置界面的行标题 —— 那是权威的语义来源。
@@ -154,7 +154,7 @@ cargo run -q -p minidock-core --example config_table
 > `WDA_EXCLUDEFROMCAPTURE`。截图 / 录屏 / 共享屏幕里它会是空的。
 > 需要截到面板就把上面三个键对应的那一处设成 0（此时不抓屏，也就不会被排除）。
 
-诊断：`MINIDOCK_FROST_TRACE=1` 启动时，每产出一帧打一行
+诊断：`NOOKSILL_FROST_TRACE=1` 启动时，每产出一帧打一行
 `[frost] #n 宽x高 平均色=(r,g,b) 变化像素=k/总数 抓+模糊=x ms` ——
 背后放一个会变色的窗口，平均色跟着变就说明实时链路是通的。
 
@@ -176,7 +176,7 @@ SmokeClouds=1
 ```
 
 栏体周围那层会上升、卷曲、随鼠标让开的烟（移植自 Windhawk 的 *Taskbar
-Smoke*，算法说明见 `crates/minidock-core/src/smoke.rs` 与 ADR-048）。
+Smoke*，算法说明见 `crates/nooksill-core/src/smoke.rs` 与 ADR-048）。
 
 | 键 | 默认 | 取值 | 说明 |
 |---|---|---|---|
@@ -288,7 +288,7 @@ G1_1=2|1|GitHub|https://github.com||0|
 ## 七、自检
 
 ```bash
-cargo test -p minidock-core        # 编解码、夹紧、往返、旧键迁移
+cargo test -p nooksill-core        # 编解码、夹紧、往返、旧键迁移
 ```
 
 测试覆盖：UTF-16LE 往返、UTF-8 无 BOM、未知段保留、恶意值夹紧、

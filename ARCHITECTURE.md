@@ -47,13 +47,13 @@ rayon 只用来并行派发图标批；像素处理本身已移到 GPU compute�
 ## 二、crate 依赖
 
 ```
-minidock-core        （无 Win32 依赖，纯逻辑）
+nooksill-core        （无 Win32 依赖，纯逻辑）
    ↑        ↑
-   │        └── minidock-settings （egui，无 wgpu）── kittest 测试
+   │        └── nooksill-settings （egui，无 wgpu）── kittest 测试
    │                    ↑
-   └── minidock-platform│
+   └── nooksill-platform│
               ↑         │
-         minidock-gpu ──┘  （wgpu + Win32 窗口/输入/命中 + 工作线程）
+         nooksill-gpu ──┘  （wgpu + Win32 窗口/输入/命中 + 工作线程）
 ```
 
 依赖方向是单向的：`gpu → settings → core`、`gpu → platform`。
@@ -142,11 +142,11 @@ GPU 版与 GDI+ 版都只是"取结果 → 画"。这套逻辑曾经两边各写
 
 ### 设置界面：左导航 + 右侧卡片
 
-`minidock-settings` 是**纯 UI**：没有 HWND、没有 device、没有线程，所以能被
+`nooksill-settings` 是**纯 UI**：没有 HWND、没有 device、没有线程，所以能被
 kittest 无头驱动。结构按"一页一个文件"拆开：
 
 ```
-crates/minidock-settings/src/
+crates/nooksill-settings/src/
   pages/
     mod.rs         Page 枚举、SettingsState、Command、两列骨架
     widgets.rs     共享控件：card / row / toggle / slider / combo / 侧栏
@@ -169,7 +169,7 @@ crates/minidock-settings/src/
 页面、卡片、行与 Rust 端一一对应，改设计先改雏形。**不靠人肉截图验收** ——
 
 ```bash
-cargo run -p minidock-gpu --example settings_shot -- 出图.bmp 外观 [dark]
+cargo run -p nooksill-gpu --example settings_shot -- 出图.bmp 外观 [dark]
 ```
 
 走的是与真实窗口完全相同的 `FrameRenderer` + `settings_win::shell`，只把最后
@@ -210,7 +210,7 @@ CPU 占用为 0。这条性质是产品承诺（"空闲无定时器"），**不�
 | `Scanner` | 运行状态 + 遮挡检测 | 不产生 `wgpu` 对象 |
 | `DiskWriter` | 写 ini（400 ms 防抖、串行保序） | 不碰窗口 |
 | `Opener` | `ShellExecuteW` / 激活已有窗口 | 不碰窗口 |
-| `minidock-frost` | GDI 抓屏 + CPU 可分离高斯（面板可见时） | 不碰窗口/device |
+| `nooksill-frost` | GDI 抓屏 + CPU 可分离高斯（面板可见时） | 不碰窗口/device |
 
 跨线程数据用 `std::sync::mpsc`（任务与结果各一条通道）+ `PostMessage` 唤醒。
 **没有 `ArcSwap` / `crossbeam-channel`**：本项目跨线程传的是值拷贝，不存在

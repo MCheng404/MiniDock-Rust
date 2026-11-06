@@ -28,7 +28,7 @@
 |---|---|
 | wgpu 能建 DX12 设备并出帧 | ✅ `Dx12 / AMD Radeon 610M`，`Bgra8UnormSrgb` |
 | egui 中文界面正常渲染 | ✅ 9 个页签、复选框、下拉框全部正确 |
-| 设置界面可无头测试 | ✅ `cargo test -p minidock-settings` 5/5 |
+| 设置界面可无头测试 | ✅ `cargo test -p nooksill-settings` 5/5 |
 | 窗口透明（逐像素 alpha） | ✅ **离屏渲染 + `UpdateLayeredWindow`**，圆角外透出桌面 |
 | 逐像素命中 | ✅ 分层窗口按 alpha 判定，无需 `WM_NCHITTEST` |
 | 每帧记账（耗时/RSS） | ✅ 性能页实时显示 |
@@ -63,7 +63,7 @@
 范围：状态、布局、绘制、悬停放大、自动隐藏。
 不含图标加载与拖拽。
 
-- [x] `gpu::dock`：复用 `core::layout` 的度量与槽位数学（`dock.rs` + `minidock-dock`）
+- [x] `gpu::dock`：复用 `core::layout` 的度量与槽位数学（`dock.rs` + `nooksill-dock`）
 - [x] 命中与放大映射改成 C 版语义（ADR-018）
 - [x] **度量与 C 版逐项相等**（见下方"几何对拍结果"）
 - [x] 放大曲线（余弦）、滑动回弹
@@ -149,7 +149,7 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 - [ ] 托盘、全局热键、AppBar 预留、单实例唤起
 - [ ] 最小化飞入动画（`SetWinEventHook`）
 - [ ] 自动启动注册表、导出/导入 `.mdock`
-- [x] 删除遗留 `minidock-gfx` / `minidock-ui` / `minidock`（ADR-035）
+- [x] 删除遗留 `nooksill-gfx` / `nooksill-ui` / `nooksill`（ADR-035）
 
 ## 三、函数级台账
 
@@ -205,7 +205,7 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 ## 五、像素对齐方法
 
-1. 用 `harness/MiniDock.ini` 的同一份配置分别启动 C 版与 Rust 版。
+1. 用 `harness/NookSill.ini` 的同一份配置分别启动 C 版与 Rust 版。
 2. 固定 DPI（100% / 150% 各一次）、固定显示器、关闭磨砂（消除背景差异）。
 3. 用 `scratch/capture.c` 抓窗口矩形（**必须与目标进程同样声明 DPI 感知**）。
 4. 差分：允许 ≤1 px 的圆角/文字抗锯齿差异，几何（栏宽、槽位、图标边长）必须完全一致。
@@ -253,7 +253,7 @@ PY
 | `NotifyW` | 0 | 通知小组件（任务栏闪烁 / 未读 → 图标红点） |
 | `FanBgL` `FanBgD` | -1 | 弧形展开的**标签背景**色（浅 / 深），-1 = 跟随主题 |
 | `FanFgL` `FanFgD` | -1 | 同上，**文字**色 |
-| `PinMenu` | 0 | 资源管理器右键菜单加「固定到 MiniDock」 |
+| `PinMenu` | 0 | 资源管理器右键菜单加「固定到 NookSill」 |
 | `MultiMode` | 0 | 0 = 多窗口应用合并成一个图标；1 = 每个文档窗口一个 |
 | `UpdChk` | 1 | 每天自动查一次更新（只访问 GitHub Releases） |
 | `UpdLast` | 0 | 上次检查的时间戳（天） |

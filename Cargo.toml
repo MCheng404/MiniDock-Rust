@@ -1,26 +1,26 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/minidock-core",
-    "crates/minidock-platform",
-    "crates/minidock-settings",
-    "crates/minidock-gpu",
+    "crates/nooksill-core",
+    "crates/nooksill-platform",
+    "crates/nooksill-settings",
+    "crates/nooksill-gpu",
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
 # egui 0.37 / egui-wgpu 0.37 require 1.95.
 rust-version = "1.95"
 license = "GPL-3.0-or-later"
-authors = ["MiniDock Rust port contributors"]
+authors = ["NookSill Rust port contributors"]
 repository = ""
 
 [workspace.dependencies]
-minidock-core = { path = "crates/minidock-core" }
-minidock-platform = { path = "crates/minidock-platform" }
-minidock-settings = { path = "crates/minidock-settings" }
-minidock-gpu = { path = "crates/minidock-gpu" }
+nooksill-core = { path = "crates/nooksill-core" }
+nooksill-platform = { path = "crates/nooksill-platform" }
+nooksill-settings = { path = "crates/nooksill-settings" }
+nooksill-gpu = { path = "crates/nooksill-gpu" }
 
 # eframe owns the message loop. This app needs Win32 trampolines, hotkeys,
 # AppBar and per-pixel hit testing, so only egui + egui-wgpu are used.
@@ -31,7 +31,7 @@ egui-wgpu = "0.37"
 egui_kittest = "0.37"
 
 # Only for icon pixel processing. The other jobs are IO-bound and run on
-# dedicated threads in minidock-gpu::worker.
+# dedicated threads in nooksill-gpu::worker.
 rayon = "1.12"
 
 # SHA-256 for the updater: verify a downloaded exe against the release's

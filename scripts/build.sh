@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MiniDock-rs 构建入口。
+# NookSill-rs 构建入口。
 #
 # 环境变量由 scripts/env.sh 统一注入（MSVC / Windows SDK），本脚本只负责
 # 「决定跑哪条 cargo 命令」。两者分开，才能在一个已 source 过环境的 shell
@@ -95,12 +95,12 @@ case "$ACTION" in
         exit "$status"
         ;;
     exe)
-        # ADR-035 之后唯一的 Dock 可执行文件；早期这里写的是已删除的 MiniDock.exe。
-        echo "$ROOT/target/$TARGET/$(profile_dir)/minidock-dock.exe"
+        # ADR-035 之后唯一的 Dock 可执行文件；早期这里写的是已删除的 NookSill.exe。
+        echo "$ROOT/target/$TARGET/$(profile_dir)/nooksill-dock.exe"
         ;;
     version)
-        # 由构建脚本写出（`crates/minidock-core/build.rs`），与 exe 资源同源。
-        f="$ROOT/target/$TARGET/$(profile_dir)/MINIDOCK_VERSION"
+        # 由构建脚本写出（`crates/nooksill-core/build.rs`），与 exe 资源同源。
+        f="$ROOT/target/$TARGET/$(profile_dir)/NOOKSILL_VERSION"
         if [ -f "$f" ]; then
             cat "$f"
         else

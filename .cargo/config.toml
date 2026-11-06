@@ -1,4 +1,4 @@
-# MiniDock-rs 构建配置。
+# NookSill-rs 构建配置。
 #
 # 为什么锁 MSVC 而不是 gnx/GNU：
 #   1. 目标机的系统 DLL 就是 MSVC ABI 的（GDI+/DWM/shell32），

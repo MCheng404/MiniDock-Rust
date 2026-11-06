@@ -7,7 +7,7 @@ name: build
 #   release  打 v* 标签时出稳定版，发正式 Release
 #
 # 版本号只有一个来源：`scripts/version.rs`。CI 只通过环境变量影响它
-# （`MINIDOCK_BUILD` = run number），不在这里拼字符串。
+# （`NOOKSILL_BUILD` = run number），不在这里拼字符串。
 #
 # 关掉 Pre-Release 的两种方式（测试流程用，不想让 Releases 页多一条）：
 #   1. 仓库变量 DEBUG_PUBLISH = artifact（Settings → Variables）
@@ -73,7 +73,7 @@ jobs:
       contents: write
     env:
       # build.rs 会把它拼成 `X.Y.Z-dev.<run>`；release 档位不读这个变量。
-      MINIDOCK_BUILD: ${{ github.run_number }}
+      NOOKSILL_BUILD: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -87,7 +87,7 @@ jobs:
       - name: read version
         id: ver
         shell: bash
-        run: echo "value=$(tr -d '[:space:]' < target/$TARGET/debug/MINIDOCK_VERSION)" >> "$GITHUB_OUTPUT"
+        run: echo "value=$(tr -d '[:space:]' < target/$TARGET/debug/NOOKSILL_VERSION)" >> "$GITHUB_OUTPUT"
 
       # 发布方式是"手动输入 > 仓库变量 > 默认 pre-release"三级回落：
       # 变量改一次长期生效，手动输入只影响这一次。
@@ -104,10 +104,10 @@ jobs:
       # 仍然是 zip 容器（它的机制，改不了），但下载解出来的就是这两个文件。
       - uses: actions/upload-artifact@v4
         with:
-          name: MiniDock-${{ steps.ver.outputs.value }}-win64-debug
+          name: NookSill-${{ steps.ver.outputs.value }}-win64-debug
           path: |
-            dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug.exe
-            dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug.exe.sha256
+            dist/NookSill-${{ steps.ver.outputs.value }}-win64-debug.exe
+            dist/NookSill-${{ steps.ver.outputs.value }}-win64-debug.exe.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -122,7 +122,7 @@ jobs:
         run: |
           set -euo pipefail
           tag=dev
-          exe="dist/MiniDock-$VERSION-win64-debug.exe"
+          exe="dist/NookSill-$VERSION-win64-debug.exe"
           sum="$exe.sha256"
           sha8="${GITHUB_SHA:0:8}"
 
@@ -187,13 +187,13 @@ jobs:
       - name: release notes from changelog
         shell: bash
         run: |
-          version="$(tr -d '[:space:]' < target/$TARGET/release/MINIDOCK_VERSION)"
+          version="$(tr -d '[:space:]' < target/$TARGET/release/NOOKSILL_VERSION)"
           awk -v v="$version" 'index($0, "## " v) == 1 { p = 1; next } /^## / { p = 0 } p' CHANGELOG.md > notes.md
           wc -l notes.md
 
       - uses: softprops/action-gh-release@v2
         with:
-          name: MiniDock ${{ steps.ver.outputs.version }}
+          name: NookSill ${{ steps.ver.outputs.version }}
           # 裸 exe + 校验和，不打 zip。
           files: |
             dist/*.exe

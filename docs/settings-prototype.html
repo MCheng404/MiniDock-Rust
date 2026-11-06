@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MiniDock · 设置界面雏形</title>
+<title>NookSill · 设置界面雏形</title>
 <style>
 /* ------------------------------------------------------------------
-   MiniDock 设置窗口 · 布局雏形
+   NookSill 设置窗口 · 布局雏形
 
    设计方向（2026-11 改版）：
    · 轻柔 —— 低对比表面、柔和投影、半透明侧栏，没有硬边框；
@@ -16,7 +16,7 @@
    · 无直线 —— 一条分割线都没有：分区靠留白与色调差，不靠 border。
 
    尺寸固定：893 x 720（= `settings_win::LOGICAL_SIZE`），
-   侧栏 193（= `minidock_settings::NAV_W`）。三个数字在 Rust 端各只有
+   侧栏 193（= `nooksill_settings::NAV_W`）。三个数字在 Rust 端各只有
    一处定义，改这里必须同步改那边。
 
    主题色（`--accent`）由「主题色」卡或 `?accent=RRGGBB` 驱动：
@@ -559,7 +559,7 @@ body {
 <body>
 
 <p class="caption">
-  <strong>MiniDock 设置 · 布局雏形</strong>　顶栏（品牌居中于导航栏 + 自绘搜索 + × 关闭）/ 固定宽度导航 / 多卡片内容区。<br>
+  <strong>NookSill 设置 · 布局雏形</strong>　顶栏（品牌居中于导航栏 + 自绘搜索 + × 关闭）/ 固定宽度导航 / 多卡片内容区。<br>
   方向：轻柔 / 圆角 / 动态间距 / 无直线 —— 全文件没有一条 <code>border</code> 分割线，分区靠留白与色调差。<br>
   与 Rust 端同步：主题色（<code>?accent=RRGGBB</code>）、界面缩放、感叹号说明气泡、自绘下拉、磁吸。<br>
   深链：<code>#page</code> 定位页、<code>?q=</code> 搜索、<code>?open=N</code> 展开下拉、<code>?tip=N</code> 展开说明。
@@ -567,7 +567,7 @@ body {
 
 <div class="window">
   <div class="titlebar">
-    <div class="brand"><h1>MiniDock</h1></div>
+    <div class="brand"><h1>NookSill</h1></div>
 
     <div class="search-slot">
       <label class="search">
@@ -672,16 +672,16 @@ body {
           <div class="card-head"><h3>数据</h3></div>
           <div class="card-body">
             <div class="row"><div class="label">配置目录</div>
-              <div class="ctl"><span class="path">C:\Users\you\AppData\Roaming\MiniDock</span>
+              <div class="ctl"><span class="path">C:\Users\you\AppData\Roaming\NookSill</span>
                 <button class="btn">打开</button></div></div>
           </div>
         </div>
 
         <div class="card">
-          <div class="card-head"><h3>关于<span class="desc">应用图标来自 assets/minidock.ico，已作为资源嵌入 minidock-dock.exe</span></h3></div>
+          <div class="card-head"><h3>关于<span class="desc">应用图标来自 assets/nooksill.ico，已作为资源嵌入 nooksill-dock.exe</span></h3></div>
           <div class="card-body">
-            <div class="row"><div class="label">MiniDock<span class="desc">Rust 移植版 · 设置界面视觉基准</span></div>
-              <div class="ctl"><img class="app-icon" src="../assets/minidock.ico" alt="MiniDock 应用图标" width="40" height="40">
+            <div class="row"><div class="label">NookSill<span class="desc">Rust 移植版 · 设置界面视觉基准</span></div>
+              <div class="ctl"><img class="app-icon" src="../assets/nooksill.ico" alt="NookSill 应用图标" width="40" height="40">
                 <span class="path">0.9.8</span></div></div>
           </div>
         </div>
