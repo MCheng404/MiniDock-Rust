@@ -3244,3 +3244,45 @@ MSAA 只在大窗口降采样）。节拍改动是设计值：动画最大唤醒
 **验证**：`perf` 纯函数单测、字体共享单测、DWM 真机测试通过；门禁 383 条
 测试全绿。既有 `scanner_reports_running_apps`（ignored）仍因本机无可枚举
 窗口超时，与本条无关。
+
+---
+
+## ADR-068 · 呈现成本实测：暂不上 DirectComposition
+
+**背景**：ADR-008 选了 `UpdateLayeredWindow` + DIB，并留了「若实测回读导致
+掉帧（> 2 ms/帧）就提前上 DComp」的伏笔。上一轮记录呈现成本 6.01 ms/帧，
+但那是 **debug** 值；没量过 release，就无法判断该不该重写呈现层。
+
+**决定**：
+
+1. 新增 `crates/minidock-gpu/examples/present_bench.rs`，长期作为呈现路径的
+   测量工具（与 `probe`、`settings_shot` 同类）。真实分层窗口，alpha 1/255
+   不可见但走完整合成路径。
+2. **不**引入 DirectComposition / swapchain，`UpdateLayeredWindow` 保持不变。
+3. 新增 `present_dirty`（`UpdateLayeredWindowIndirect` + `prcDirty`），
+   但**不接入运行时**：egui 不暴露 damage 区域，传全窗口矩形等于没优化。
+
+**实测**（release，1000 次/档，取 p50）：
+
+| 尺寸 | `upload_rgba_strided` | `present` 全表面 | `present_dirty` 1/64 |
+|---|---|---|---|
+| 391×315（设置窗） | 0.08 ms | 0.06 ms | 0.06 ms |
+| 1320×1080（Dock） | 0.79 ms | 0.22–0.49 ms | 0.10 ms |
+| 2560×1440（大 Dock） | 2.04 ms | 1.36 ms | 0.13 ms |
+
+**依据**：debug 的 6.01 ms 几乎全是 CPU 侧像素换序（`swap_rb`），release 只剩
+0.79 ms；`UpdateLayeredWindow` 本身在 Dock 尺寸只要 0.2–0.5 ms。整条呈现路径
+在 60 Hz 预算里占 6%（1320×1080）到 21%（2560×1440），远没到需要重写呈现层的
+地步——ADR-008 的 2 ms 门槛只在 2560×1440 才被轻微触碰，而 DComp 要付的是
+呈现层重写 + ADR-008 作废。
+
+**代价 / 限制**：bench 量的是 API 调用与位图拷贝，不含 DWM 合成线程的 GPU 工作，
+所以「不会掉帧」这一点它证明不了。`prcDirty` 在 MSDN 上只是 hint，实测有收益
+不等于有保证。
+
+**后续**：真要再压，顺序是 ① 把 `swap_rb` SIMD 化（2560×1440 现在 2.04 ms，
+占 60 Hz 预算 12%）；② 有 damage 区域来源后再接脏矩形（实测大窗口能降一个
+数量级）。
+
+**验证**：两次独立运行比值稳定（脏矩形 vs 全表面：1320×1080 约 5x，
+2560×1440 约 10x）；门禁 383 条测试全绿。

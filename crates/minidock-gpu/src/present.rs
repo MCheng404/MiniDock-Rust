@@ -13,13 +13,15 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS,
     HBITMAP, HDC, HGDIOBJ,
 };
-use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
+use windows::Win32::UI::WindowsAndMessaging::{
+    UpdateLayeredWindow, UpdateLayeredWindowIndirect, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+};
 
 use crate::gpu::GpuError;
 
@@ -148,6 +150,41 @@ impl LayeredPresenter {
             )
         }
         .map_err(|_| GpuError::Win32("UpdateLayeredWindow"))
+    }
+
+    /// Same as [`Self::present`], but declares `dirty` (DIB pixels) so DWM can
+    /// skip uploading unchanged parts. `prcDirty` is a hint, not a contract.
+    pub fn present_dirty(&self, hwnd: HWND, x: i32, y: i32, dirty: RECT) -> Result<(), GpuError> {
+        let dst = POINT { x, y };
+        let src = POINT { x: 0, y: 0 };
+        let size = SIZE {
+            cx: self.width,
+            cy: self.height,
+        };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            hdcDst: HDC::default(),
+            pptDst: &dst,
+            psize: &size,
+            hdcSrc: self.dc,
+            pptSrc: &src,
+            crKey: COLORREF(0),
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: &dirty,
+        };
+        // SAFETY: every pointer in `info` refers to a live local binding.
+        if unsafe { UpdateLayeredWindowIndirect(hwnd, &info) }.as_bool() {
+            Ok(())
+        } else {
+            Err(GpuError::Win32("UpdateLayeredWindowIndirect"))
+        }
     }
 }
 
