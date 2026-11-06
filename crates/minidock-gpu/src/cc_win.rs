@@ -16,7 +16,7 @@
 use std::pin::Pin;
 use std::time::Instant;
 
-use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect as EguiRect, Stroke};
+use egui::{Align2, Color32, CornerRadius, FontId, Rect as EguiRect};
 use minidock_core::control::{self, Tile};
 use minidock_platform::audio::{Audio, Battery};
 use minidock_platform::sysact;
@@ -556,11 +556,10 @@ fn draw_panel(
         painter.rect_filled(r, CornerRadius::same(14), fill);
 
         let fg = if on { Color32::WHITE } else { tc };
-        glyph(
+        crate::glyph::control_tile(
             &painter,
+            EguiRect::from_center_size(egui::pos2(x + tw * 0.5, y + 24.0), egui::vec2(24.0, 24.0)),
             *tile,
-            egui::pos2(x + tw * 0.5, y + 24.0),
-            24.0,
             fg,
         );
         painter.text(
@@ -587,7 +586,12 @@ fn draw_panel(
         ),
     );
     let icon_c = egui::pos2(slider.left() + 11.0, slider.center().y);
-    speaker(&painter, icon_c, 20.0, sub, mute);
+    crate::glyph::speaker(
+        &painter,
+        EguiRect::from_center_size(icon_c, egui::vec2(20.0, 20.0)),
+        sub,
+        mute,
+    );
     let track = EguiRect::from_min_max(
         egui::pos2(slider.left() + 30.0, slider.center().y - 3.0),
         egui::pos2(slider.right() - 4.0, slider.center().y + 3.0),
@@ -630,175 +634,6 @@ fn draw_panel(
     );
 
     (hits, slider)
-}
-
-/// 画一个喇叭。`muted` 时右边是个叉，否则是两道声波弧。
-///
-/// 音量滑块左边的图标与「静音」磁贴共用这一个。
-fn speaker(painter: &egui::Painter, c: Pos2, s: f32, color: Color32, muted: bool) {
-    let stroke = Stroke::new((s * 0.09).max(1.2), color);
-    // 喇叭本体：一个方块接一个三角（用多边形拼，避免描边缝隙）。
-    painter.rect_filled(
-        EguiRect::from_min_size(
-            egui::pos2(c.x - s * 0.42, c.y - s * 0.10),
-            egui::vec2(s * 0.16, s * 0.20),
-        ),
-        CornerRadius::same(1),
-        color,
-    );
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - s * 0.26, c.y - s * 0.10),
-            egui::pos2(c.x - s * 0.06, c.y - s * 0.28),
-            egui::pos2(c.x - s * 0.06, c.y + s * 0.28),
-            egui::pos2(c.x - s * 0.26, c.y + s * 0.10),
-        ],
-        color,
-        Stroke::NONE,
-    ));
-    if muted {
-        painter.line_segment(
-            [
-                egui::pos2(c.x + s * 0.04, c.y - s * 0.13),
-                egui::pos2(c.x + s * 0.26, c.y + s * 0.13),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(c.x + s * 0.26, c.y - s * 0.13),
-                egui::pos2(c.x + s * 0.04, c.y + s * 0.13),
-            ],
-            stroke,
-        );
-    } else {
-        for i in 0..2 {
-            let r = s * (0.16 + i as f32 * 0.12);
-            let mut pts = Vec::new();
-            for k in 0..=12 {
-                let t = -0.9 + 1.8 * k as f32 / 12.0;
-                pts.push(egui::pos2(c.x + s * 0.02 + r * t.cos(), c.y + r * t.sin()));
-            }
-            painter.add(egui::Shape::line(pts, stroke));
-        }
-    }
-}
-
-/// 画一个磁贴的图标。全部用线段/圆弧拼，不用字符 —— 打包的字体里没有
-/// 这些符号（ADR-040 在 ✓/✕ 上踩过豆腐块）。
-fn glyph(painter: &egui::Painter, tile: Tile, c: Pos2, s: f32, color: Color32) {
-    let stroke = Stroke::new((s * 0.09).max(1.2), color);
-    let arc = |cx: f32, cy: f32, r: f32, from: f32, to: f32, w: f32| {
-        let mut pts = Vec::new();
-        let steps = 18;
-        for i in 0..=steps {
-            let t = from + (to - from) * i as f32 / steps as f32;
-            pts.push(egui::pos2(cx + r * t.cos(), cy + r * t.sin()));
-        }
-        painter.add(egui::Shape::line(pts, Stroke::new(w, color)));
-    };
-    match tile {
-        Tile::Wifi => {
-            for i in 0..3 {
-                let r = s * (0.46 - i as f32 * 0.13);
-                arc(c.x, c.y + s * 0.30, r, -2.50, -0.64, stroke.width);
-            }
-            painter.circle_filled(egui::pos2(c.x, c.y + s * 0.30), s * 0.06, color);
-        }
-        Tile::Ethernet => {
-            painter.rect_filled(
-                EguiRect::from_min_size(
-                    egui::pos2(c.x - s * 0.26, c.y - s * 0.20),
-                    egui::vec2(s * 0.52, s * 0.34),
-                ),
-                CornerRadius::same(2),
-                color,
-            );
-            for dx in [-0.12_f32, 0.0, 0.12] {
-                painter.line_segment(
-                    [
-                        egui::pos2(c.x + s * dx, c.y + s * 0.14),
-                        egui::pos2(c.x + s * dx, c.y + s * 0.30),
-                    ],
-                    stroke,
-                );
-            }
-        }
-        Tile::Bluetooth => {
-            let p = |x: f32, y: f32| egui::pos2(c.x + s * x, c.y + s * y);
-            painter.line_segment([p(-0.22, -0.20), p(0.22, 0.20)], stroke);
-            painter.line_segment([p(-0.22, 0.20), p(0.22, -0.20)], stroke);
-            painter.line_segment([p(0.0, -0.42), p(0.22, -0.20)], stroke);
-            painter.line_segment([p(0.0, 0.42), p(0.22, 0.20)], stroke);
-            painter.line_segment([p(0.0, -0.42), p(0.0, 0.42)], stroke);
-        }
-        Tile::DarkMode => {
-            // 月牙：一段大圆弧 + 一段反向小圆弧。
-            arc(c.x, c.y, s * 0.40, 0.8, 5.5, stroke.width);
-            arc(
-                c.x + s * 0.16,
-                c.y - s * 0.10,
-                s * 0.30,
-                1.4,
-                4.9,
-                stroke.width,
-            );
-        }
-        Tile::Location => {
-            arc(
-                c.x,
-                c.y - s * 0.10,
-                s * 0.28,
-                0.0,
-                std::f32::consts::TAU,
-                stroke.width,
-            );
-            painter.circle_filled(egui::pos2(c.x, c.y - s * 0.10), s * 0.06, color);
-            painter.line_segment(
-                [
-                    egui::pos2(c.x - s * 0.14, c.y + s * 0.12),
-                    egui::pos2(c.x, c.y + s * 0.40),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(c.x + s * 0.14, c.y + s * 0.12),
-                    egui::pos2(c.x, c.y + s * 0.40),
-                ],
-                stroke,
-            );
-        }
-        Tile::Mute => speaker(painter, c, s, color, true),
-        Tile::Settings => {
-            arc(c.x, c.y, s * 0.26, 0.0, std::f32::consts::TAU, stroke.width);
-            for i in 0..4 {
-                let a = i as f32 * std::f32::consts::FRAC_PI_2;
-                painter.line_segment(
-                    [
-                        egui::pos2(c.x + a.cos() * s * 0.30, c.y + a.sin() * s * 0.30),
-                        egui::pos2(c.x + a.cos() * s * 0.42, c.y + a.sin() * s * 0.42),
-                    ],
-                    stroke,
-                );
-            }
-        }
-        Tile::Energy => {
-            arc(c.x, c.y, s * 0.34, 2.1, 5.6, stroke.width);
-            painter.line_segment(
-                [
-                    egui::pos2(c.x - s * 0.28, c.y + s * 0.28),
-                    egui::pos2(c.x + s * 0.26, c.y - s * 0.26),
-                ],
-                stroke,
-            );
-        }
-        Tile::Hotspot => {
-            painter.circle_filled(egui::pos2(c.x, c.y + s * 0.24), s * 0.07, color);
-            arc(c.x, c.y + s * 0.34, s * 0.24, 3.6, 5.8, stroke.width);
-            arc(c.x, c.y + s * 0.34, s * 0.38, 3.6, 5.8, stroke.width);
-        }
-    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

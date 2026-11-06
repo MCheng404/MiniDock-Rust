@@ -1659,9 +1659,16 @@ impl Dock {
             );
         }
 
+        // 图标统一取同一份主题色（同步到 Dock 时是运行时解析值，
+        // 否则回落默认蓝）：内置条目底色、首字占位文字都跟着走。
+        let accent = self.cfg.runtime_accent.map_or_else(
+            || Color32::from_rgb(46, 123, 246),
+            |a| argbc(255, a[0], a[1], a[2]),
+        );
+
         // 内置条目（开始 / 起动台）没有 shell 图标可取，现画。
         if let Some(kind) = crate::glyph::Builtin::from_path(&it.path) {
-            crate::glyph::paint_tile(painter, inner, kind);
+            crate::glyph::paint_tile(painter, inner, kind, accent, dark);
             return;
         }
 
@@ -1676,26 +1683,9 @@ impl Dock {
             return;
         }
 
-        // 没有图标 → 首字占位。
-        let fill = if dark {
-            Color32::from_rgba_unmultiplied(90, 120, 130, 160)
-        } else {
-            Color32::from_rgba_unmultiplied(160, 90, 100, 140)
-        };
-        painter.rect_filled(inner, CornerRadius::same(r8(4.0 * p.k)), fill);
+        // 没有图标 → 首字占位（中性 tonal 底 + 主题色首字母）。
         if let Some(ch) = it.name.chars().next() {
-            let color = if dark {
-                Color32::from_rgba_unmultiplied(230, 240, 240, 245)
-            } else {
-                Color32::from_rgba_unmultiplied(240, 30, 30, 36)
-            };
-            painter.text(
-                inner.center(),
-                Align2::CENTER_CENTER,
-                ch.to_string(),
-                FontId::proportional((sz * 0.4).max(10.0) * p.k),
-                color,
-            );
+            crate::glyph::paint_monogram(painter, inner, ch, accent, dark);
         }
     }
 
