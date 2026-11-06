@@ -105,8 +105,14 @@ Dock 栏图标 + 控制中心图标）。
   （exe + LICENSE + README）；`--pdb` 才带调试符号（debug 的 PDB 有 200 MB 量级）。
   `./scripts/build.sh --version` 打印本次构建钉住的版本。
 - 新增 `.github/workflows/build.yml` 三段式：`gate`（每次 push / PR）、
-  `debug`（push 到 main，带 run number 出包）、`release`（`v*` 标签，先校验
-  标签与 `Cargo.toml` 一致，再打包建 Release，正文从本文件对应小节抽）。
+  `debug`（任意分支的提交都出包）、`release`（`v*` 标签，先校验标签与
+  `Cargo.toml` 一致，再打包发正式 Release，正文从本文件对应小节抽）。
+  - debug 有两个出口：Actions 产物（无条件，14 天）和 **rolling Pre-Release**
+    （默认分支上发，tag 固定为 `dev`，标题带版本，资产每次覆盖）。
+  - 想只留 Actions（测试流程）：仓库变量 `DEBUG_PUBLISH=artifact`，或手动
+    触发时把 `publish` 选成 `artifact`。
+  - release 显式 `prerelease: false` + `make_latest: true`，与 Pre-Release
+    在 Releases 页上区分开。
 - exe 资源补 `LegalCopyright` / `OriginalFilename` / `InternalName`；
   FileVersion 与 ProductVersion 同时写数值与字符串，属性页不会再吞掉 dev 后缀。
 

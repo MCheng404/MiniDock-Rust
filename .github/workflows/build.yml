@@ -2,18 +2,30 @@ name: build
 
 # 三段式：
 #   gate     每次 push / PR 都跑，格式 + lint + 测试
-#   debug    push 到 main 时出一个带构建编号的调试包（版本 X.Y.Z-dev.<run>）
-#   release  打 v* 标签时出稳定版，并把它挂到 GitHub Release 上
+#   debug    任何分支的提交都出调试包（版本 X.Y.Z-dev.<run>），默认再发一条
+#            rolling Pre-Release（tag = dev）；可以关掉只留 Actions 产物
+#   release  打 v* 标签时出稳定版，发正式 Release
 #
 # 版本号只有一个来源：`scripts/version.rs`。CI 只通过环境变量影响它
 # （`MINIDOCK_BUILD` = run number），不在这里拼字符串。
+#
+# 关掉 Pre-Release 的两种方式（测试流程用，不想让 Releases 页多一条）：
+#   1. 仓库变量 DEBUG_PUBLISH = artifact（Settings → Variables）
+#   2. 手动触发时把 publish 选成 artifact（只影响这一次）
 
 on:
   push:
-    branches: [main]
+    # 任何分支：提交就出包
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "debug 的发布方式"
+        type: choice
+        options: [pre-release, artifact]
+        default: pre-release
 
 permissions:
   contents: read
@@ -54,8 +66,11 @@ jobs:
   debug:
     name: debug
     needs: gate
-    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+    # 打标签时走 release，这里不再重复出 debug。
+    if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
+    permissions:
+      contents: write
     env:
       # build.rs 会把它拼成 `X.Y.Z-dev.<run>`；release 档位不读这个变量。
       MINIDOCK_BUILD: ${{ github.run_number }}
@@ -74,12 +89,63 @@ jobs:
         shell: bash
         run: echo "value=$(tr -d '[:space:]' < target/$TARGET/debug/MINIDOCK_VERSION)" >> "$GITHUB_OUTPUT"
 
+      # 发布方式是"手动输入 > 仓库变量 > 默认 pre-release"三级回落：
+      # 变量改一次长期生效，手动输入只影响这一次。
+      - name: resolve publish mode
+        id: mode
+        shell: bash
+        run: |
+          mode='${{ github.event.inputs.publish || vars.DEBUG_PUBLISH || 'pre-release' }}'
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "publish mode: $mode"
+
+      # 产物无条件上传：即便是"仅 Actions"模式，测试也要有东西可下。
       - uses: actions/upload-artifact@v4
         with:
           name: MiniDock-${{ steps.ver.outputs.value }}-win64-debug
           path: dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug/
           if-no-files-found: error
           retention-days: 14
+
+      - name: zip
+        if: steps.mode.outputs.mode != 'artifact' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: pwsh
+        run: |
+          $dir = Get-Item "dist/MiniDock-*-win64-debug" | Select-Object -First 1
+          Compress-Archive -Path $dir.FullName -DestinationPath "$($dir.FullName).zip"
+
+      # rolling Pre-Release：永远用同一个 tag，资产每次覆盖。
+      # 只有主分支发布 —— 特性分支的验证包留在 Actions 里，免得 Releases 页被刷屏。
+      - name: publish pre-release
+        if: steps.mode.outputs.mode != 'artifact' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.value }}
+        run: |
+          set -euo pipefail
+          tag=dev
+          zip="dist/MiniDock-$VERSION-win64-debug.zip"
+          sha8="${GITHUB_SHA:0:8}"
+
+          {
+            echo "自动构建，每次提交覆盖本发布。"
+            echo
+            echo "- 版本：\`$VERSION\`"
+            echo "- 提交：[\`$sha8\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)"
+            echo "- 运行：[$GITHUB_RUN_NUMBER](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            echo
+            echo "稳定版请看 [最新正式发布](https://github.com/$GITHUB_REPOSITORY/releases/latest)。"
+          } > debug-notes.md
+
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --prerelease --title "Development build" --notes-file debug-notes.md
+          fi
+          # 资产名带版本号，不清掉旧的会一直堆积。
+          gh release view "$tag" --json assets --jq '.assets[].name' \
+            | while read -r name; do [ -n "$name" ] && gh release delete-asset "$tag" "$name" -y; done
+          gh release upload "$tag" "$zip" --clobber
+          gh release edit "$tag" --prerelease --title "Development build $VERSION" --notes-file debug-notes.md
 
   release:
     name: release
@@ -128,3 +194,7 @@ jobs:
           files: dist/*.zip
           body_path: notes.md
           fail_on_unmatched_files: true
+          # 正式版：不是草稿、不是预发布，并抢下 "Latest" 角标。
+          draft: false
+          prerelease: false
+          make_latest: "true"

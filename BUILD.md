@@ -255,17 +255,39 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 
 | job | 触发 | 干什么 |
 |---|---|---|
-| `gate` | 每次 push / PR | `fmt --check` → `clippy -D warnings` → `--lib --tests`（与本地 `--gate` 同一条命令） |
-| `debug` | push 到 `main` | `MINIDOCK_BUILD=<run_number>` → `package.sh` → 上传 `MiniDock-<ver>-win64-debug`（保留 14 天） |
-| `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 版本一致 → `package.sh --release` → 压缩 → 建 Release，正文从 `CHANGELOG.md` 对应小节抽 |
+| `gate` | 每次 push（任意分支）/ PR | `fmt --check` → `clippy -D warnings` → `--lib --tests`，与本地 `--gate` 同一批命令 |
+| `debug` | 每次 push（任意分支）/ 手动触发 | `MINIDOCK_BUILD=<run_number>` → `package.sh` → 上传 Actions 产物 `MiniDock-<ver>-win64-debug`（保留 14 天）；默认**再发一条 rolling Pre-Release** |
+| `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 一致 → `package.sh --release` → 压缩 → 发**正式 Release**（非草稿、非预发布、抢 `Latest`） |
 
-发版流程就是三步：
+### 8.1 Debug 的两个出口
+
+1. **Actions 产物**：无条件上传，任何分支都有。分支名不能当版本，所以特性分支
+   只留在这里。
+2. **Pre-Release**：只在默认分支（`main`）上发，**永远用同一个 tag `dev`**，
+   标题写 `Development build <版本>`，资产每次覆盖（旧资产按名字删掉，不会堆积）。
+
+   > 为什么不每次一个新 tag：一天几十次提交就是几十条 release，Releases 页
+   > 会被刷屏，而且 `Latest` 旁边的"预发布"永远指向某个半成品。滚动一条，
+   > 链接稳定、内容最新。
+
+### 8.2 关掉 Pre-Release（测试流程用）
+
+两种方式，任选：
+
+| 方式 | 生效范围 | 怎么设置 |
+|---|---|---|
+| 仓库变量 `DEBUG_PUBLISH=artifact` | 长期 | Settings → Secrets and variables → Actions → **Variables** 新建 |
+| 手动触发时 `publish` 选 `artifact` | 仅这一次 | Actions → build → Run workflow |
+
+两种都关掉之后，debug 仍然构建、仍然上传 Actions 产物，只是不再动 Releases 页。
+
+### 8.3 发版
 
 ```bash
-# 1) 改 Cargo.toml 的 workspace version 与 CHANGELOG 顶层小节为同一个号
+# 1) 把 Cargo.toml 的 workspace version 与 CHANGELOG 顶层小节改成同一个号
 # 2) 提交
 git commit -am "release: 0.9.26"
-# 3) 打标签（不带 v 前缀推上去也行，workflow 两种都认，但只匹配 v*）
+# 3) 打标签（只认 v* 前缀，tag 与版本号不一致会直接 fail）
 git tag v0.9.26 && git push origin v0.9.26
 ```
 
