@@ -128,6 +128,10 @@ pub struct SettingsState {
     pub version_clicks: u8,
     /// 更新器当前状态，由 GPU 层在后台线程里刷新。
     pub update: UpdateView,
+    /// 「添加网页应用」输入框里的地址。
+    pub url_input: String,
+    /// 图标库页选中的图标文件夹（空 = 还没选）。
+    pub icon_dir: String,
     /// 顶栏搜索框的内容：非空时只显示命中的导航标签。
     pub nav_filter: String,
     /// 当前展开的说明气泡（点击钉住 / 悬停 3 秒自动展开）。
@@ -177,6 +181,8 @@ impl Default for SettingsState {
             advanced: false,
             version_clicks: 0,
             update: UpdateView::default(),
+            url_input: String::new(),
+            icon_dir: String::new(),
             row_bands: Vec::new(),
         }
     }

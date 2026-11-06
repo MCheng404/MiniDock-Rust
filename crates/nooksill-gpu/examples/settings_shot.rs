@@ -21,7 +21,7 @@ use nooksill_core::config::Config;
 use nooksill_core::config::Key;
 use nooksill_gpu::frame::FrameRenderer;
 use nooksill_gpu::gpu::Gpu;
-use nooksill_gpu::settings_win::{shell, LOGICAL_SIZE};
+use nooksill_gpu::settings_win::{shell_with_frost, LOGICAL_SIZE};
 use nooksill_settings::{Outcome, Page, SettingsState};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -120,6 +120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // `NOOKSILL_SHOT_FROST=1`：按毛玻璃模式出图，并把面板合成到一张
+    // 模拟壁纸上（左亮右暗）。毛玻璃的可读性只有压在"不知道多亮"的底上
+    // 才看得出问题，纯色底会把它掩盖掉。
+    let frost = std::env::var("NOOKSILL_SHOT_FROST").is_ok();
+
     // 三帧出图：字体图集(0s) → 动画推进(0.4s) → 稳定画面(10s)。
     //
     // 时间必须往前走：egui 的浮层（如说明气泡）有淡入 + 滑入动画，靠
@@ -127,15 +132,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 层只有 ~8% 不透明度、位置也停在半路，截出来是"半透明脏块"。
     for t in [0.0_f64, 0.4] {
         let _ = frame.render_rgba(&gpu, raw_input((w, h), ppp, t), |ui| {
-            shell(ui, &mut state, &mut cfg, &mut out)
+            shell_with_frost(ui, &mut state, &mut cfg, &mut out, frost)
         })?;
     }
     // 第三帧才是"字体已就绪、动画已落定"的稳定画面。
     let (pixels, _) = frame.render_rgba(&gpu, raw_input((w, h), ppp, 10.0), |ui| {
-        shell(ui, &mut state, &mut cfg, &mut out)
+        shell_with_frost(ui, &mut state, &mut cfg, &mut out, frost)
     })?;
 
-    write_bmp(&out_path, w, h, &pixels, dark)?;
+    write_bmp(&out_path, w, h, &pixels, dark, frost)?;
     println!(
         "已写出 {out_path}（{}×{}，{:?}，{}，MSAA {}x）",
         w,
@@ -176,10 +181,31 @@ fn raw_input(size: (u32, u32), ppp: f32, time: f64) -> egui::RawInput {
 ///
 /// 不用 PNG：那要引一个编码库，而这里只是给人看一眼。也不保留 alpha：
 /// 分层窗口的透明区域直接看是黑的，合成到灰底才能看清圆角。
-fn write_bmp(path: &str, w: u32, h: u32, rgba: &[u8], dark: bool) -> std::io::Result<()> {
+fn write_bmp(
+    path: &str,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+    dark: bool,
+    frost: bool,
+) -> std::io::Result<()> {
     // 与 `settings_win::shell` 画的窗口底色一致：合成用的底必须跟着主题走，
     // 否则深色截图会得到"浅灰窗口 + 深色卡片"这种真实窗口里不存在的画面。
     let bg: [u8; 3] = if dark { [24, 25, 30] } else { [246, 247, 250] };
+    // 毛玻璃模式：底换成"模拟壁纸"—— 左亮右暗的斜向渐变。真实桌面可能是
+    // 纯白照片，也可能是一片深色；同一个面板要在两端都读得清才算过关。
+    let wallpaper = |x: u32, y: u32| -> [u8; 3] {
+        let fx = x as f32 / w.max(1) as f32;
+        let fy = y as f32 / h.max(1) as f32;
+        let t = (fx * 0.75 + fy * 0.25).clamp(0.0, 1.0);
+        let lerp = |a: f32, b: f32| (a + (b - a) * t).round() as u8;
+        if dark {
+            // 深色主题压在白壁纸上才是最坏情况：左边给到近白。
+            [lerp(236.0, 26.0), lerp(232.0, 32.0), lerp(214.0, 46.0)]
+        } else {
+            [lerp(250.0, 22.0), lerp(238.0, 30.0), lerp(210.0, 44.0)]
+        }
+    };
     // 行按 4 字节对齐（BMP 的 stride 规则）。
     let row_stride = ((w as usize) * 3).div_ceil(4) * 4;
     let data_len = row_stride * h as usize;
@@ -212,11 +238,12 @@ fn write_bmp(path: &str, w: u32, h: u32, rgba: &[u8], dark: bool) -> std::io::Re
             // 转成 DIB 要的 BGRA）；这里直接按 RGBA 取，BMP 像素序 BGR。
             let (r, g, b, a) = (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
             // 预乘 alpha：直接加上背景的 (1-a) 部分。
+            let base = if frost { wallpaper(x, y) } else { bg };
             let inv = 255 - a as u32;
             let blend = |c: u8, bg: u8| -> u8 { (c as u32 + bg as u32 * inv / 255).min(255) as u8 };
-            buf.push(blend(b, bg[2]));
-            buf.push(blend(g, bg[1]));
-            buf.push(blend(r, bg[0]));
+            buf.push(blend(b, base[2]));
+            buf.push(blend(g, base[1]));
+            buf.push(blend(r, base[0]));
             written += 3;
         }
         // 行尾补齐到 4 字节边界（BMP 的 stride 规则）。

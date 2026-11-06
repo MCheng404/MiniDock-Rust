@@ -89,18 +89,23 @@ mod palette {
     // 配色两态通用，不需要按 frost 切换。
     //
     // `from_rgba_unmultiplied` 不是 const，所以是函数而不是常量。
+    // 不透明度按"最坏情况"定：毛玻璃开着时下面是一张**不知道多亮**的模糊
+    // 桌面，深色主题压在白壁纸上时，卡片实际会被抬亮 60~90 级灰阶。
+    // 早先卡片 150、侧栏 130 的组合在这种底上只剩 3:1 出头，小字直接糊掉。
+    // 现在卡片 215 / 侧栏 190：壁纸最多只能透过 ~15%，模糊仍然看得见，
+    // 但文字落点不随壁纸漂移。
     pub(super) fn light_sidebar() -> Color32 {
-        Color32::from_rgba_unmultiplied(251, 251, 253, 120)
+        Color32::from_rgba_unmultiplied(251, 251, 253, 200)
     }
     pub(super) fn light_card() -> Color32 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 170)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 216)
     }
     pub(super) const LIGHT_MENU: Color32 = Color32::from_rgb(255, 255, 255);
     pub(super) fn dark_sidebar() -> Color32 {
-        Color32::from_rgba_unmultiplied(28, 29, 34, 130)
+        Color32::from_rgba_unmultiplied(28, 29, 34, 190)
     }
     pub(super) fn dark_card() -> Color32 {
-        Color32::from_rgba_unmultiplied(33, 34, 40, 150)
+        Color32::from_rgba_unmultiplied(33, 34, 40, 215)
     }
     pub(super) const DARK_MENU: Color32 = Color32::from_rgb(38, 39, 47);
 }

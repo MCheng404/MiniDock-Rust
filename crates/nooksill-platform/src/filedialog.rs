@@ -1,0 +1,106 @@
+//! 系统文件对话框。
+//!
+//! 用 `IFileOpenDialog` 而不是老式 `GetOpenFileNameW`：后者没有文件夹模式，
+//! 也不能设默认扩展名；前者是 Vista 之后的标准，视觉与资源管理器一致。
+//!
+//! 对话框是**模态**的，会阻塞调用它的线程 —— 所以只能在 UI 线程上、由用户
+//! 点击触发。我们不自己开线程：文件对话框与调用方的窗口有父子关系，跨线程
+//! 反而会变成"对话框沉在窗口后面点不到"。
+
+use std::path::PathBuf;
+
+use windows::core::HSTRING;
+use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+use windows::Win32::UI::Shell::{
+    FileOpenDialog, IFileOpenDialog, IShellItem, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+    FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+};
+
+use crate::win;
+
+/// 一条过滤器：`("应用", "*.exe;*.lnk")`。
+pub type Filter<'a> = (&'a str, &'a str);
+
+/// 选一个文件。`owner` 是父窗口，`None` 时以桌面为父。
+#[must_use]
+pub fn open_file(title: &str, owner: Option<isize>, filters: &[Filter<'_>]) -> Option<PathBuf> {
+    show(owner, title, filters, Mode::Open)
+}
+
+/// 选一个文件夹。
+#[must_use]
+pub fn open_folder(title: &str, owner: Option<isize>) -> Option<PathBuf> {
+    show(owner, title, &[], Mode::Folder)
+}
+
+/// 另存为。`default_name` 只是预填的文件名，用户仍可改。
+#[must_use]
+pub fn save_file(title: &str, owner: Option<isize>, default_name: &str) -> Option<PathBuf> {
+    let dialog = build(title, &[], Mode::Save)?;
+    unsafe {
+        let _ = dialog.SetFileName(&HSTRING::from(default_name));
+    }
+    finish(dialog, owner)
+}
+
+enum Mode {
+    Open,
+    Folder,
+    Save,
+}
+
+fn build(title: &str, filters: &[Filter<'_>], mode: Mode) -> Option<IFileOpenDialog> {
+    win::ensure_com();
+    // SAFETY: `ensure_com` 保证本线程已初始化；CoCreateInstance 是标准的
+    // shell 对话框创建路径，失败只会返回 Err。
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()? };
+    unsafe {
+        let mut options = FOS_FORCEFILESYSTEM;
+        match mode {
+            Mode::Folder => options |= FOS_PICKFOLDERS | FOS_PATHMUSTEXIST,
+            Mode::Open => options |= FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST,
+            Mode::Save => options |= FOS_OVERWRITEPROMPT,
+        }
+        dialog.SetOptions(options).ok()?;
+        dialog.SetTitle(&HSTRING::from(title)).ok()?;
+
+        if !filters.is_empty() {
+            // 名字与模式都要活到 `SetFileTypes` 返回之后：COM 只拷贝指针
+            // 指向的内容？不，它按接口约定拷贝，但把 HSTRING 放进 Vec 再
+            // 逐项取 ptr 更省心 —— 这里两段都留在作用域内。
+            let names: Vec<HSTRING> = filters.iter().map(|(n, _)| HSTRING::from(*n)).collect();
+            let specs: Vec<HSTRING> = filters.iter().map(|(_, s)| HSTRING::from(*s)).collect();
+            let specs_ref: Vec<COMDLG_FILTERSPEC> = names
+                .iter()
+                .zip(&specs)
+                .map(|(n, s)| COMDLG_FILTERSPEC {
+                    pszName: windows::core::PCWSTR(n.as_ptr()),
+                    pszSpec: windows::core::PCWSTR(s.as_ptr()),
+                })
+                .collect();
+            dialog.SetFileTypes(&specs_ref).ok()?;
+        }
+    }
+    Some(dialog)
+}
+
+fn finish(dialog: IFileOpenDialog, owner: Option<isize>) -> Option<PathBuf> {
+    // SAFETY: `owner` 是调用方给的 HWND，`None` 表示无父窗口。
+    unsafe {
+        let parent = owner.map(|h| windows::Win32::Foundation::HWND(h as *mut _));
+        dialog.Show(parent).ok()?;
+        let item: IShellItem = dialog.GetResult().ok()?;
+        let raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let text = raw.to_string().ok()?;
+        CoTaskMemFree(Some(raw.0.cast()));
+        Some(PathBuf::from(text))
+    }
+}
+
+/// `show` 是上面三个入口的共同实现，只差构造时的模式。
+fn show(owner: Option<isize>, title: &str, filters: &[Filter<'_>], mode: Mode) -> Option<PathBuf> {
+    let dialog = build(title, filters, mode)?;
+    finish(dialog, owner)
+}

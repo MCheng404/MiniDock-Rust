@@ -815,6 +815,14 @@ impl Dock {
         self.icons.get(index).is_some_and(Option::is_some)
     }
 
+    /// 丢掉所有已加载的图标。
+    ///
+    /// 用在"图标来源变了"的场合（批量匹配图标）：`replace_items` 按路径
+    /// 保留旧图标，不清一次的话新来源永远不会被读取。
+    pub fn clear_icons(&mut self) {
+        self.icons.clear();
+    }
+
     /// 窗口的**物理**像素尺寸。egui 画布尺寸 = 这个值 / ppp。
     ///
     /// 名字里带 `physical` 是有意的：`metrics.lw/lh` 是物理像素，

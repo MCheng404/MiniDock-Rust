@@ -533,6 +533,7 @@ impl LaunchpadWindow {
                 index: ai,
                 kind: nooksill_core::item::ItemKind::File,
                 path: app.path.clone(),
+                icon_src: String::new(),
                 fit: 0,
             });
         }

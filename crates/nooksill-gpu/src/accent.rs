@@ -58,6 +58,16 @@ pub fn apply_visuals(ui: &mut Ui, cfg: &Config) {
     // 铺左半段 —— 主题色在滑杆上才看得见。
     vis.slider_trailing_fill = true;
 
+    // 正文字色先立起来。egui 深色默认是 `gray(140)`（#8C8C8C），压在卡片上
+    // 只有 ~4.5:1；毛玻璃把底色再抬一档就掉到 3:1，小字直接糊。
+    // 只改 `noninteractive`：其它状态要么在主题色底上（要白字），要么
+    // 由控件自己上色；`weak_text_color()` 是它的 60%，跟着一起提亮。
+    vis.widgets.noninteractive.fg_stroke.color = if vis.dark_mode {
+        Color32::from_rgb(232, 234, 240)
+    } else {
+        Color32::from_rgb(28, 32, 38)
+    };
+
     // 元素优化：控件圆角统一到 10（按钮/开关/下拉/输入框），浮层 12。
     // 之前沿用 egui 默认的 2~4px，和 18px 的卡片放一起像两套设计。
     let r = CornerRadius::same(10);

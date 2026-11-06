@@ -98,6 +98,8 @@ pub struct IconRequest {
     pub index: usize,
     pub kind: ItemKind,
     pub path: String,
+    /// 自定义图标文件（`.ico`）。空 = 从 `path` 取。
+    pub icon_src: String,
     /// 图标填充方式（0 = 等比留白，见 `FitBitmap`）。
     pub fit: i32,
 }
@@ -223,6 +225,14 @@ const BATCH: usize = 8;
 
 /// 走 shell 取图标。
 fn fetch_icon(req: &IconRequest) -> Option<IconBitmap> {
+    // 自定义图标优先：`.ico` 交给 shell 的图像列表，拿到的是文件本身那张图。
+    // 取不到再退回条目自己的图标 —— 用户给错了文件不该让图标整个消失。
+    let custom = (!req.icon_src.is_empty())
+        .then(|| icon::shell_icon(&req.icon_src))
+        .flatten();
+    if custom.is_some() {
+        return custom;
+    }
     match req.kind {
         // 分割线不画图标；网址要联网抓 favicon，还没做。
         ItemKind::Separator | ItemKind::Url => None,
@@ -678,6 +688,7 @@ mod tests {
         loader.submit(IconRequest {
             index: 0,
             kind: ItemKind::File,
+            icon_src: String::new(),
             path: r"C:\Windows\System32\notepad.exe".to_owned(),
             fit: 0,
         });
@@ -756,6 +767,7 @@ mod tests {
             index: 3,
             kind: ItemKind::File,
             path: r"C:\x\a.exe".to_owned(),
+            icon_src: String::new(),
             fit: 0,
         };
         let bmp = IconBitmap {

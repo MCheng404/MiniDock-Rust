@@ -1075,6 +1075,7 @@ impl App {
             self.icons.submit(IconRequest {
                 index: i,
                 kind: t.kind,
+                icon_src: String::new(),
                 path: t.path.clone(),
                 fit: t.fit,
             });
@@ -2399,6 +2400,7 @@ fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
             index: i,
             kind: item.kind,
             path: item.path.clone(),
+            icon_src: item.icon_src.clone(),
             fit: item.fit,
         });
     }
@@ -2960,11 +2962,156 @@ impl App {
                 self.apply_item_change();
                 false
             }
-            _ => {
-                self.status("这项能力还没接进 Dock（见 PORTING.md 待办）");
+            Command::AddUrl => {
+                let url = self
+                    .settings_slot
+                    .as_ref()
+                    .map(|sw| sw.state.url_input.trim().to_owned())
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    return false;
+                }
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    self.status("网址要以 http:// 或 https:// 开头");
+                    return false;
+                }
+                let name = url_host(&url);
+                self.raw.push(Item::new(ItemKind::Url, &name, url.as_str()));
+                if let Some(sw) = self.settings_slot.as_mut() {
+                    sw.state.url_input.clear();
+                }
+                self.apply_item_change();
+                self.status(format!("已添加 {name}"));
+                false
+            }
+            Command::AddFile => {
+                let owner = self.settings_hwnd();
+                let filters = [("应用与快捷方式", "*.exe;*.lnk"), ("所有文件", "*.*")];
+                if let Some(path) =
+                    nooksill_platform::filedialog::open_file("添加应用或文件", owner, &filters)
+                {
+                    let name = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "新条目".to_owned());
+                    self.raw
+                        .push(Item::new(ItemKind::File, &name, path.to_string_lossy()));
+                    self.apply_item_change();
+                    self.status(format!("已添加 {name}"));
+                }
+                false
+            }
+            Command::AddFolder => {
+                let owner = self.settings_hwnd();
+                if let Some(path) = nooksill_platform::filedialog::open_folder("添加文件夹", owner)
+                {
+                    let name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "新文件夹".to_owned());
+                    self.raw
+                        .push(Item::new(ItemKind::Folder, &name, path.to_string_lossy()));
+                    self.apply_item_change();
+                    self.status(format!("已添加 {name}"));
+                }
+                false
+            }
+            Command::NewGroup => {
+                self.raw.push(Item::new(ItemKind::Group, "新建分组", ""));
+                self.apply_item_change();
+                self.status("已新建分组：把图标拖进去即可归组");
+                false
+            }
+            Command::PickIconDir => {
+                let owner = self.settings_hwnd();
+                if let Some(dir) =
+                    nooksill_platform::filedialog::open_folder("选择图标文件夹", owner)
+                {
+                    let text = dir.display().to_string();
+                    if let Some(sw) = self.settings_slot.as_mut() {
+                        sw.state.icon_dir = text.clone();
+                    }
+                    self.status(format!("图标文件夹：{text}"));
+                }
+                false
+            }
+            Command::AutoMatch => {
+                let dir = self
+                    .settings_slot
+                    .as_ref()
+                    .map(|sw| sw.state.icon_dir.clone())
+                    .unwrap_or_default();
+                if dir.is_empty() {
+                    self.status("先选一个图标文件夹");
+                    return false;
+                }
+                let mut matched = 0usize;
+                for item in &mut self.raw {
+                    if !item.icon_src.is_empty() || item.kind == ItemKind::Separator {
+                        continue;
+                    }
+                    let candidate = std::path::Path::new(&dir).join(format!("{}.ico", item.name));
+                    if candidate.is_file() {
+                        item.icon_src = candidate.display().to_string();
+                        matched += 1;
+                    }
+                }
+                if matched == 0 {
+                    self.status("没有找到同名 .ico");
+                    return false;
+                }
+                // 图标来源变了：不清缓存的话 `replace_items` 会按路径保留旧图标。
+                self.dock.clear_icons();
+                self.apply_item_change();
+                self.status(format!("匹配到 {matched} 个图标"));
+                false
+            }
+            Command::ExportAll => {
+                let owner = self.settings_hwnd();
+                if let Some(path) =
+                    nooksill_platform::filedialog::save_file("导出完整配置", owner, "NookSill.ini")
+                {
+                    // 以磁盘上那份为底，保住不认识的键；条目与设置再覆盖上去。
+                    let mut ini =
+                        nooksill_core::ini::Ini::load(&self.paths.ini).unwrap_or_default();
+                    store::save_items(&self.raw, &mut ini);
+                    self.dock.cfg.write_ini(&mut ini);
+                    match ini.save(&path) {
+                        Ok(()) => self.status(format!("已导出到 {}", path.display())),
+                        Err(e) => self.status(format!("导出失败：{e}")),
+                    }
+                }
+                false
+            }
+            Command::Import => {
+                let owner = self.settings_hwnd();
+                let filters = [("NookSill 配置", "*.ini"), ("所有文件", "*.*")];
+                if let Some(path) =
+                    nooksill_platform::filedialog::open_file("导入配置", owner, &filters)
+                {
+                    match nooksill_core::ini::Ini::load(&path) {
+                        Ok(ini) => {
+                            self.dock.cfg = Config::from_ini(&ini, self.dpi);
+                            self.raw = store::load_items(&ini);
+                            self.dock.clear_icons();
+                            self.apply_item_change();
+                            self.touch_cfg();
+                            self.status(format!("已导入 {}", path.display()));
+                        }
+                        Err(e) => self.status(format!("导入失败：{e}")),
+                    }
+                }
                 false
             }
         }
+    }
+
+    /// 设置窗口的 HWND，给文件对话框当 owner 用。
+    ///
+    /// 没建过窗口时给 `None`：对话框会以桌面为父窗口，仍然可用，
+    /// 只是不会跟着设置窗口置前。
+    fn settings_hwnd(&self) -> Option<isize> {
+        self.settings_slot.as_ref().map(|sw| sw.hwnd().0 as isize)
     }
 
     /// 往设置窗口的底部状态条写一句话（窗口没建过就什么都不做）。
@@ -2972,6 +3119,23 @@ impl App {
         if let Some(sw) = self.settings_slot.as_mut() {
             sw.state.status = text.into();
         }
+    }
+}
+
+/// 网址条目的显示名：取主机名，去掉 `www.`。
+///
+/// 不抓页面标题 —— 那要联网、要解析 HTML，还可能卡住 UI。域名足够认出来。
+fn url_host(url: &str) -> String {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty() {
+        "网页应用".to_owned()
+    } else {
+        host.to_owned()
     }
 }
 

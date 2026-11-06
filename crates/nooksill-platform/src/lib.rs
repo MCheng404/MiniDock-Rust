@@ -10,6 +10,7 @@ pub mod app_window;
 pub mod appbar;
 pub mod audio;
 pub mod display;
+pub mod filedialog;
 pub mod gpu;
 pub mod icon;
 pub mod json;

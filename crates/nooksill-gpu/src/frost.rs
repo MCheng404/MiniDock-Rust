@@ -257,7 +257,18 @@ fn report(seq: u64, bits: &[u8], w: u32, h: u32, spent: Duration, diff: usize) {
 #[must_use]
 pub fn panel_bg(dark: bool, frost: bool) -> Color32 {
     let (r, g, b) = if dark { (24, 25, 30) } else { (246, 247, 250) };
-    let a = if frost { 140 } else { 250 };
+    // 毛玻璃下不再是 140（55%）：桌面亮度不受控，深色主题压在浅色壁纸上时
+    // 整块面板会被抬到中灰，白字只剩 3:1 出头。200/190 让壁纸最多透 22%，
+    // 模糊照样看得见，但文字底色基本确定 —— 与 Win11 亚克力的 tint 同路数。
+    let a = if frost {
+        if dark {
+            200
+        } else {
+            190
+        }
+    } else {
+        250
+    };
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
