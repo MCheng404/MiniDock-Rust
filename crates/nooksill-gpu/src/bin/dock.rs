@@ -815,7 +815,13 @@ impl App {
         // 命令：它们不是配置的一部分，删了下一轮扫描还会回来；更要紧的是
         // 那两个命令按 `raw` 的下标改配置，拿临时条目的下标去打会改错条目。
         let temp = hit.is_some_and(|i| i >= self.raw.len());
-        let Some(menu) = Menu::build(target, running, temp) else {
+        // `MnAuto` / `MnAdd` 决定菜单里多出哪几项；开机自启的**当前值**要
+        // 现读注册表（用户可能在任务管理器里改过）。
+        let opts = nooksill_gpu::menu::MenuOpts {
+            autostart: (self.dock.cfg.get_i32(Key::MN_AUTO) != 0).then(theme::get_autostart),
+            add_items: self.dock.cfg.get_i32(Key::MN_ADD) != 0,
+        };
+        let Some(menu) = Menu::build(target, running, temp, opts) else {
             return Ok(false);
         };
 
@@ -865,6 +871,29 @@ impl App {
             }
             if cmd == MenuCmd::Launchpad {
                 self.open_launchpad()?;
+            } else if cmd == MenuCmd::ToggleAutostart {
+                // 与设置页同一个入口：写注册表后**回读真值**，策略拦截时
+                // 写函数也可能返回成功。
+                let want = !theme::get_autostart();
+                if theme::set_autostart(want) {
+                    let real = theme::get_autostart();
+                    if let Some(sw) = self.settings_slot.as_mut() {
+                        sw.state.auto_start = real;
+                    }
+                    self.status(if real {
+                        "已设置开机自启动"
+                    } else {
+                        "已取消开机自启动"
+                    });
+                }
+            } else if matches!(cmd, MenuCmd::AddFile | MenuCmd::AddFolder) {
+                // 复用设置页那套（含文件对话框与 `apply_item_change`）。
+                let add = if cmd == MenuCmd::AddFile {
+                    Command::AddFile
+                } else {
+                    Command::AddFolder
+                };
+                self.run_settings_cmd(add);
             } else if cmd == MenuCmd::Settings {
                 // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
                 // 那儿没有 `gpu`，也不该有。
@@ -1005,6 +1034,10 @@ impl App {
             }
             // 入口在 `step_menu` 之前就被截走了（`Settings` 要 GPU 才能开窗口）。
             // 这里是穷尽匹配要求的占位：真走到这里说明拦截失效了，那是一个 bug。
+            // 同样在 `step_menu` 里被截走：它们要用 `gpu` 或注册表。
+            MenuCmd::ToggleAutostart | MenuCmd::AddFile | MenuCmd::AddFolder => {
+                eprintln!("`{cmd:?}` 走错了路径：它应当在主循环里被处理");
+            }
             MenuCmd::Settings => {
                 eprintln!("`Settings` 命令走错了路径：它应当在主循环里被处理");
             }

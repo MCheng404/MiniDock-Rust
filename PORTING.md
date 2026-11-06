@@ -594,7 +594,10 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 | 实现有、界面没有（未暴露） | 10 | `ClockOrder` / `LpCols` / `LpRows` / `WideMask` / `HPad` / `UiFrost` / `LpFrost` / `TrayW` / `WMerge` / `MenuFrost` |
 | 两边都没有（未移植） | 37 | `Sb*` 状态栏 13 个、`Fan*` 扇形 8 个、托盘/更新/多窗口等 |
 
-15 个空壳，按代价分三档：
+15 个空壳里 **12 个已接**（`BorderWidth` `SepWidth` `MenuTheme` `Refl*`×3
+`Browser` `BgColor3` `GradAngle` `GradA1-3` `MnAuto` `MnAdd`），剩下三个见文末：
+
+
 
 | 档 | 键 | 处理 |
 |---|---|---|
@@ -604,8 +607,8 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 | ✅ **已接** | `ReflSize` `ReflGap` `ReflOpacity` | **倒影原来根本没画**，只在栏下留一条空白。现在在呈现层做：把栏体那几行上下翻转、按距离线性衰减后写到下方（`present::mirror_rows`，预乘 BGRA 四通道同乘） |
 | ✅ **已接** | `Browser` | 网页应用原来固定 Edge→Chrome；现按键选（0 自动 / 1 Edge / 2 Chrome / 3 Firefox / 4 系统默认），指定的没装就继续往下退，最后回落到系统默认 |
 | ✅ **已接** | `BgColor3` + `GradAngle/A1/A2/A3` | 渐变改成"两端 + 可选中间色"，`at(t)` 在 t=0.5 取中间色；角度换成把点投影到方向向量、按矩形在该方向的跨度归一化（0°/90° 与旧的 `Direction` 完全一致）。每档透明度独立作用（预乘后再插值，半透明端不会串色） |
-| 待做 | `MnAuto` / `MnAdd` | 菜单里加「开机自启」与「新建项」—— 现在可做：命令已经在 |
-| 待做 | `MnNotes` | 卡在「速记」本身：`ItemKind::Note` 的启动仍是 `Unsupported` |
+| ✅ **已接** | `MnAuto` / `MnAdd` | 空白处右键多出「添加文件… / 添加文件夹…」与带勾选的「开机自启」。勾是画出来的两条线段，不打 `✓` 字符——Dingbats 区不保证有字模，缺字会变豆腐块。`MenuEntry` 因此多一个 `checkable/checked`，整张菜单留 18px 勾选槽保证左对齐 |
+| 待做 | `MnNotes` | 卡在「速记」本身：`ItemKind::Note` 的启动仍是 `Unsupported`，给菜单项等于再生一个死按钮 |
 | 不做 | `MinStyle` | 最小化动画风格，前提是窗口动画——§9.4 已论证不移植 |
 | 不做 | `Guardian` | 守护进程要第二个进程，一个 Dock 不值得再养一个常驻 |
 

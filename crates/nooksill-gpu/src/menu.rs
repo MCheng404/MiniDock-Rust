@@ -43,6 +43,12 @@ pub enum MenuCmd {
     RemoveSep,
     /// 打开设置窗口。
     Settings,
+    /// 切换开机自启（菜单里的勾选项）。
+    ToggleAutostart,
+    /// 空白处右键的「新建」：加一个应用/文件。
+    AddFile,
+    /// 空白处右键的「新建」：加一个文件夹。
+    AddFolder,
     /// 打开起动台。
     Launchpad,
     /// 退出 Dock 进程。
@@ -58,14 +64,30 @@ pub struct MenuEntry {
     pub danger: bool,
     /// 此项之后画一条分隔线。
     pub sep_after: bool,
+    /// 这一项带勾选态（例如「开机自启」）。只要有这么一项，整张菜单都
+    /// 留出勾选槽 —— 否则同一张菜单里两种左边距，看起来像没对齐。
+    pub checkable: bool,
+    /// 当前是否勾上。
+    pub checked: bool,
 }
 
 impl MenuEntry {
+    /// 带勾选态的一项。`on` 是当前是否开启。
+    fn toggle(label: &str, cmd: MenuCmd, on: bool) -> Self {
+        Self {
+            checkable: true,
+            checked: on,
+            ..Self::new(label, cmd, false, false)
+        }
+    }
+
     fn new(label: &str, cmd: MenuCmd, danger: bool, sep_after: bool) -> Self {
         Self {
             label: label.to_owned(),
             cmd,
             danger,
+            checkable: false,
+            checked: false,
             sep_after,
         }
     }
@@ -80,6 +102,25 @@ const PAD_X: f32 = 12.0;
 const MIN_W: f32 = 190.0;
 /// 菜单背景圆角（逻辑像素）。
 pub const RADIUS: f32 = 10.0;
+
+/// 构建菜单时的开关，来自配置里的 `Mn*` 三个键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuOpts {
+    /// `MnAuto`：显示「开机自启」，值 = 当前是否开启。`None` = 不显示。
+    pub autostart: Option<bool>,
+    /// `MnAdd`：空白处右键显示「添加文件 / 文件夹」。
+    pub add_items: bool,
+}
+
+impl Default for MenuOpts {
+    fn default() -> Self {
+        // 默认值必须与 `MnAdd` 的 ini 默认一致（1 = 显示）。
+        Self {
+            autostart: None,
+            add_items: true,
+        }
+    }
+}
 
 /// 一次打开的菜单。
 #[derive(Debug, Clone)]
@@ -101,10 +142,26 @@ impl Menu {
     /// `temp` = 这个条目是"未固定的运行中应用"（临时条目）。它们不改配置，
     /// 所以不给"加分割线""从 Dock 移除"—— 那两条按配置下标改数据，
     /// 用临时条目的下标去打会改到别的条目上。
-    pub fn build(item: Option<&Item>, running: bool, temp: bool) -> Option<Self> {
+    pub fn build(item: Option<&Item>, running: bool, temp: bool, opts: MenuOpts) -> Option<Self> {
         let mut entries = Vec::new();
         match item.map(|i| i.kind) {
             None => {
+                // `MnAdd`：空白处右键给"新建"。只放文件/文件夹 —— 网址要
+                // 输入框，菜单里没法打字，那条留在设置页。
+                if opts.add_items {
+                    entries.push(MenuEntry::new("添加文件…", MenuCmd::AddFile, false, false));
+                    entries.push(MenuEntry::new(
+                        "添加文件夹…",
+                        MenuCmd::AddFolder,
+                        false,
+                        true,
+                    ));
+                }
+                // `MnAuto`：开机自启的勾选项。状态由调用方传进来 —— 菜单层
+                // 不碰注册表。
+                if let Some(on) = opts.autostart {
+                    entries.push(MenuEntry::toggle("开机自启", MenuCmd::ToggleAutostart, on));
+                }
                 entries.push(MenuEntry::new("退出 Dock", MenuCmd::ExitDock, true, false));
             }
             Some(ItemKind::Separator) => {
@@ -170,6 +227,15 @@ impl Menu {
         })
     }
 
+    /// 勾选槽宽度：只要有可勾选项就留，保证同菜单内左边距一致。
+    fn gutter(&self) -> f32 {
+        if self.entries.iter().any(|e| e.checkable) {
+            18.0
+        } else {
+            0.0
+        }
+    }
+
     /// 菜单的逻辑尺寸 `(宽, 高)`。
     ///
     /// 宽度按最长标签估算：CJK 与拉丁字符的宽度差很大，统一按
@@ -179,8 +245,9 @@ impl Menu {
     pub fn logical_size(&self) -> (f32, f32) {
         let mut w: f32 = MIN_W;
         let mut h = PAD_Y * 2.0;
+        let gutter = self.gutter();
         for e in &self.entries {
-            w = w.max(estimate_width(&e.label) + PAD_X * 2.0);
+            w = w.max(estimate_width(&e.label) + PAD_X * 2.0 + gutter);
             h += ITEM_H;
             if e.sep_after {
                 h += SEP_H;
@@ -312,13 +379,31 @@ impl Menu {
         painter.rect_stroke(rect, radius, Stroke::new(1.0, c.border), StrokeKind::Inside);
 
         let mut top = PAD_Y;
+        let gutter = self.gutter();
         for (i, e) in self.entries.iter().enumerate() {
             if self.hover == Some(i) {
                 let hr = EguiRect::from_min_size(egui::pos2(4.0, top), egui::vec2(w - 8.0, ITEM_H));
                 painter.rect_filled(hr, CornerRadius::same(6), c.hover);
             }
+            if e.checked {
+                // 勾是**画**出来的，不是打字符：`✓`(U+2713) 落在 Dingbats 区，
+                // 我们的字体不保证有，缺字会变成豆腐块 —— 画两条线段没有这个风险。
+                let cy = top + ITEM_H / 2.0;
+                let x0 = PAD_X + 2.0;
+                painter.line_segment(
+                    [egui::pos2(x0, cy), egui::pos2(x0 + 4.0, cy + 4.0)],
+                    Stroke::new(1.6, c.ink),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(x0 + 4.0, cy + 4.0),
+                        egui::pos2(x0 + 11.0, cy - 4.5),
+                    ],
+                    Stroke::new(1.6, c.ink),
+                );
+            }
             painter.text(
-                egui::pos2(PAD_X, top + ITEM_H / 2.0),
+                egui::pos2(PAD_X + gutter, top + ITEM_H / 2.0),
                 Align2::LEFT_CENTER,
                 &e.label,
                 FontId::proportional(13.0),
@@ -363,7 +448,7 @@ mod tests {
     #[test]
     fn file_menu_has_open_and_remove() {
         let it = item(ItemKind::File, "记事本");
-        let m = Menu::build(Some(&it), false, false).expect("应当有菜单");
+        let m = Menu::build(Some(&it), false, false, MenuOpts::default()).expect("应当有菜单");
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
@@ -384,7 +469,7 @@ mod tests {
     #[test]
     fn running_file_menu_offers_toggle_and_quit() {
         let it = item(ItemKind::File, "记事本");
-        let m = Menu::build(Some(&it), true, false).expect("应当有菜单");
+        let m = Menu::build(Some(&it), true, false, MenuOpts::default()).expect("应当有菜单");
         assert_eq!(m.entries[0].label, "显示 / 最小化");
         assert!(m.entries.iter().any(|e| e.cmd == MenuCmd::QuitApp));
     }
@@ -395,7 +480,7 @@ mod tests {
     #[test]
     fn idle_file_menu_has_no_quit() {
         let it = item(ItemKind::File, "记事本");
-        let m = Menu::build(Some(&it), false, false).expect("应当有菜单");
+        let m = Menu::build(Some(&it), false, false, MenuOpts::default()).expect("应当有菜单");
         assert!(!m.entries.iter().any(|e| e.cmd == MenuCmd::QuitApp));
     }
 
@@ -403,13 +488,15 @@ mod tests {
     #[test]
     fn only_folders_open_in_explorer() {
         let folder = item(ItemKind::Folder, "下载");
-        assert!(Menu::build(Some(&folder), false, false)
-            .expect("应当有菜单")
-            .entries
-            .iter()
-            .any(|e| e.cmd == MenuCmd::OpenInExplorer));
+        assert!(
+            Menu::build(Some(&folder), false, false, MenuOpts::default())
+                .expect("应当有菜单")
+                .entries
+                .iter()
+                .any(|e| e.cmd == MenuCmd::OpenInExplorer)
+        );
         let file = item(ItemKind::File, "记事本");
-        assert!(!Menu::build(Some(&file), false, false)
+        assert!(!Menu::build(Some(&file), false, false, MenuOpts::default())
             .expect("应当有菜单")
             .entries
             .iter()
@@ -419,7 +506,12 @@ mod tests {
     /// 空白处 = 对 Dock 本身说话：退出 + 起动台 + 设置。
     #[test]
     fn blank_area_offers_settings_and_exit() {
-        let m = Menu::build(None, false, false).expect("应当有菜单");
+        // 关掉两个 `Mn*` 开关，看菜单的最小集合。
+        let opts = MenuOpts {
+            autostart: None,
+            add_items: false,
+        };
+        let m = Menu::build(None, false, false, opts).expect("应当有菜单");
         let cmds: Vec<MenuCmd> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
@@ -430,6 +522,97 @@ mod tests {
         assert!(m.entries[0].sep_after);
     }
 
+    /// `MnAdd`：空白处右键给「添加文件 / 文件夹」。
+    #[test]
+    fn blank_menu_offers_new_items_when_enabled() {
+        let m = Menu::build(
+            None,
+            false,
+            false,
+            MenuOpts {
+                autostart: None,
+                add_items: true,
+            },
+        )
+        .expect("应当有菜单");
+        let labels: Vec<&str> = m.entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(&labels[..2], &["添加文件…", "添加文件夹…"]);
+        assert!(labels.contains(&"退出 Dock"));
+        // 两条新建与后面的项之间要断开：它们改的是 Dock 内容，不是退出。
+        assert!(m.entries[1].sep_after);
+    }
+
+    /// `MnAuto`：勾选项带上"当前是否开启"，并给整张菜单留出勾选槽。
+    #[test]
+    fn autostart_entry_reflects_state_and_reserves_a_gutter() {
+        let on = Menu::build(
+            None,
+            false,
+            false,
+            MenuOpts {
+                autostart: Some(true),
+                add_items: false,
+            },
+        )
+        .expect("应当有菜单");
+        let entry = on
+            .entries
+            .iter()
+            .find(|e| e.cmd == MenuCmd::ToggleAutostart)
+            .expect("应当有开机自启项");
+        assert!(entry.checked, "开启时要显示勾");
+
+        let off = Menu::build(
+            None,
+            false,
+            false,
+            MenuOpts {
+                autostart: Some(false),
+                add_items: false,
+            },
+        )
+        .expect("应当有菜单");
+        let entry = off
+            .entries
+            .iter()
+            .find(|e| e.cmd == MenuCmd::ToggleAutostart)
+            .expect("应当有开机自启项");
+        assert!(!entry.checked, "关闭时不该有勾");
+
+        // 有可勾选项 → 整张菜单留出勾选槽（宽度是否变宽取决于 MIN_W，
+        // 所以直接问 `gutter`，不去赌标签长度）。
+        let narrow = Menu::build(
+            None,
+            false,
+            false,
+            MenuOpts {
+                autostart: None,
+                add_items: false,
+            },
+        )
+        .expect("应当有菜单");
+        assert!(on.gutter() > 0.0, "有勾选项时要留槽");
+        assert_eq!(narrow.gutter(), 0.0, "没有勾选项就不留");
+    }
+
+    /// 条目菜单不该被 `Mn*` 污染：那两个开关只管空白处的 Dock 菜单。
+    #[test]
+    fn item_menu_ignores_dock_level_options() {
+        let it = item(ItemKind::File, "应用");
+        let m = Menu::build(
+            Some(&it),
+            false,
+            false,
+            MenuOpts {
+                autostart: Some(true),
+                add_items: true,
+            },
+        )
+        .expect("应当有菜单");
+        assert!(!m.entries.iter().any(|e| e.cmd == MenuCmd::AddFile));
+        assert!(!m.entries.iter().any(|e| e.cmd == MenuCmd::ToggleAutostart));
+    }
+
     /// 临时条目（运行中但没固定的应用）只给"显示 / 最小化"和"退出应用"。
     ///
     /// 结构性命令（加分割线 / 从 Dock 移除）是按**配置下标**改数据的，
@@ -438,7 +621,7 @@ mod tests {
     fn temp_item_has_no_structural_commands() {
         let mut it = Item::new(ItemKind::File, "Chrome", r"C:\x\chrome.exe");
         it.running = true;
-        let m = Menu::build(Some(&it), true, true).expect("应当有菜单");
+        let m = Menu::build(Some(&it), true, true, MenuOpts::default()).expect("应当有菜单");
         let has = |c: MenuCmd| m.entries.iter().any(|e| e.cmd == c);
         assert!(has(MenuCmd::Open), "临时条目必须能点击打开");
         assert!(has(MenuCmd::QuitApp), "运行中的条目要能退出");
@@ -450,7 +633,7 @@ mod tests {
     #[test]
     fn separator_offers_delete_and_settings() {
         let sep = item(ItemKind::Separator, "");
-        let m = Menu::build(Some(&sep), false, false).expect("应当有菜单");
+        let m = Menu::build(Some(&sep), false, false, MenuOpts::default()).expect("应当有菜单");
         let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
         assert_eq!(
             cmds,
@@ -555,7 +738,7 @@ mod tests {
     #[test]
     fn chinese_labels_are_wider_than_latin() {
         assert!(estimate_width("在资源管理器中打开") > estimate_width("open in explorer"));
-        let m = Menu::build(None, false, false).expect("应当有菜单");
+        let m = Menu::build(None, false, false, MenuOpts::default()).expect("应当有菜单");
         let (w, _) = m.logical_size();
         assert!(w >= MIN_W, "宽度不小于最小值，实际 {w}");
     }
@@ -563,7 +746,7 @@ mod tests {
     /// 高亮变化要能报告出来（主循环靠它决定重绘）。
     #[test]
     fn set_hover_reports_change() {
-        let mut m = Menu::build(None, false, false).expect("应当有菜单");
+        let mut m = Menu::build(None, false, false, MenuOpts::default()).expect("应当有菜单");
         assert!(m.set_hover(Some(0)));
         assert!(!m.set_hover(Some(0)), "同一个下标不算变化");
         assert!(m.set_hover(None));
@@ -572,7 +755,12 @@ mod tests {
     /// 命令查询越界返回 `None`，不能 panic。
     #[test]
     fn cmd_at_is_bounds_checked() {
-        let m = Menu::build(None, false, false).expect("应当有菜单");
+        // 用最小集合（关掉两个 `Mn*`），下标才是稳定的。
+        let opts = MenuOpts {
+            autostart: None,
+            add_items: false,
+        };
+        let m = Menu::build(None, false, false, opts).expect("应当有菜单");
         assert_eq!(m.cmd_at(0), Some(MenuCmd::ExitDock));
         assert_eq!(m.cmd_at(9), None);
     }
