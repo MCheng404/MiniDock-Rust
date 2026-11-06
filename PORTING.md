@@ -542,6 +542,8 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 | 1 | 1.7.6#6 `PowerGetActiveScheme` | 节能磁贴不再"初始按关显示、点一下才切"。构造与每次打开面板都回读系统真实方案；`PowerSaver` 记住进节能前的方案，退出时还原它（不是一律切回平衡）；切换用 `PowerSetActiveScheme` 而不是 spawn `powercfg`，省掉一次进程启动与控制台闪烁（ADR-069） |
 | 2 | 1.7.6#4 有线网络识别 | 有线时点网络磁贴打开 `ncpa.cpl`（网卡列表：禁用/启用/诊断），不再落到 Wi‑Fi 状态页 |
 | 3 | 1.7.3#4 自动隐藏任务栏时 Dock 贴底 | 新增 `appbar::taskbar()`（`ABM_GETTASKBARPOS` + `ABM_GETSTATE`）；任务栏在**同一侧且自动隐藏**时既不登记 AppBar 预留，也按显示器物理边界定位 —— 否则工作区仍少一条任务栏高度，Dock 会离屏幕边缘空一段。判定是纯函数 `should_reserve` / `taskbar_steals_edge`，三条单测覆盖 |
+| 4 | 1.7.4 高刷屏卡顿 | 我们**有同款缺陷**：`layout::lerp_to` 是 `cur += d * 0.38`，一帧一步 —— 540 Hz 上动画比 60 Hz 快 9 倍，悬停放大看起来是瞬移。改成按真实帧间隔换算 `1-(1-k)^(dt/16.7)`，16.7 ms 时与旧公式逐位等价；dt 上限 4 帧，卡顿后不跳完。另补 `timeBeginPeriod(1)`：`MsgWaitForMultipleObjects` 的超时会被 ~15.6 ms 的系统定时器粒度吃掉，不抬精度时 `pacing_ms` 算出的 2 ms 根本不生效，动画实际只有 ~64 Hz。只在动画/烟雾期间抬，停下立刻 `timeEndPeriod` |
+| 5 | 1.7.4#1「显示设置图标」未接开关 | **不适用**：我们没有这个开关；「Dock 设置」是刻意常驻的（`menu.rs` 里有注释钉着），连分割线菜单都给这一项 |
 
 ### 9.4 明确不跟进的三块
 

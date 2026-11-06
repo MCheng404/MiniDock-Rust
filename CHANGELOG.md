@@ -95,6 +95,11 @@ clippy -D warnings / fmt --check / 门禁全绿。
   时报「GitHub 上还没有发布任何版本」，而不是把 404 甩给用户。顺带把
   GitHub 的 403 限流（匿名每小时 60 次）翻成人话。
 
+- 借鉴上游 1.7.4 的「高刷屏卡顿」修复：`layout::lerp_to` 改成**帧率无关**
+  （`1-(1-k)^(dt/16.7)`，16.7 ms 时与旧公式逐位等价），并在动画/烟雾期间
+  `timeBeginPeriod(1)` —— 否则 `MsgWaitForMultipleObjects` 的超时会被
+  ~15.6 ms 的系统定时器粒度吃掉，`pacing_ms` 算出的 2 ms 根本不生效。
+
 **破坏性**：这是一次身份变更，不复用旧路径 —— 配置目录、ini 名、互斥体、
 URI scheme 全换，旧版本配置不会被继承，两个版本也不会抢同一个单实例。
 GitHub 上旧的 Release 与标签一并清空，从 2.0.0 重新开始。

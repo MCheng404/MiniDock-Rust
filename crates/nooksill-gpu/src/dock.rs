@@ -844,7 +844,7 @@ impl Dock {
     ///
     /// `dpi` 只在度量里用来做 DPI 缩放。几何计算全部委托给
     /// [`nooksill_core::layout`]，这里只负责把结果搬进 `geom`。
-    pub fn update(&mut self, dpi: i32) {
+    pub fn update(&mut self, dpi: i32, dt_ms: f32) {
         let kinds: Vec<SlotKind> = self.items.iter().map(DockItem::slot_kind).collect();
         let n_sep = kinds.iter().filter(|k| k.is_separator()).count();
         let m = layout::calc_metrics(&self.cfg, dpi, kinds.len(), n_sep, self.work);
@@ -863,7 +863,7 @@ impl Dock {
             layout::magnify_targets(&m, &kinds, &base_c, &self.prev_act_c, view, self.cfg.zoom);
         let mut anim = false;
         for (it, target) in self.items.iter_mut().zip(&targets) {
-            anim |= layout::lerp_to(&mut it.cur, *target);
+            anim |= layout::lerp_to(&mut it.cur, *target, dt_ms);
         }
 
         // 本帧是否有过重排（决定要不要补位移动画）。
@@ -2279,7 +2279,7 @@ mod tests {
             })
             .collect();
         let mut dock = Dock::new(cfg, items, LRect::new(0, 0, 2560, 1400));
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
         dock
     }
 
@@ -2309,7 +2309,7 @@ mod tests {
         c.clock = true;
         c.apply_i32(Key::RES_MON, 1);
         let mut dock = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
 
         // 条带里有资源卡片。
         let idx = dock
@@ -2348,7 +2348,7 @@ mod tests {
         c.clock = true;
         c.apply_i32(Key::RES_MON, 1);
         let mut dock = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
         assert!(dock.metrics.widgets.len >= 2, "时钟 + 资源卡片应当都在");
 
         let (bx, by, bw, bh) = dock.bar_phys();
@@ -2389,7 +2389,7 @@ mod tests {
         c.apply_i32(Key::RES_MON, 1);
         c.edge = Edge::Bottom;
         let mut dock = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
 
         let (hx, hy, hw, hh) = dock.hot_phys();
         // 热区右端往内一点：那里一定在小组件条带上。
@@ -2457,7 +2457,7 @@ mod tests {
             })
             .collect();
         let mut dock = Dock::new(cfg, items, LRect::new(0, 0, 2560, 1400));
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
         dock
     }
 
@@ -2550,7 +2550,7 @@ mod tests {
 
         let mut frames = 0;
         loop {
-            dock.update(96);
+            dock.update(96, nooksill_core::layout::REF_FRAME_MS);
             frames += 1;
             let done = dock.items.iter().all(|i| (i.cur - want).abs() < 0.01);
             if done || frames > 200 {
@@ -2717,7 +2717,7 @@ mod tests {
         dock.drag_to(x0 + 20.0, y);
         dock.drag_to(last + 20.0, y);
         // 主循环每帧都会调 update，这里模拟一次。
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
 
         // 被拖到末尾的那项应当还在往左"回弹"（slide 非零），
         // 或者已经归零（若位移不足 0.5 px）。
@@ -2934,7 +2934,7 @@ mod tests {
             })
             .collect();
         let mut dock = Dock::new(cfg, items, LRect::new(0, 0, 2560, 1400));
-        dock.update(96);
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
         let u = (dock.geom.slot_l[1] + dock.geom.slot_r[1]) * 0.5;
         let v = dock.geom.bar_top + dock.metrics.bar_h * 0.5;
         assert_eq!(dock.hit_at(u, v), Some(1), "测试坐标要真的落在分割线上");

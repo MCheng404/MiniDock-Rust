@@ -196,6 +196,10 @@ struct App {
     launchpad_slot: Option<Pin<Box<LaunchpadWindow>>>,
     /// `NOOKSILL_DEBUG_OPEN` 只处理一次。
     debug_opened: bool,
+    /// 上一帧布局的时刻。动画按真实帧间隔推进，不按帧数。
+    last_layout: Instant,
+    /// 当前有没有把系统定时器精度提到 1 ms。
+    timer_raised: bool,
     /// 面板的「点外面收起」：全局鼠标按键轮询。
     ///
     /// 不用鼠标捕获 —— 见 [`nooksill_gpu::popup`] 顶部的说明：
@@ -342,7 +346,7 @@ impl App {
         };
         let mut dock = Box::new(Dock::new(cfg, items, work));
         dock.mode = dock.cfg.mode;
-        dock.update(dpi);
+        dock.update(dpi, nooksill_core::layout::REF_FRAME_MS);
 
         let (win_w, win_h) = dock.physical_size_i32();
         dump_geometry(&dock, dpi);
@@ -506,6 +510,8 @@ impl App {
             calendar_slot,
             cc_slot,
             launchpad_slot,
+            last_layout: Instant::now(),
+            timer_raised: false,
             update_rx: None,
             update_release: None,
             update_staged: None,
@@ -622,6 +628,37 @@ impl App {
         }
     }
 
+    /// 上一帧到这一帧的真实间隔（毫秒）。
+    ///
+    /// 下限 0.1 ms（同一毫秒内连着两帧时别除零），上限 100 ms：断点、
+    /// 拖动窗口、系统卡顿之后不能一帧把动画跳完（`lerp_to` 还有 4 帧上限）。
+    fn frame_dt_ms(&mut self) -> f32 {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_layout).as_secs_f32() * 1000.0;
+        self.last_layout = now;
+        dt.clamp(0.1, 100.0)
+    }
+
+    /// 动画期间把系统定时器精度提到 1 ms，停下就还回去。
+    ///
+    /// `MsgWaitForMultipleObjects` 的超时会被系统定时器粒度（默认 ~15.6 ms）
+    /// 向上取整：不抬精度的话 `pacing_ms` 算出来的 2 ms 根本不生效，
+    /// 高刷屏上的动画实际还是 ~64 Hz。只在动画/烟雾期间抬，退出即还原 ——
+    /// 常驻 1 ms 会让整机待机功耗上去，那是别人的坑。
+    fn set_timer_resolution(&mut self, want: bool) {
+        if want == self.timer_raised {
+            return;
+        }
+        unsafe {
+            if want {
+                windows::Win32::Media::timeBeginPeriod(1);
+            } else {
+                windows::Win32::Media::timeEndPeriod(1);
+            }
+        }
+        self.timer_raised = want;
+    }
+
     /// 推进一帧布局。返回是否需要出帧。
     fn step_layout(&mut self) -> bool {
         // 无人值守截图用：`NOOKSILL_FAKE_MOUSE="u,v"` 把鼠标钉在指定位置。
@@ -633,7 +670,8 @@ impl App {
         if !self.dock.take_dirty() && !self.dock.anim {
             return false;
         }
-        self.dock.update(self.dpi);
+        let dt = self.frame_dt_ms();
+        self.dock.update(self.dpi, dt);
         true
     }
 
@@ -1924,10 +1962,12 @@ impl App {
     ///
     /// 后台线程的结果**不用轮询**：它们各自 `PostMessage(WM_APP_WAKE)`
     /// 打断这次等待，所以这里可以真的睡到 `FS_CHECK_MS`（全屏检测周期）。
-    fn wait(&self) {
+    fn wait(&mut self) {
         let smoke_on = Tuning::from_config(&self.dock.cfg, self.accent).enabled
             && !self.fs_hidden
             && !self.dock.fully_hidden();
+        // 有连续动画才需要 1 ms 定时器精度。
+        self.set_timer_resolution(self.dock.anim || smoke_on);
         // Active = continuous repaint. Idle keeps the "zero frames" promise.
         let mut timeout = if self.dock.anim || smoke_on {
             self.frame_interval_ms()

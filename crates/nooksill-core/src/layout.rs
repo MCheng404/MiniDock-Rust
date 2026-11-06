@@ -879,11 +879,23 @@ pub fn magnify_targets(
         .collect()
 }
 
+/// 一帧按 60 Hz 算的参考间隔。缓动系数就是按它标的。
+pub const REF_FRAME_MS: f32 = 1000.0 / 60.0;
+
 /// 向目标值指数逼近一帧。返回是否发生了移动（即还需要下一帧）。
-pub fn lerp_to(cur: &mut f32, target: f32) -> bool {
+///
+/// `dt_ms` 是**真实帧间隔**。早先写的是 `cur += d * SIZE_LERP`，那等于把
+/// 动画绑在帧率上：540 Hz 屏幕上 9 帧就走完 60 Hz 一帧的路程，悬停放大
+/// 看起来是瞬移。改成按时间换算 `1 - (1-k)^(dt/16.7)`：16.7 ms 时与旧公式
+/// 完全等价，其它帧率按实际时间收敛。
+///
+/// `dt` 上限 4 帧：拖窗口、断点、界面卡住之后不能一帧把动画跳完。
+pub fn lerp_to(cur: &mut f32, target: f32, dt_ms: f32) -> bool {
     let d = target - *cur;
     if d.abs() > SNAP {
-        *cur += d * SIZE_LERP;
+        let frames = (dt_ms / REF_FRAME_MS).clamp(0.0, 4.0);
+        let k = 1.0 - (1.0 - SIZE_LERP).powf(frames);
+        *cur += d * k;
         true
     } else {
         *cur = target;
@@ -1830,12 +1842,38 @@ mod tests {
     #[test]
     fn lerp_snaps_when_close() {
         let mut v = 10.0;
-        assert!(!lerp_to(&mut v, 10.2));
+        assert!(!lerp_to(&mut v, 10.2, REF_FRAME_MS));
         assert_eq!(v, 10.2);
 
         let mut v = 10.0;
-        assert!(lerp_to(&mut v, 20.0));
+        assert!(lerp_to(&mut v, 20.0, REF_FRAME_MS));
         assert!(v > 10.0 && v < 20.0, "必须只走一帧的距离: {v}");
+    }
+
+    /// 动画与帧率无关：同样的墙钟时间，走 60 步 16.7 ms 与走 240 步
+    /// 4.17 ms，落点必须一致（差一帧的量级以内）。
+    #[test]
+    fn lerp_is_frame_rate_independent() {
+        let mut slow = 0.0f32;
+        let mut fast = 0.0f32;
+        for _ in 0..60 {
+            lerp_to(&mut slow, 100.0, REF_FRAME_MS);
+        }
+        for _ in 0..240 {
+            lerp_to(&mut fast, 100.0, REF_FRAME_MS / 4.0);
+        }
+        assert!(
+            (slow - fast).abs() < 1.0,
+            "60 Hz 落在 {slow}，240 Hz 落在 {fast}，差得太多"
+        );
+    }
+
+    /// 卡顿一帧不能把动画一次性走完：dt 有 4 帧上限。
+    #[test]
+    fn lerp_caps_a_huge_frame_gap() {
+        let mut v = 0.0f32;
+        lerp_to(&mut v, 100.0, 5_000.0);
+        assert!(v < 90.0, "一帧跳太远: {v}");
     }
 
     /// `hit_test` 复用本帧槽位，并尊重"隐藏中不命中"。
