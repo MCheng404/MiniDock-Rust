@@ -596,14 +596,16 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 
 15 个空壳，按代价分三档：
 
-| 档 | 键 | 现状 | 代价 |
-|---|---|---|---|
-| **已接** | `BorderWidth` | 边框线宽写死 1.2，滑杆无效 | 1 行（本次） |
-| 一行可接 | `SepWidth` / `MenuTheme` / `ReflOpacity` | 分割线厚度、菜单深浅、倒影透明度都被写死/不画 | 每个几行 |
-| 要补子系统 | `BgColor3` + `GradAngle/A1/A2/A3` | 三色渐变只做两色，角度没读 | 中等 |
-| 要补子系统 | `Refl*` 四个 | **倒影根本没画**：`Reflect` 打开只会在栏下留一条空白（更糟） | 中偏大 |
-| 要补子系统 | `Browser` / `MinStyle` / `MnAuto` / `MnNotes` / `MnAdd` | 网页应用用哪个浏览器、菜单的最小化样式与额外项 | 中等 |
-| 要补子系统 | `Guardian` | 守护进程，需要第二个进程 | 大 |
+| 档 | 键 | 处理 |
+|---|---|---|
+| ✅ **已接** | `BorderWidth` | 边框线宽原来写死 1.2；现 1→1.2、每档 +0.5 |
+| ✅ **已接** | `SepWidth` | 分割线原来写死 1.4 px；现按 `SepWidth × 0.7`（默认 2 仍是 1.4） |
+| ✅ **已接** | `MenuTheme` | 右键菜单原来只跟 Dock 主题；现 0 浅 / 1 深 / 2 跟随 |
+| ✅ **已接** | `ReflSize` `ReflGap` `ReflOpacity` | **倒影原来根本没画**，只在栏下留一条空白。现在在呈现层做：把栏体那几行上下翻转、按距离线性衰减后写到下方（`present::mirror_rows`，预乘 BGRA 四通道同乘） |
+| ✅ **已接** | `Browser` | 网页应用原来固定 Edge→Chrome；现按键选（0 自动 / 1 Edge / 2 Chrome / 3 Firefox / 4 系统默认），指定的没装就继续往下退，最后回落到系统默认 |
+| 待做 | `BgColor3` + `GradAngle/A1/A2/A3` | 三色渐变只做两色，角度没读；要给 `rounded_gradient` 加第三停靠点与旋转，中等 |
+| 待做 | `MinStyle` / `MnAuto` / `MnNotes` / `MnAdd` | 菜单的最小化样式与附加项，要先有对应的菜单能力 |
+| 待做 | `Guardian` | 守护进程，要第二个进程；建议直接砍掉 |
 
 一条经验：**"开关写了键、没人读"这类问题编译器抓不到**，只能靠这种静态交叉
 扫描。以后新增键时，界面与实现必须在同一提交里落地，否则就进这张表。

@@ -26,6 +26,64 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::gpu::GpuError;
 
 /// 一块可以直接喂给分层窗口的 DIB。
+/// 倒影参数。坐标与尺寸都是**物理像素**，相对窗口左上角。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reflection {
+    /// 镜像源区顶行（栏体上沿）。
+    pub src_top: i32,
+    /// 镜像源区高度（栏高）。
+    pub src_h: i32,
+    /// 栏体下沿与倒影之间的空隙。
+    pub gap: i32,
+    /// 倒影区总高（决定衰减曲线的长度）。
+    pub height: i32,
+    /// 起始不透明度，0..1。
+    pub opacity: f32,
+}
+
+/// 倒影的核心：把 `src_top` 起的 `src_h` 行上下翻转后写到其下 `gap` 行处，
+/// 纵向线性衰减。
+///
+/// 抽成自由函数是为了能单测：`LayeredPresenter` 要建 GPU 设备，测不起。
+/// `dst` 是预乘 BGRA 的整帧缓冲，`w` 是宽度（像素）。
+fn mirror_rows(dst: &mut [u8], w: usize, h: i32, spec: Reflection) {
+    let Reflection {
+        src_top,
+        src_h,
+        gap,
+        height,
+        opacity,
+    } = spec;
+    let dst_start = src_top + src_h + gap;
+    let rows = height.min(h - dst_start);
+    if src_h <= 0 || height <= 0 || rows <= 0 || dst_start < 0 || src_top < 0 {
+        return;
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return;
+    }
+
+    for y in 0..rows {
+        // 目标第 0 行取源区**最下面**一行，往上依次回溯 —— 镜像。
+        let src_y = src_top + src_h - 1 - y;
+        if src_y < 0 {
+            break;
+        }
+        let fade = opacity * (1.0 - y as f32 / height as f32);
+        let src_row = (src_y as usize) * w;
+        let dst_row = ((dst_start + y) as usize) * w;
+        for x in 0..w {
+            let si = (src_row + x) * 4;
+            let di = (dst_row + x) * 4;
+            for c in 0..4 {
+                let v = f32::from(dst[si + c]) * fade;
+                dst[di + c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
 pub struct LayeredPresenter {
     dc: HDC,
     bmp: HBITMAP,
@@ -120,6 +178,23 @@ impl LayeredPresenter {
         let idx = ((y as usize) * (self.width as usize) + x as usize) * 4;
         let slice = unsafe { std::slice::from_raw_parts(self.bits.add(idx), 4) };
         [slice[0], slice[1], slice[2], slice[3]]
+    }
+
+    /// 把 `src_top` 起的 `src_h` 行**上下翻转**后画到其下方 `gap` 行处，
+    /// 纵向按 `opacity` 线性衰减 —— 倒影就是这么来的。
+    ///
+    /// DIB 是预乘 BGRA：四个通道一起乘衰减系数等于"乘 alpha"，颜色不会偏。
+    /// 源区与目标区必然不重叠（目标从栏体下沿开始），所以可以原地读写。
+    pub fn mirror_below(&mut self, spec: Reflection) {
+        let w = self.width as usize;
+        let h = self.height;
+        if w == 0 || h <= 0 {
+            return;
+        }
+        // SAFETY: `bits` 覆盖 width*height 个 BGRA 像素；`mirror_rows` 的所有
+        // 下标都在这个范围内（越界行直接 break）。
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, w * h as usize * 4) };
+        mirror_rows(dst, w, h, spec);
     }
 
     /// 交给 DWM。`x/y` 是窗口左上角的屏幕坐标。
@@ -274,7 +349,67 @@ impl Drop for LayeredPresenter {
 
 #[cfg(test)]
 mod tests {
-    use super::{swap_rb, swap_rb_strided, swap_rb_strided_scalar};
+    use super::{mirror_rows, swap_rb, swap_rb_strided, swap_rb_strided_scalar, Reflection};
+
+    /// 4 像素宽、6 行：源区 0..2（第 0 行 = 100，第 1 行 = 50），
+    /// 倒影从第 3 行开始（gap=1），高 3 行。
+    fn spec(src_top: i32, src_h: i32, gap: i32, height: i32, opacity: f32) -> Reflection {
+        Reflection {
+            src_top,
+            src_h,
+            gap,
+            height,
+            opacity,
+        }
+    }
+
+    fn buffer() -> Vec<u8> {
+        let mut v = vec![0u8; 4 * 6 * 4];
+        for x in 0..4 {
+            for c in 0..4 {
+                v[x * 4 + c] = 100;
+                v[(4 + x) * 4 + c] = 50;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn mirrors_and_fades_downwards() {
+        let mut v = buffer();
+        mirror_rows(&mut v, 4, 6, spec(0, 2, 1, 3, 1.0));
+        let row = |y: usize| v[(y * 4) * 4];
+        // 第 3 行（倒影第一行）取源的**最后**一行：50，衰减 1 - 0/3 = 1
+        assert_eq!(row(3), 50, "第一行该是源区的底行");
+        // 第 4 行取源区上一行（100），衰减 1 - 1/3 ≈ 0.667
+        assert_eq!(row(4), 67, "第二行往上回溯并按距离衰减");
+        // 第 5 行：源已耗尽（只剩一行是 2 行高的源）→ 继续回溯到负数就停
+        assert_eq!(row(5), 0, "源区用完之后不该凭空画东西");
+    }
+
+    #[test]
+    fn keeps_gap_untouched() {
+        let mut v = buffer();
+        mirror_rows(&mut v, 4, 6, spec(0, 2, 1, 3, 1.0));
+        // 第 2 行是空隙（gap=1），必须原样保留。
+        assert_eq!(v[(2 * 4) * 4], 0, "空隙行不该被写");
+    }
+
+    #[test]
+    fn zero_opacity_is_a_no_op() {
+        let mut v = buffer();
+        let before = v.clone();
+        mirror_rows(&mut v, 4, 6, spec(0, 2, 1, 3, 0.0));
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn refuses_to_write_past_the_buffer() {
+        let mut v = buffer();
+        // 倒影区比缓冲还高：只能写到缓冲区末尾，不能越界。
+        mirror_rows(&mut v, 4, 6, spec(0, 2, 1, 100, 1.0));
+        assert_eq!(v.len(), 4 * 6 * 4);
+    }
 
     /// SIMD path must be bit-identical to the scalar reference, including
     /// tails, the overlapping last vector and rows narrower than one vector.

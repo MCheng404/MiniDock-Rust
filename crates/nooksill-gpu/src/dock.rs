@@ -815,6 +815,32 @@ impl Dock {
         self.icons.get(index).is_some_and(Option::is_some)
     }
 
+    /// 倒影参数：把整个栏体镜像到下方预留区。`None` = 不画。
+    ///
+    /// 只在底部停靠时成立 —— 左右停靠的"倒影"语义是横向镜像，上游也没做。
+    /// 预留高度是 `ReflSize% × 图标基准 + ReflGap + 2`，扣掉空隙就是倒影
+    /// 本体该占的行数，超出部分自然被 `mirror_below` 裁掉。
+    #[must_use]
+    pub fn reflection_spec(&self) -> Option<crate::frame::Reflection> {
+        if !self.cfg.reflect || self.cfg.edge != Edge::Bottom {
+            return None;
+        }
+        let m = &self.metrics;
+        let bars = layout::bars(m);
+        let gap = self.cfg.get_i32(Key::REFL_GAP).clamp(0, 30);
+        let height = (m.refl_h - gap as f32 - 2.0).round() as i32;
+        if height < 2 || bars.top < 0.0 {
+            return None;
+        }
+        Some(crate::frame::Reflection {
+            src_top: bars.top.round() as i32,
+            src_h: m.bar_h.round() as i32,
+            gap,
+            height,
+            opacity: self.cfg.get_i32(Key::REFL_OPACITY).clamp(0, 100) as f32 / 100.0,
+        })
+    }
+
     /// 丢掉所有已加载的图标。
     ///
     /// 用在"图标来源变了"的场合（批量匹配图标）：`replace_items` 按路径
@@ -1575,7 +1601,10 @@ impl Dock {
             );
             let a = self.to_egui(lx, ly, p);
             let b = self.to_egui(lx + lw, ly + lh, p);
-            painter.line_segment([a, b], Stroke::new(1.4 * p.k, color));
+            // 线宽来自 `SepWidth`（0..16，默认 2）。0.7 的系数让默认值落在
+            // 原来的 1.4 px 上，老配置的观感不变。
+            let sw = self.cfg.get_i32(Key::SEP_WIDTH).clamp(0, 16) as f32;
+            painter.line_segment([a, b], Stroke::new((sw * 0.7).max(0.5) * p.k, color));
         }
     }
 
@@ -2312,6 +2341,31 @@ mod tests {
         }
         // 栏体之外的左侧不该命中任何条目。
         assert_eq!(dock.hit_at(dock.geom.bar_l - 30.0, 120.0), None);
+    }
+
+    /// 倒影：只有底部停靠、且开关打开时才有几何。
+    #[test]
+    fn reflection_only_for_a_bottom_dock() {
+        let mut c = Config::defaults(96);
+        c.reflect = true;
+        let mut dock = Dock::new(c.clone(), Vec::new(), LRect::new(0, 0, 2560, 1600));
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
+        let spec = dock.reflection_spec().expect("底部栏应当有倒影");
+        assert!(spec.src_h > 0 && spec.height > 0, "{spec:?}");
+        assert!(spec.opacity > 0.0, "默认不透明度不该是 0");
+
+        // 关掉开关就没了。
+        c.reflect = false;
+        let mut off = Dock::new(c.clone(), Vec::new(), LRect::new(0, 0, 2560, 1600));
+        off.update(96, nooksill_core::layout::REF_FRAME_MS);
+        assert!(off.reflection_spec().is_none());
+
+        // 左侧竖排不做倒影（横向镜像语义不同，上游也没有）。
+        c.reflect = true;
+        c.edge = Edge::Left;
+        let mut left = Dock::new(c, Vec::new(), LRect::new(0, 0, 2560, 1600));
+        left.update(96, nooksill_core::layout::REF_FRAME_MS);
+        assert!(left.reflection_spec().is_none());
     }
 
     /// 小组件卡片的命中判定。

@@ -493,6 +493,9 @@ pub struct OpenJob {
     pub force: bool,
     /// `ClickToggle=1`：已在前台则最小化。
     pub toggle: bool,
+    /// `Browser` 键：网页应用用哪个浏览器（0 自动 / 1 Edge / 2 Chrome /
+    /// 3 Firefox / 4 系统默认）。非网址条目忽略。
+    pub browser: i32,
 }
 
 /// 启动应用的工作线程。
@@ -551,7 +554,7 @@ fn open_thread(rx: Receiver<OpenJob>) {
                 }
             }
         }
-        if let Err(e) = launch::launch(item) {
+        if let Err(e) = launch::launch(item, job.browser) {
             eprintln!("启动「{}」失败：{e}", item.name);
             continue;
         }

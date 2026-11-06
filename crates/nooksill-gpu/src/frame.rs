@@ -26,6 +26,7 @@ use windows::Win32::Foundation::HWND;
 use crate::gpu::{Gpu, GpuError};
 use crate::offscreen::Offscreen;
 use crate::present::LayeredPresenter;
+pub use crate::present::Reflection;
 
 /// 一帧渲染完成后，调用方真正需要知道的两件事。
 ///
@@ -69,6 +70,8 @@ pub struct FrameRenderer {
     blur: Option<crate::shaders::frost::GpuBlur>,
     /// Smoke compute output, registered after `run_ui` produces it.
     smoke: Option<crate::shaders::smoke::SharedLayer>,
+    /// 倒影参数；`None` = 这一帧不画倒影（设置窗、菜单都为 None）。
+    reflection: Option<Reflection>,
     /// 毛玻璃背景层，画在 UI 最底层（见 `crate::frost`）。
     frost: Option<FrostLayer>,
     /// 面板可见期间的实时抓取线程。`None` = 只在开窗时抓过一次。
@@ -142,6 +145,7 @@ impl FrameRenderer {
             shaders: crate::shaders::ShaderRuntime::new(&gpu.device, &gpu.queue),
             blur: None,
             smoke: None,
+            reflection: None,
             frost: None,
             live: None,
             frost_spec: None,
@@ -297,6 +301,20 @@ impl FrameRenderer {
         self.offscreen.samples()
     }
 
+    /// 倒影参数（物理像素）。`None` = 不画。
+    ///
+    /// 放在呈现层而不是 egui 里：倒影是"同一帧的镜像像素"，只有拿到回读
+    /// 缓冲才可能画得准；用 egui 再画一遍图标是另一套代码，必然漂移。
+    #[must_use]
+    pub const fn reflection(&self) -> Option<Reflection> {
+        self.reflection
+    }
+
+    /// 设置倒影参数，下一帧生效。
+    pub const fn set_reflection(&mut self, spec: Option<Reflection>) {
+        self.reflection = spec;
+    }
+
     /// Draw a frame and present it. `pos` is the window's screen origin.
     pub fn render(
         &mut self,
@@ -317,6 +335,9 @@ impl FrameRenderer {
                     Ok(())
                 })
                 .map_err(GpuError::Wgpu)?;
+        }
+        if let Some(spec) = self.reflection {
+            self.presenter.mirror_below(spec);
         }
         self.presenter.present(hwnd, pos.0, pos.1)?;
         Ok(outcome)

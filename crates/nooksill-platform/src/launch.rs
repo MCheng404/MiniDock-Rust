@@ -78,17 +78,37 @@ fn shell_open(file: &str, params: Option<&str>, dir: Option<&str>) -> Result<(),
 ///
 /// 顺序沿用：Edge 优先于 Chrome（Windows 上 Edge 一定存在），
 /// 两者都失败才退回默认浏览器 —— 不带 `--app` 的普通标签页。
-fn open_url(url: &str, app_mode: i32) -> Result<(), LaunchError> {
-    if app_mode == 1 {
-        let params = format!("--app={url}");
-        if shell_open("msedge.exe", Some(&params), None).is_ok() {
+fn open_url(url: &str, app_mode: i32, browser: i32) -> Result<(), LaunchError> {
+    let app = app_mode == 1;
+    for exe in browser_order(browser) {
+        // Firefox 没有 `--app` 这种独立窗口模式，给它普通打开。
+        let params = if app && *exe != "firefox.exe" {
+            format!("--app={url}")
+        } else {
+            url.to_owned()
+        };
+        if shell_open(exe, Some(&params), None).is_ok() {
             return Ok(());
         }
-        if shell_open("chrome.exe", Some(&params), None).is_ok() {
-            return Ok(());
-        }
+        // 指定的浏览器没装：继续试下一个，最后退回系统默认。
+        // 「点不动」比「用别的浏览器打开」糟得多。
     }
     shell_open(url, None, None)
+}
+
+/// `Browser` 键 → 依次尝试的可执行文件。
+///
+/// 取值见 `CONFIG.md`：0 自动 / 1 Edge / 2 Chrome / 3 Firefox / 4 系统默认。
+/// 自动档沿用"Edge 优先"——Windows 上它一定存在，而且 `--app` 支持最完整。
+/// 空列表 = 直接用系统默认浏览器。
+const fn browser_order(browser: i32) -> &'static [&'static str] {
+    match browser {
+        1 => &["msedge.exe"],
+        2 => &["chrome.exe"],
+        3 => &["firefox.exe"],
+        4 => &[],
+        _ => &["msedge.exe", "chrome.exe"],
+    }
 }
 
 /// 启动一个条目。
@@ -106,7 +126,7 @@ fn open_url(url: &str, app_mode: i32) -> Result<(), LaunchError> {
 ///
 /// 文件与文件夹的差别是就有的：给文件设工作目录，是为了让那些
 /// "在当前目录找资源"的老程序能找到旁边的 dll/配置。
-pub fn launch(item: &Item) -> Result<(), LaunchError> {
+pub fn launch(item: &Item, browser: i32) -> Result<(), LaunchError> {
     let params = if item.args.is_empty() {
         None
     } else {
@@ -115,7 +135,7 @@ pub fn launch(item: &Item) -> Result<(), LaunchError> {
 
     match item.kind {
         nooksill_core::item::ItemKind::Separator => Ok(()),
-        nooksill_core::item::ItemKind::Url => open_url(&item.path, item.app_mode),
+        nooksill_core::item::ItemKind::Url => open_url(&item.path, item.app_mode, browser),
         nooksill_core::item::ItemKind::Trash => shell_open("shell:RecycleBinFolder", None, None),
         nooksill_core::item::ItemKind::File => {
             let dir = std::path::Path::new(&item.path)
@@ -158,7 +178,7 @@ mod tests {
     /// 分割线不是"启动失败"，调用方不该因为它弹错误提示。
     #[test]
     fn separator_is_a_noop() {
-        assert_eq!(launch(&item(ItemKind::Separator)), Ok(()));
+        assert_eq!(launch(&item(ItemKind::Separator), 0), Ok(()));
     }
 
     /// 组与速记要返回明确的"未实现"，而不是静默成功 ——
@@ -166,11 +186,11 @@ mod tests {
     #[test]
     fn group_and_note_report_unsupported() {
         assert_eq!(
-            launch(&item(ItemKind::Group)),
+            launch(&item(ItemKind::Group), 0),
             Err(LaunchError::Unsupported("应用组"))
         );
         assert_eq!(
-            launch(&item(ItemKind::Note)),
+            launch(&item(ItemKind::Note), 0),
             Err(LaunchError::Unsupported("速记"))
         );
     }
@@ -193,7 +213,7 @@ mod tests {
         // 用 `>` 重定向写文件：能证明命令行参数真的被传下去了，
         // 而不只是"进程起来了"。
         it.args = format!("/c echo ok > {}", marker.display());
-        launch(&it).expect("启动失败");
+        launch(&it, 0).expect("启动失败");
 
         // ShellExecute 是异步的，轮询等它落盘。
         let mut seen = false;
@@ -216,5 +236,25 @@ mod tests {
         assert_eq!(LaunchError::Shell(2).to_string(), "找不到文件");
         assert_eq!(LaunchError::Shell(5).to_string(), "访问被拒绝");
         assert!(LaunchError::Shell(1234).to_string().contains("1234"));
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::browser_order;
+
+    /// 取值语义见 CONFIG.md：0 自动 / 1 Edge / 2 Chrome / 3 Firefox / 4 系统默认。
+    #[test]
+    fn browser_key_picks_the_expected_exe() {
+        assert_eq!(browser_order(0), &["msedge.exe", "chrome.exe"]);
+        assert_eq!(browser_order(1), &["msedge.exe"]);
+        assert_eq!(browser_order(2), &["chrome.exe"]);
+        assert_eq!(browser_order(3), &["firefox.exe"]);
+        assert!(browser_order(4).is_empty(), "4 = 系统默认，不指定 exe");
+        assert_eq!(
+            browser_order(99),
+            &["msedge.exe", "chrome.exe"],
+            "越界按自动档"
+        );
     }
 }

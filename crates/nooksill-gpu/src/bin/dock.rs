@@ -795,6 +795,7 @@ impl App {
             item: Box::new(item.clone()),
             force,
             toggle,
+            browser: self.dock.cfg.get_i32(Key::BROWSER),
         });
         self.last_launch_ms = Some(self.now_ms());
         // 启动/切换之后弹一下，给一个"点到了"的反馈。
@@ -830,7 +831,13 @@ impl App {
             w.right as f32 / self.ppp,
             w.bottom as f32 / self.ppp,
         );
-        let dark = self.dock.cfg.dock_is_dark(theme::is_dark());
+        // 右键菜单深浅：0 浅 / 1 深 / 2 跟随（跟随=跟 Dock 主题走）。
+        // 早先直接拿 Dock 的深浅，`MenuTheme` 这个键界面有、没人读。
+        let dark = match self.dock.cfg.get_i32(Key::MENU_THEME) {
+            0 => false,
+            1 => true,
+            _ => self.dock.cfg.dock_is_dark(theme::is_dark()),
+        };
         let cmd = match show_menu(
             &self.gpu,
             &mut self.menu_slot,
@@ -971,6 +978,7 @@ impl App {
                     item: Box::new(item.clone()),
                     force: false,
                     toggle,
+                    browser: self.dock.cfg.get_i32(Key::BROWSER),
                 });
                 self.last_launch_ms = Some(self.now_ms());
             }
@@ -1901,6 +1909,8 @@ impl App {
         if let Some(win) = self.cc_slot.as_mut() {
             win.set_icon_accent(cc_accent);
         }
+        // 倒影要的是"这一帧的镜像像素"，只能在呈现层做，所以先把几何给它。
+        self.frame.set_reflection(self.dock.reflection_spec());
         let dock = &*self.dock;
         // 烟雾的输入全部在闭包外取好：闭包里同时持有 `&Dock` 与
         // `&mut SmokeFx`，再读 `self` 的其它字段就会撞借用。

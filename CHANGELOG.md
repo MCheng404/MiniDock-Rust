@@ -137,6 +137,16 @@ clippy -D warnings / fmt --check / 门禁全绿。
   `NOOKSILL_SHOT_FROST=1`，把面板合成到"左亮右暗"的模拟壁纸上，可读性才有
   可复现的验收图。
 
+- **补齐「有开关没实现」的五个设置**（静态扫描见 `PORTING.md` §9.7）：
+  - **倒影**原来一行都没画，`Reflect` 打开只在栏下留一条空白。现在在呈现层
+    做：把栏体那几行上下翻转、按距离线性衰减后写进 DIB（预乘 BGRA 四通道
+    同乘，颜色不偏）。`ReflSize/ReflGap/ReflOpacity` 三个键一起生效。
+  - `SepWidth`（分割线厚度）、`MenuTheme`（菜单深浅 0/1/2）、`Browser`
+    （网页应用用 Edge/Chrome/Firefox/系统默认，指定没装就往下退）。
+  - `BorderWidth` 上一轮已接。
+  - 新增单测：镜像的行序与衰减、空隙不动、越界不写、几何只在底部停靠时成立、
+    `Browser` 取值映射。
+
 **破坏性**：这是一次身份变更，不复用旧路径 —— 配置目录、ini 名、互斥体、
 URI scheme 全换，旧版本配置不会被继承，两个版本也不会抢同一个单实例。
 GitHub 上旧的 Release 与标签一并清空，从 2.0.0 重新开始。
