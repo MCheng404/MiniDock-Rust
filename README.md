@@ -30,3 +30,6 @@ PROBE_LIST=1 ./target/x86_64-pc-windows-msvc/release/probe.exe   # First Check A
 ```
 **After Cloning, Do It Once** `git config core.hooksPath .githooks`, Otherwise the `fmt` / `clippy` Gate Check Before Submission Will Not Take Effect. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for Submission Information Format and Branch Convention.
 Dependency Versions: `egui 0.37` / `egui-wgpu 0.37` / `wgpu 30` / `windows 0.62`, All Taking the Latest at Present.
+
+## License
+GNU General Public License v3.0 or Later (`GPL-3.0-or-later`). Full Text in [`LICENSE`](LICENSE). Settings → 关于 Shows the Same Declaration.

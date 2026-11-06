@@ -1,4 +1,4 @@
-//! 设置界面：9 页、纯 egui、无窗口/GPU 依赖。
+//! 设置界面：11 页、纯 egui、无窗口/GPU 依赖。
 //!
 //! 布局是「左侧导航栏 + 右侧多卡片内容区」。雏形见
 //! `docs/settings-prototype.html` —— 那是 Rust 端的施工图：页面、卡片、
@@ -14,6 +14,8 @@
 //! 也因此这个模块可以在无显示器环境被 kittest 完整驱动：
 //! 没有 HWND、没有 device、没有线程。
 
+mod about;
+mod about_art;
 mod add;
 mod appearance;
 mod effect;
@@ -32,7 +34,7 @@ use minidock_core::config::Config;
 
 pub(crate) use widgets::Ctx;
 
-/// 十个页面。顺序 = 侧边导航顺序。
+/// 十一个页面。顺序 = 侧边导航顺序。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -46,10 +48,11 @@ pub enum Page {
     Performance,
     Library,
     Add,
+    About,
 }
 
 impl Page {
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 11] = [
         Page::General,
         Page::Appearance,
         Page::Position,
@@ -60,6 +63,7 @@ impl Page {
         Page::Performance,
         Page::Library,
         Page::Add,
+        Page::About,
     ];
 
     #[must_use]
@@ -75,6 +79,7 @@ impl Page {
             Page::Performance => "性能",
             Page::Library => "图标库",
             Page::Add => "添加",
+            Page::About => "关于",
         }
     }
 
@@ -92,6 +97,7 @@ impl Page {
             Page::Performance => "显卡选择、实时占用与高耗能功能开关。",
             Page::Library => "从文件夹批量设置图标。",
             Page::Add => "往 Dock 里加东西，以及配置的导入导出。",
+            Page::About => "版本、项目地址、作者与许可。",
         }
     }
 }
@@ -186,6 +192,8 @@ pub enum Command {
     AddTrash,
     ExportAll,
     Import,
+    /// 用默认浏览器打开一个链接。
+    OpenUrl(&'static str),
 }
 
 /// 一帧的结果。
@@ -293,6 +301,7 @@ pub fn settings_ui(ui: &mut Ui, cfg: &mut Config, state: &mut SettingsState) -> 
                 Page::Performance => performance::page(&mut ctx, ui),
                 Page::Library => library::page(&mut ctx, ui),
                 Page::Add => add::page(&mut ctx, ui),
+                Page::About => about::page(&mut ctx, ui),
             });
 
         // ③ 说明气泡最后渲染：此刻所有行的悬停/点击状态都已结算，

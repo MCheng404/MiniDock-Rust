@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2021"
 # egui 0.37 / egui-wgpu 0.37 require 1.95.
 rust-version = "1.95"
-license = "LicenseRef-Proprietary-Upstream"
+license = "GPL-3.0-or-later"
 authors = ["MiniDock Rust port contributors"]
 repository = ""
 

@@ -5,6 +5,19 @@
 
 ---
 
+## 0.9.24 — 设置新增「关于」页（2026-11-06）
+
+- 新页 `about.rs`：版本 / 构建、项目地址、作者主页、许可（GNU GPL v3.0 or
+  Later）。项目与作者两行整行可点，右侧分别绘制 Invertocat 与作者头像。
+- 图形是矢量不是位图：GitHub 标志用 simple-icons `github.svg` 的路径**离线**
+  切成 162 个三角形（egui 只填充凸多边形），数据放 `about_art.rs`，坐标归一化
+  到 0..1，按主题黑白反转；头像暂为字母徽标（无位图资源）。
+- 修既有 bug：`widgets::button` 用白色排版 galley、绘制时又传 `text_color()`，
+  但 `Painter::galley` 只覆盖 `PLACEHOLDER`，于是浅色主题下**所有按钮**都是
+  "白字浅灰底"（预设 / 添加 / 重置页都有）。改用 `Color32::PLACEHOLDER`。
+- 许可：`Cargo.toml` 的 `LicenseRef-Proprietary-Upstream` 改为
+  `GPL-3.0-or-later`，补 `LICENSE` 全文，README 增加 License 段。
+
 ## 0.9.23 — 修崩溃：全屏起动台开不出来（2026-11-06）
 
 - **2x MSAA 触发 wgpu 校验错误**。设备没声明

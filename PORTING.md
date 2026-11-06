@@ -563,3 +563,18 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 挪到新段（例如 1.6.0 的 `[Tool]` / `[M]`），我们的 `Ini` 会原样留着整段不解析
 —— 那是安全的。真正危险的是 `upgrade_legacy` 里的 `remove_section`：
 它只删 `[Dock]`，所以别往那段里加任何我们需要保留的东西。
+
+### 9.6 顺带补上的「关于」页
+
+上游一直有「关于」页，我们此前只有 9 页（§7.7 记过这个偏差）。现在补成 11 页：
+版本 / 构建、项目地址、作者主页、许可（GNU GPL v3.0 or Later）。
+
+两处值得记的做法：
+
+1. **图标是矢量不是图片**。egui 只填充**凸**多边形，GitHub 标志是凹的（带挖空），
+   直接 `Shape::Path` 会填错。做法是把 simple-icons 的 `github.svg` 离线
+   flatten + ear-clip 成 162 个三角形，存成归一化坐标表（`about_art.rs`），
+   运行时只建一个 `Mesh`。以后换任何标志都走这条流水线，别在运行时解析 SVG。
+2. **配色跟主题反转**。同一个三角形表，浅色主题画"墨盘 + 纸色猫"，深色主题
+   画"纸色盘 + 墨色猫"——Invertocat 的含义本来就是可以反过来的。头像暂用字母
+   徽标，等有真实位图再说（我们没有 PNG 解码依赖，不为一张图加一个 crate）。

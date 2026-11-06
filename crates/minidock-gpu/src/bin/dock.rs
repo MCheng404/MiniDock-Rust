@@ -53,6 +53,7 @@ use minidock_platform::launch;
 use minidock_platform::occlusion;
 use minidock_platform::shortcut;
 use minidock_platform::single_instance::SingleInstance;
+use minidock_platform::sysact;
 use minidock_platform::theme;
 use minidock_platform::Paths;
 use minidock_settings::{Command, SettingsState};
@@ -2824,6 +2825,10 @@ impl App {
                 if let Err(e) = launch::open_folder(&dir) {
                     self.status(format!("打开配置目录失败：{e}"));
                 }
+                false
+            }
+            Command::OpenUrl(url) => {
+                sysact::open_uri(url);
                 false
             }
             Command::ToggleAutostart(on) => {

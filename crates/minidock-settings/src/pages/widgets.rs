@@ -771,9 +771,11 @@ pub(crate) fn button(ctx: &mut Ctx<'_>, ui: &mut Ui, label: &str, cmd: Command) 
         ui.style().text_styles[&egui::TextStyle::Body].size,
         egui::FontFamily::Proportional,
     );
+    // 用 PLACEHOLDER 排版：实际颜色由下面 `galley(..., vis.text_color())`
+    // 决定。写死白色会让浅色主题的按钮变成"白字浅灰底"，等于看不见。
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let size = egui::vec2((galley.size().x + 44.0).max(72.0), 30.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::CLICK);
     resp.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, label));
