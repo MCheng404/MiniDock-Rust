@@ -170,6 +170,28 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// 一条平滑弧线：整条 `Shape::line` + 只补两个端点圆头。
+    ///
+    /// 密采样点不补圆（不会沿线长结节），闭合路径也不会在锐角处被
+    /// miter join 顶出尖刺 —— 月牙两段弧各自用它，端点精确重合即可。
+    fn arc_line(&self, norm: &[(f32, f32)], ink: Color32) {
+        if norm.len() < 2 {
+            return;
+        }
+        let st = Stroke::new(self.sw(), ink);
+        let screen: Vec<Pos2> = norm.iter().map(|(x, y)| self.pt(*x, *y)).collect();
+        self.p.add(egui::Shape::line(screen.clone(), st));
+        if let (Some(&a), Some(&b)) = (screen.first(), screen.last()) {
+            // 端点圆要比半线宽大：`Shape::line` 末端是 butt cap，沿切线
+            // 外伸 sw/2，圆的半径只有 sw/2 时盖不住矩形的两个角 ——
+            // 两条切线不同的弧在交点处就会露出小尖刺，看着像没对齐。
+            // 0.85·sw > √2/2·sw，把 butt cap 整个包住；分数 DPI 下
+            // 半像素取整也不会再露出一小截线头。
+            self.p.circle_filled(a, st.width * 0.85, ink);
+            self.p.circle_filled(b, st.width * 0.85, ink);
+        }
+    }
+
     fn polyline(&self, pts: &[(f32, f32)]) {
         self.polyline_with(pts, self.style.color);
     }
@@ -427,9 +449,43 @@ pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconSt
             c.polyline(&[(-0.23, -0.16), (-0.03, 0.0), (-0.23, 0.16)]);
         }
         Tile::DarkMode => {
-            // 月牙：一段外弧 + 一段反向内弧，圆头收尾。
-            c.arc(0.0, 0.0, SAFE, 0.80, 5.50, style.color);
-            c.arc(0.16, -0.10, 0.30, 1.40, 4.90, style.color);
+            // 月牙 = 大圆外弧 + 挖去小圆的内弧。两段弧必须在**两圆交点**
+            // 处精确相接：旧版各写各的角度范围（0.80..5.50 / 1.40..4.90）
+            // 且内弧圆心还偏上 0.10，端点根本不重合 —— 就是"内弧错位"。
+            //
+            // 交点解析解：x=(r1²-r2²+dx²)/(2dx)，y=√(r1²-x²)，
+            // 外弧走大圆左半（a1 → 2π-a1），内弧走**小圆左半**
+            // （-a2 递减到 a2-2π，经过最左点）—— 那才是小圆落在大圆
+            // 内部的边界，凹进去才成月牙；走右半会拼成一个整圆。
+            // 两段弧各画一条平滑线、端点精确重合：闭合路径会在锐角处
+            // 被 epaint 的 miter join 顶出小尖刺，分开画则端点只剩干净圆头。
+            const R1: f32 = SAFE; // 0.40 外圆
+            const R2: f32 = 0.34; // 挖去的小圆
+            const DX: f32 = 0.16; // 小圆心右移
+            const K: f32 = 0.90; // 整体收进 20px 安全区
+            const OX: f32 = -0.04;
+            let ix = (R1 * R1 - R2 * R2 + DX * DX) / (2.0 * DX);
+            let iy = (R1 * R1 - ix * ix).sqrt();
+            let a1 = iy.atan2(ix); // 大圆上的交点角
+            let a2 = iy.atan2(ix - DX); // 小圆上的交点角
+            let outer_n = 24;
+            let inner_n = 14;
+            let mut outer: Vec<(f32, f32)> = Vec::with_capacity(outer_n + 1);
+            for k in 0..=outer_n {
+                let t = a1 + (std::f32::consts::TAU - 2.0 * a1) * k as f32 / outer_n as f32;
+                let x = R1 * t.cos();
+                let y = R1 * t.sin();
+                outer.push((x * K + OX, y * K));
+            }
+            let mut inner: Vec<(f32, f32)> = Vec::with_capacity(inner_n + 1);
+            for k in 0..=inner_n {
+                let t = -a2 - (std::f32::consts::TAU - 2.0 * a2) * k as f32 / inner_n as f32;
+                let x = DX + R2 * t.cos();
+                let y = R2 * t.sin();
+                inner.push((x * K + OX, y * K));
+            }
+            c.arc_line(&outer, style.color);
+            c.arc_line(&inner, style.color);
         }
         Tile::Location => {
             // 水滴针：一条连续折线（圆弧采样 + 收尖），圆头软化全部拐角。
@@ -572,6 +628,28 @@ mod tests {
         assert!(stroke_width(48.0) > 2.0 && stroke_width(48.0) < 3.0);
         assert!(stroke_width(84.0) <= 3.0);
         assert!(stroke_width(84.0) < 84.0 * 0.085);
+    }
+
+    /// 月牙的两段弧必须在两圆交点处精确相接，否则就是"内弧错位"。
+    /// 这条测试守着交点解析解与两条弧的端点重合。
+    #[test]
+    fn dark_mode_arcs_join_exactly() {
+        let (r1, r2, dx) = (SAFE, 0.34_f32, 0.16_f32);
+        let ix = (r1 * r1 - r2 * r2 + dx * dx) / (2.0 * dx);
+        let iy = (r1 * r1 - ix * ix).sqrt();
+        let a1 = iy.atan2(ix);
+        let a2 = iy.atan2(ix - dx);
+        let outer_start = (r1 * a1.cos(), r1 * a1.sin());
+        let outer_end = (
+            r1 * (std::f32::consts::TAU - a1).cos(),
+            r1 * (std::f32::consts::TAU - a1).sin(),
+        );
+        let inner_start = (dx + r2 * (-a2).cos(), r2 * (-a2).sin());
+        let inner_end = (dx + r2 * a2.cos(), r2 * a2.sin());
+        let close =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5;
+        assert!(close(outer_end, inner_start), "外弧终点要接上内弧起点");
+        assert!(close(inner_end, outer_start), "内弧终点要接回外弧起点");
     }
 
     /// 安全区：内容半径不超过 20px/24px 的归一化值，方形还有光学补偿。
