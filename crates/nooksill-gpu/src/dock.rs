@@ -825,6 +825,11 @@ impl Dock {
         if !self.cfg.reflect || self.cfg.edge != Edge::Bottom {
             return None;
         }
+        // 隐藏/收起动画期间栏体是位移过的，而倒影几何按静止位置算 ——
+        // 这时候照镜子会映到一片空白，直接不画。
+        if self.hide_offset().1.abs() > 0.5 && self.cfg.edge == Edge::Bottom {
+            return None;
+        }
         let m = &self.metrics;
         let bars = layout::bars(m);
         let gap = self.cfg.get_i32(Key::REFL_GAP).clamp(0, 30);

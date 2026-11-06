@@ -46,7 +46,7 @@ pub struct Reflection {
 ///
 /// 抽成自由函数是为了能单测：`LayeredPresenter` 要建 GPU 设备，测不起。
 /// `dst` 是预乘 BGRA 的整帧缓冲，`w` 是宽度（像素）。
-fn mirror_rows(dst: &mut [u8], w: usize, h: i32, spec: Reflection) {
+pub fn mirror_rows(dst: &mut [u8], w: usize, h: i32, spec: Reflection) {
     let Reflection {
         src_top,
         src_h,
