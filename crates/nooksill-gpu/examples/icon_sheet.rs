@@ -5,7 +5,10 @@
 //! 窗口相同的 `FrameRenderer`，只是最后把像素写成 BMP。
 //!
 //! ```text
-//! cargo run -p nooksill-gpu --example icon_sheet -- 出图.bmp [dark] [accent=3b7ddd]
+//! cargo run -p nooksill-gpu --example icon_sheet -- 出图.bmp [dark] [accent=3b7ddd] [dpi=125]
+//!
+//! `dpi=125` / `dpi=150` 按 Windows 分数缩放出物理尺寸放大图，用来核对
+//! 线宽分档、圆头与像素网格对齐在非整数 DPI 下是否依然清晰。
 //! ```
 
 use std::io::Write as _;
@@ -27,6 +30,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = args.next().unwrap_or_else(|| "icons.bmp".to_owned());
     let rest: Vec<String> = args.collect();
     let dark = rest.iter().any(|a| a == "dark");
+    // Windows 分数缩放：100 / 125 / 150%。逻辑画布不变，物理像素按 ppp 放大。
+    let ppp = rest
+        .iter()
+        .find_map(|a| a.strip_prefix("dpi="))
+        .and_then(|v| v.parse::<f32>().ok())
+        .map_or(1.0, |v| (v / 100.0).clamp(0.8, 3.0));
+    let (pw, ph) = (
+        (W as f32 * ppp).round() as u32,
+        (H as f32 * ppp).round() as u32,
+    );
     let accent = rest
         .iter()
         .find_map(|a| a.strip_prefix("accent="))
@@ -43,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     let gpu = Gpu::new("")?;
-    let mut frame = FrameRenderer::new(&gpu, W, H, 1.0)?;
+    let mut frame = FrameRenderer::new(&gpu, pw, ph, ppp)?;
     frame.ctx().set_theme(if dark {
         egui::Theme::Dark
     } else {
@@ -52,17 +65,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut pixels = Vec::new();
     for t in [0.0_f64, 0.4, 10.0] {
-        let (px, _) = frame.render_rgba(&gpu, raw_input(t), |ui| {
+        let (px, _) = frame.render_rgba(&gpu, raw_input(t, ppp), |ui| {
             sheet(ui, dark, accent);
         })?;
         // 三帧：字体图集 → 动画推进 → 稳定画面，只保留最后一帧。
         pixels = px;
     }
     let bg = if dark { [24, 25, 30] } else { [246, 247, 250] };
-    write_bmp(&out, &pixels, bg)?;
+    write_bmp(&out, &pixels, bg, pw, ph)?;
     println!(
-        "已写出 {out}（{W}×{H}，{}）",
-        if dark { "深色" } else { "浅色" }
+        "已写出 {out}（逻辑 {W}×{H} / 物理 {pw}×{ph}，{}，{}% DPI）",
+        if dark { "深色" } else { "浅色" },
+        (ppp * 100.0).round() as u32
     );
     Ok(())
 }
@@ -269,7 +283,7 @@ fn tonal(dark: bool) -> Color32 {
     }
 }
 
-fn raw_input(time: f64) -> egui::RawInput {
+fn raw_input(time: f64, ppp: f32) -> egui::RawInput {
     let mut raw = egui::RawInput {
         screen_rect: Some(Rect::from_min_size(
             Pos2::ZERO,
@@ -281,7 +295,7 @@ fn raw_input(time: f64) -> egui::RawInput {
     raw.viewports.insert(
         egui::ViewportId::ROOT,
         egui::ViewportInfo {
-            native_pixels_per_point: Some(1.0),
+            native_pixels_per_point: Some(ppp),
             ..Default::default()
         },
     );
@@ -289,28 +303,28 @@ fn raw_input(time: f64) -> egui::RawInput {
 }
 
 /// 与 `settings_shot` 同一套 BMP 写出（回读缓冲是 RGBA，BMP 像素序 BGR）。
-fn write_bmp(path: &str, rgba: &[u8], bg: [u8; 3]) -> std::io::Result<()> {
-    let row_stride = ((W as usize) * 3).div_ceil(4) * 4;
-    let mut buf = Vec::with_capacity(54 + row_stride * H as usize);
+fn write_bmp(path: &str, rgba: &[u8], bg: [u8; 3], w: u32, h: u32) -> std::io::Result<()> {
+    let row_stride = ((w as usize) * 3).div_ceil(4) * 4;
+    let mut buf = Vec::with_capacity(54 + row_stride * h as usize);
     buf.extend_from_slice(b"BM");
-    buf.extend_from_slice(&((54 + row_stride * H as usize) as u32).to_le_bytes());
+    buf.extend_from_slice(&((54 + row_stride * h as usize) as u32).to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&54u32.to_le_bytes());
     buf.extend_from_slice(&40u32.to_le_bytes());
-    buf.extend_from_slice(&(W as i32).to_le_bytes());
-    buf.extend_from_slice(&(H as i32).to_le_bytes());
+    buf.extend_from_slice(&(w as i32).to_le_bytes());
+    buf.extend_from_slice(&(h as i32).to_le_bytes());
     buf.extend_from_slice(&1u16.to_le_bytes());
     buf.extend_from_slice(&24u16.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&((row_stride * H as usize) as u32).to_le_bytes());
+    buf.extend_from_slice(&((row_stride * h as usize) as u32).to_le_bytes());
     buf.extend_from_slice(&2835i32.to_le_bytes());
     buf.extend_from_slice(&2835i32.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
-    for y in (0..H).rev() {
+    for y in (0..h).rev() {
         let mut written = 0;
-        for x in 0..W {
-            let i = ((y * W + x) * 4) as usize;
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
             let (r, g, b, a) = (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
             let inv = 255 - a as u32;
             let blend =

@@ -147,7 +147,7 @@ impl<'a> Canvas<'a> {
     }
 
     fn sw(&self) -> f32 {
-        (self.s * 0.085).max(1.1)
+        stroke_width(self.s)
     }
 
     /// 连续折线：一条 `Shape::line` + 每个顶点补一次圆头。
@@ -232,6 +232,29 @@ impl<'a> Canvas<'a> {
 /// 半径取整到整数像素，避免半点像素造成的糊边。
 fn pix(v: f32) -> u8 {
     v.round().clamp(0.0, 255.0) as u8
+}
+
+/// 线宽按 IBM Carbon 的图标分档表给（16→1.0 / 20→1.25 / 24→1.5 /
+/// 32→2.0 逻辑点），档间线性插值。
+///
+/// 旧版 `s * 0.085` 是纯比例：Dock 悬停把 48px 放大到 84px 时线宽从
+/// 4.1 涨到 7.1，图标肉眼"发肿"；24px 磁贴则拿到 2.04px（IBM 建议
+/// 1.5px）。分档让**常用尺寸**对齐规范，32px 以上改走平方根次线性
+/// 增长并钳到 3.0 —— 放大时线宽略增但不成正比（Lucide 的
+/// absoluteStrokeWidth 是更极端的"完全锁死"，这里取中间路线）。
+/// 数值是逻辑点，GPU 会按 pixels_per_point 换算到物理像素。
+fn stroke_width(size: f32) -> f32 {
+    const TABLE: [(f32, f32); 4] = [(16.0, 1.0), (20.0, 1.25), (24.0, 1.5), (32.0, 2.0)];
+    if size <= TABLE[0].0 {
+        return TABLE[0].1;
+    }
+    for w in TABLE.windows(2) {
+        if size <= w[1].0 {
+            let t = (size - w[0].0) / (w[1].0 - w[0].0);
+            return w[0].1 + (w[1].1 - w[0].1) * t;
+        }
+    }
+    (TABLE[3].1 * (size / TABLE[3].0).sqrt()).min(3.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -433,14 +456,16 @@ pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconSt
             ),
         ),
         Tile::Settings => {
-            // 齿轮：外环 + 8 个圆齿 + 轴孔，全部圆形，没有梯形锐角。
+            // 齿轮：外环 + 8 个圆齿 + 轴孔。眯眼测试里这一枚比同组图标
+            // 重了近一倍（8 个实心齿贡献了大部分墨量），把齿半径从
+            // 0.075 收到 0.045、轴孔 0.085→0.070，视觉重量才落回同组。
             // phase 让齿整体微转 —— 动态图标的最小示例。
-            c.circle_stroke(0.0, 0.0, 0.25);
-            c.circle_stroke(0.0, 0.0, 0.085);
+            c.circle_stroke(0.0, 0.0, 0.26);
+            c.circle_stroke(0.0, 0.0, 0.07);
             let spin = phase * std::f32::consts::TAU / 8.0;
             for i in 0..8 {
                 let a = i as f32 * std::f32::consts::TAU / 8.0 + spin;
-                c.circle_filled(0.33 * a.cos(), 0.33 * a.sin(), 0.075, style.color);
+                c.circle_filled(0.32 * a.cos(), 0.32 * a.sin(), 0.045, style.color);
             }
         }
         Tile::Energy => {
@@ -461,13 +486,14 @@ pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconSt
             }
         }
         Tile::Hotspot => {
-            // 与 Wifi 同样的扇形光学补偿；涟漪按 phase 外扩（幅度很小，
-            // 静态时仍是一枚标准热点图标）。
-            const K: f32 = 1.15;
+            // 扇形天生偏小，眯眼测试里比同组轻 36% —— 放大到 1.28 倍、
+            // 加宽弧的角度跨度、加大中心点，把视觉重量补回同组水平。
+            // 涟漪仍按 phase 外扩，静态时是标准热点图标。
+            const K: f32 = 1.28;
             let ripple = (phase * std::f32::consts::TAU).sin() * 0.02;
-            c.dot(0.0, 0.30 * K, 0.065 * K);
-            c.arc(0.0, 0.30 * K, 0.19 * K + ripple, -2.40, -0.74, style.color);
-            c.arc(0.0, 0.30 * K, 0.35 * K + ripple, -2.40, -0.74, style.color);
+            c.dot(0.0, 0.30 * K, 0.082 * K);
+            c.arc(0.0, 0.30 * K, 0.19 * K + ripple, -2.55, -0.59, style.color);
+            c.arc(0.0, 0.30 * K, 0.35 * K + ripple, -2.55, -0.59, style.color);
         }
     }
 }
@@ -531,6 +557,21 @@ mod tests {
         assert_eq!(st.level, 1.0);
         assert!((st.phase - 0.25).abs() < 1e-6);
         assert_eq!(IconState::default().with_level(-1.0).level, 0.0);
+    }
+
+    /// 线宽分档：常用尺寸对齐 IBM 表，放大时次线性增长且有上限。
+    #[test]
+    fn stroke_width_follows_size_tiers() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(near(stroke_width(16.0), 1.0));
+        assert!(near(stroke_width(20.0), 1.25));
+        assert!(near(stroke_width(24.0), 1.5));
+        assert!(near(stroke_width(32.0), 2.0));
+        // 档间插值、单调、84px 仍在上限内且远小于旧的 84*0.085。
+        assert!(stroke_width(18.0) > 1.0 && stroke_width(18.0) < 1.25);
+        assert!(stroke_width(48.0) > 2.0 && stroke_width(48.0) < 3.0);
+        assert!(stroke_width(84.0) <= 3.0);
+        assert!(stroke_width(84.0) < 84.0 * 0.085);
     }
 
     /// 安全区：内容半径不超过 20px/24px 的归一化值，方形还有光学补偿。
