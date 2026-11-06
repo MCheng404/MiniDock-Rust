@@ -12,11 +12,13 @@
 //!
 //! 按 Esc 退出。鼠标移上去会触发悬停放大与标签气泡。
 
-// 双击 exe 不该弹出一个黑色控制台窗口：那是 console 子系统的默认行为。
-// 声明成 GUI 子系统后，从终端启动时仍然继承父进程的 stdout/stderr
-// （`eprintln!` 的诊断照常可见），双击启动时则不分配控制台。
-// debug 构建保留控制台：panic 与工作线程的日志得看得见。
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// GUI 子系统：双击 exe 不该弹黑框。
+//
+// 早先只在 `not(debug_assertions)` 下声明，想给 debug 构建留下控制台看日志 ——
+// 结果 GitHub 的 `dev` 预发布发的正是 debug 包，用户下下来一双击就是一个
+// 黑窗口。现在两种构建都是 GUI 子系统，"要日志"改由运行期决定：
+// 带 `NOOKSILL_*` 调试开关启动时 `main` 会挂到父控制台（见 `main`）。
+#![windows_subsystem = "windows"]
 
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,7 @@ use std::pin::Pin;
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, UpdateWindow, PAINTSTRUCT};
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
@@ -72,17 +75,60 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
-    GetWindowRect, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY,
-    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    GetWindowRect, MessageBoxW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage,
+    RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, MB_ICONERROR, MB_OK, MSG,
+    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    // GUI 子系统：没有控制台。带调试开关启动时挂到父控制台，
+    // 这样从终端跑 `NOOKSILL_GEOM=1 ./nooksill-dock.exe` 仍然看得到日志。
+    // 双击启动时没有父控制台，`AttachConsole` 失败即可，无副作用。
+    if trace::any() {
+        // SAFETY: 只是尝试附着到父进程的控制台，失败（双击启动）没有副作用。
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+    // 没有控制台，panic 与早期错误必须以窗口形式出现，
+    // 否则用户看到的就是"双击没反应"。只对**主线程**弹窗：工作线程的
+    // panic 不该把用户拦在一个模态框前面（日志照打）。
+    let main_thread = std::thread::current().id();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("{info}");
+        if std::thread::current().id() == main_thread {
+            fatal(&format!("程序异常：{info}"));
+        }
+    }));
+    if let Err(e) = run() {
+        fatal(&e.to_string());
+    }
+}
+
+/// 没有控制台时的最后一根稻草：弹个窗，而不是静默退出。
+fn fatal(message: &str) {
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "NookSill"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: 两个指针都指向本函数栈上、以 NUL 结尾的 UTF-16 缓冲区。
+    unsafe {
+        MessageBoxW(
+            None,
+            windows::core::PCWSTR(text.as_ptr()),
+            windows::core::PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut app) = App::boot()? else {
         // `None` = 已有实例在跑。这是正常退出，不是错误。
         return Ok(());
@@ -142,6 +188,23 @@ mod trace {
     /// 空闲承诺靠它验收：Dock 完全收起时应当**一行都没有**。
     pub fn fps() -> bool {
         static V: LazyLock<bool> = LazyLock::new(|| flag("NOOKSILL_FPS"));
+        *V
+    }
+
+    /// 任意一个开关被打开。
+    ///
+    /// 只有这时才值得去挂父控制台：GUI 子系统的进程默认没有控制台，
+    /// 不挂的话 `eprintln!` 全部丢弃。
+    pub fn any() -> bool {
+        static V: LazyLock<bool> = LazyLock::new(|| {
+            geom()
+                || fs()
+                || menu()
+                || popup()
+                || fps()
+                || flag("NOOKSILL_GEOM")
+                || flag("NOOKSILL_TRACE")
+        });
         *V
     }
 }

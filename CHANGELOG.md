@@ -161,6 +161,14 @@ clippy -D warnings / fmt --check / 门禁全绿。
   至此 §9.7 的 15 个空壳剩 3 个：`MnNotes`（卡在速记未实现）、`MinStyle`
   与 `Guardian`（明确不做）。
 
+- **双击 exe 不再弹黑窗口**：`nooksill-dock` 原本只在 release 下声明
+  `windows_subsystem = "windows"`，debug 构建留了控制台看日志 —— 而 GitHub
+  的 `dev` 预发布发的正是 debug 包，下下来一双击就是个命令提示符。现在两种
+  构建都是 GUI 子系统；要日志就带 `NOOKSILL_*` 开关从终端启动，`main` 会
+  `AttachConsole(ATTACH_PARENT_PROCESS)` 挂回父控制台。
+  没有控制台之后，早期失败与主线程 panic 改成弹窗（工作线程 panic 仍只打
+  日志），否则用户看到的就是"双击没反应"。
+
 **破坏性**：这是一次身份变更，不复用旧路径 —— 配置目录、ini 名、互斥体、
 URI scheme 全换，旧版本配置不会被继承，两个版本也不会抢同一个单实例。
 GitHub 上旧的 Release 与标签一并清空，从 2.0.0 重新开始。
