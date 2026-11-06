@@ -359,6 +359,38 @@ fn 搜索过滤导航并自动切页() {
     assert_eq!(h.state().ui.page, Page::Icons);
 }
 
+/// 开机自启动必须用与配置开关同款的胶囊控件（Role::Switch），
+/// 且切换只发命令、不改配置 —— 旧版这里是裸 `ui.checkbox`，
+/// AccessKit 里是 CheckBox 角色，和同卡片其它行两套写法。
+#[test]
+fn 自启动开关与配置开关统一() {
+    let mut h = new_harness(); // 默认就是常规页
+    h.run();
+    let before = h.state().ui.auto_start;
+    let (right, other_right) = {
+        let a = h
+            .get_by_role_and_label(egui::Role::Switch, "开机自启动")
+            .rect();
+        let b = h
+            .get_by_role_and_label(egui::Role::Switch, "锁定 Dock 布局")
+            .rect();
+        (a.right(), b.right())
+    };
+    assert!(
+        (right - other_right).abs() < 1.0,
+        "自启动开关右边缘 {right} 应与其它开关 {other_right} 对齐"
+    );
+
+    h.get_by_role_and_label(egui::Role::Switch, "开机自启动")
+        .click();
+    h.run();
+    assert_eq!(h.state().ui.auto_start, !before);
+    assert_eq!(
+        h.state().commands.last(),
+        Some(&Command::ToggleAutostart(!before))
+    );
+}
+
 /// 开关与下拉的右边缘必须对齐。
 ///
 /// 同一张卡片里既有开关又有下拉时最容易错开：`Checkbox` 自带文字内边距，

@@ -4,26 +4,22 @@ use egui::Ui;
 use nooksill_core::config::Key;
 
 use super::options::UI_THEME_OPTS;
-use super::widgets::{button, card, combo, toggle, Ctx};
+use super::widgets::{button, card, combo, switch_row, toggle, Ctx};
 use super::Command;
 
 pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
     card(ctx, ui, "启动与常规", "", |ctx, ui| {
-        // 开机自启动没有对应的配置键：它写的是注册表，显示的也必须是
-        // 注册表里的真值，而不是配置里的意图。所以不走 `toggle`（那要一个
-        // `Key`），但仍要按同样的"标题在左、开关在右"排版。
+        // 开机自启动没有配置键（写的是注册表），值取注册表真值；但仍走
+        // 与 toggle 完全相同的胶囊开关与行排版。切换只发命令，不改配置、
+        // 不标脏 —— 写盘由主循环的实际结果决定。
         let before = ctx.state.auto_start;
-        let mut auto = before;
-        super::widgets::row(
+        if let Some(auto) = switch_row(
             ui,
             ctx.state,
             "开机自启动",
             "显示的是注册表里的真实状态",
-            |ui, id| {
-                ui.checkbox(&mut auto, "").labelled_by(id);
-            },
-        );
-        if auto != before {
+            before,
+        ) {
             ctx.state.auto_start = auto;
             ctx.out.command = Some(Command::ToggleAutostart(auto));
         }

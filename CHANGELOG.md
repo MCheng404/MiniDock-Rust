@@ -74,6 +74,29 @@ MSDF，工程量与收益不匹配。**结论：暂缓**，留作以后「任意
 `nooksill-gpu` lib 102 条测试通过（新增线宽分档单测），
 clippy -D warnings / fmt --check / 门禁全绿。
 
+### 端点圆收回 / 弧线抗锯齿 / 自启动控件统一
+
+- **月牙端点圆收回**：上一版用 `0.85·sw` 的大端点圆遮 butt cap，
+  尖端变成圆球。改成 `Canvas::smooth_line`：首尾各沿切线内缩 `sw/2`，
+  `Shape::line` 的 butt cap 末端恰好落回两圆交点；月牙两条弧
+  `cap = None`，butt cap 交叠成**锐利干净的月牙尖**，无圆球、无外露
+  线头；开放弧（Wifi / Hotspot / 声波）用 `cap = Some(0.5·sw)` 保留
+  标准圆润端点。100% / 125% 两档放大核对。
+- **弧线自适应采样改善锯齿**：新增 `arc_steps(radius, sweep)`，按
+  `弧长 / (0.6·sw)` 算步数并钳在 12..64。旧版固定 18 段在 60px 图标上
+  每段跨 5px，圆弧有明显多边形折角；现在任何尺寸下相邻点间距都约
+  半个线宽。密采样点不补圆（不增加 shape 数），`arc` / 月牙两弧 /
+  水滴针上半圆全部受益。MSAA 4x 与官方 `feathering=1.0` 维持不动
+  （上轮已验证更大值反而发虚）。
+- **开机自启动控件统一**：常规页这一行仍是裸 `ui.checkbox`（AccessKit
+  里是 `CheckBox` 角色），和同卡片其它胶囊开关两套写法。新增
+  `widgets::switch_row`（与 `toggle` 同款 `switch_widget` + `row` 排版，
+  只回传新值、不碰 `Config`、不标脏），general 页改调它，注册表真值与
+  `Command::ToggleAutostart` 语义保持不变。新增 kittest 断言角色是
+  `Role::Switch`、右边缘与「锁定 Dock 布局」对齐、点击只发命令。
+- 视觉平衡复验：弧线改平滑线后中位数基准下降，齿轮一度显示 +27.5%，
+  齿再收 0.045→0.042 后回到 **+23.7%**，9 枚线稿全在 ±25% 内。
+
 ---
 
 ## 2.0.0 — 更名为 NookSill（2026-11-06）

@@ -519,6 +519,27 @@ pub(crate) fn toggle(ctx: &mut Ctx<'_>, ui: &mut Ui, key: Key, label: &str, note
     }
 }
 
+/// 状态开关：与 `toggle` 同款胶囊开关、同款行排版，但值来自**运行时状态**
+/// 而不是配置键（例如开机自启动读注册表真值）。
+///
+/// 只把"被点到后的新值"交回调用方，不碰 `Config`、也不标 `changed` ——
+/// 这类状态要么发 `Command` 由主循环写注册表，要么改动根本不需要写盘。
+/// 之前这里直接写 `ui.checkbox(&mut auto, "")`，复选框贴在文字左边，
+/// 和同卡片里其它胶囊开关完全是两套东西。
+pub(crate) fn switch_row(
+    ui: &mut Ui,
+    state: &mut SettingsState,
+    label: &str,
+    note: &str,
+    value: bool,
+) -> Option<bool> {
+    let mut v = value;
+    row(ui, state, label, note, |ui, id| {
+        switch_widget(ui, id, &mut v);
+    });
+    (v != value).then_some(v)
+}
+
 /// 派生开关：界面上的布尔值不是某个键，而是从配置算出来的。
 ///
 /// 两个现成的例子：磨砂（`bg_mode == Frost`）与"扫描运行中应用"（同时决定

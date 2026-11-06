@@ -170,41 +170,63 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// 一条平滑弧线：整条 `Shape::line` + 只补两个端点圆头。
+    /// 一条平滑线：整条 `Shape::line` + 首尾沿切线内缩 + 可选端点圆头。
     ///
-    /// 密采样点不补圆（不会沿线长结节），闭合路径也不会在锐角处被
-    /// miter join 顶出尖刺 —— 月牙两段弧各自用它，端点精确重合即可。
-    fn arc_line(&self, norm: &[(f32, f32)], ink: Color32) {
+    /// `Shape::line` 末端是 butt cap，会沿切线外伸 `sw/2`。首尾各内缩
+    /// `sw/2` 后，butt cap 的末端恰好落回原来的端点：
+    /// - `cap = None`（月牙）：两条切线不同的弧在交点处 butt cap 交叠，
+    ///   自然形成一个锐利月牙尖 —— 不需要端点圆，也没有外露线头。
+    /// - `cap = Some(r)`（开放弧）：补标准圆头，端点保持圆润。
+    ///
+    /// 密采样点一律不补圆，不会沿线长结节，也不会增加 shape 数。
+    fn smooth_line(&self, norm: &[(f32, f32)], ink: Color32, cap: Option<f32>) {
         if norm.len() < 2 {
             return;
         }
         let st = Stroke::new(self.sw(), ink);
-        let screen: Vec<Pos2> = norm.iter().map(|(x, y)| self.pt(*x, *y)).collect();
-        self.p.add(egui::Shape::line(screen.clone(), st));
-        if let (Some(&a), Some(&b)) = (screen.first(), screen.last()) {
-            // 端点圆要比半线宽大：`Shape::line` 末端是 butt cap，沿切线
-            // 外伸 sw/2，圆的半径只有 sw/2 时盖不住矩形的两个角 ——
-            // 两条切线不同的弧在交点处就会露出小尖刺，看着像没对齐。
-            // 0.85·sw > √2/2·sw，把 butt cap 整个包住；分数 DPI 下
-            // 半像素取整也不会再露出一小截线头。
-            self.p.circle_filled(a, st.width * 0.85, ink);
-            self.p.circle_filled(b, st.width * 0.85, ink);
+        let mut screen: Vec<Pos2> = norm.iter().map(|(x, y)| self.pt(*x, *y)).collect();
+        let n = screen.len();
+        let ends = [screen[0], screen[n - 1]];
+        let d = st.width * 0.5;
+        let v0 = (screen[1] - screen[0]).normalized();
+        let vn = (screen[n - 1] - screen[n - 2]).normalized();
+        screen[0] += v0 * d;
+        screen[n - 1] -= vn * d;
+        self.p.add(egui::Shape::line(screen, st));
+        if let Some(r) = cap {
+            for e in ends {
+                self.p.circle_filled(e, r, ink);
+            }
         }
+    }
+
+    /// 月牙专用：锐利尖，不补端点圆。
+    fn arc_line(&self, norm: &[(f32, f32)], ink: Color32) {
+        self.smooth_line(norm, ink, None);
     }
 
     fn polyline(&self, pts: &[(f32, f32)]) {
         self.polyline_with(pts, self.style.color);
     }
 
-    /// 圆弧也走连续折线（18 段在 24px 下足够顺），端点自动带圆头。
+    /// 按弧长自适应采样：相邻点间距约 `0.6·sw`，弧线在任何尺寸下都
+    /// 不会有折线感（旧的固定 18 段在 60px 大图标上每段跨 5px，肉眼
+    /// 能看出多边形拐角）。步数钳在 12..64，避免小图标空转。
+    fn arc_steps(&self, radius: f32, sweep: f32) -> usize {
+        let len_px = radius * sweep.abs() * self.s;
+        ((len_px / (self.sw() * 0.6)).ceil() as usize).clamp(12, 64)
+    }
+
+    /// 圆弧：自适应采样 + 标准圆头（开放弧端点圆润）。
     fn arc(&self, cx: f32, cy: f32, r: f32, from: f32, to: f32, ink: Color32) {
-        let pts: Vec<(f32, f32)> = (0..=18)
+        let steps = self.arc_steps(r, to - from);
+        let pts: Vec<(f32, f32)> = (0..=steps)
             .map(|i| {
-                let t = from + (to - from) * i as f32 / 18.0;
+                let t = from + (to - from) * i as f32 / steps as f32;
                 (cx + r * t.cos(), cy + r * t.sin())
             })
             .collect();
-        self.polyline_with(&pts, ink);
+        self.smooth_line(&pts, ink, Some(self.sw() * 0.5));
     }
 
     fn circle_stroke(&self, x: f32, y: f32, r: f32) {
@@ -468,18 +490,21 @@ pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconSt
             let iy = (R1 * R1 - ix * ix).sqrt();
             let a1 = iy.atan2(ix); // 大圆上的交点角
             let a2 = iy.atan2(ix - DX); // 小圆上的交点角
-            let outer_n = 24;
-            let inner_n = 14;
+            let outer_sweep = std::f32::consts::TAU - 2.0 * a1;
+            let inner_sweep = std::f32::consts::TAU - 2.0 * a2;
+            // 与 arc() 同一套自适应采样（K 是整体缩放，弧长要跟着缩）。
+            let outer_n = c.arc_steps(R1 * K, outer_sweep);
+            let inner_n = c.arc_steps(R2 * K, inner_sweep);
             let mut outer: Vec<(f32, f32)> = Vec::with_capacity(outer_n + 1);
             for k in 0..=outer_n {
-                let t = a1 + (std::f32::consts::TAU - 2.0 * a1) * k as f32 / outer_n as f32;
+                let t = a1 + outer_sweep * k as f32 / outer_n as f32;
                 let x = R1 * t.cos();
                 let y = R1 * t.sin();
                 outer.push((x * K + OX, y * K));
             }
             let mut inner: Vec<(f32, f32)> = Vec::with_capacity(inner_n + 1);
             for k in 0..=inner_n {
-                let t = -a2 - (std::f32::consts::TAU - 2.0 * a2) * k as f32 / inner_n as f32;
+                let t = -a2 - inner_sweep * k as f32 / inner_n as f32;
                 let x = DX + R2 * t.cos();
                 let y = R2 * t.sin();
                 inner.push((x * K + OX, y * K));
@@ -488,10 +513,11 @@ pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconSt
             c.arc_line(&inner, style.color);
         }
         Tile::Location => {
-            // 水滴针：一条连续折线（圆弧采样 + 收尖），圆头软化全部拐角。
-            let mut pts: Vec<(f32, f32)> = (0..=14)
+            // 水滴针：一条连续折线（自适应圆弧采样 + 收尖），圆头软化拐角。
+            let arc_n = c.arc_steps(0.26, std::f32::consts::PI);
+            let mut pts: Vec<(f32, f32)> = (0..=arc_n)
                 .map(|i| {
-                    let t = std::f32::consts::PI * i as f32 / 14.0;
+                    let t = std::f32::consts::PI * i as f32 / arc_n as f32;
                     (0.26 * t.cos(), -0.12 - 0.26 * t.sin())
                 })
                 .collect();
@@ -514,14 +540,14 @@ pub fn control_tile(painter: &Painter, rect: EguiRect, tile: Tile, style: IconSt
         Tile::Settings => {
             // 齿轮：外环 + 8 个圆齿 + 轴孔。眯眼测试里这一枚比同组图标
             // 重了近一倍（8 个实心齿贡献了大部分墨量），把齿半径从
-            // 0.075 收到 0.045、轴孔 0.085→0.070，视觉重量才落回同组。
+            // 0.075 收到 0.042、轴孔 0.085→0.070，视觉重量才落回同组。
             // phase 让齿整体微转 —— 动态图标的最小示例。
             c.circle_stroke(0.0, 0.0, 0.26);
             c.circle_stroke(0.0, 0.0, 0.07);
             let spin = phase * std::f32::consts::TAU / 8.0;
             for i in 0..8 {
                 let a = i as f32 * std::f32::consts::TAU / 8.0 + spin;
-                c.circle_filled(0.32 * a.cos(), 0.32 * a.sin(), 0.045, style.color);
+                c.circle_filled(0.32 * a.cos(), 0.32 * a.sin(), 0.042, style.color);
             }
         }
         Tile::Energy => {
