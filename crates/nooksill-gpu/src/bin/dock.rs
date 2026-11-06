@@ -3025,7 +3025,8 @@ impl App {
                 Ok(rel) => {
                     let installed =
                         nooksill_platform::update::Version::parse(nooksill_core::VERSION);
-                    if installed.is_some_and(|v| rel.version.is_newer_than(&v)) {
+                    // 通道规则：正式版不提示预发布（见 `update::is_offered`）。
+                    if installed.is_some_and(|v| nooksill_platform::update::is_offered(&rel, &v)) {
                         let _ = tx.send(UpdateMsg::Available(Box::new(rel)));
                     } else {
                         let _ = tx.send(UpdateMsg::UpToDate);

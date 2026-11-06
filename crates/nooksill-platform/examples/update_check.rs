@@ -20,8 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         release.version.text, release.exe.name, release.sha256.name, release.prerelease
     );
     println!(
-        "newer:     {}",
-        if release.version.is_newer_than(&installed) {
+        "offered:   {}",
+        if nooksill_platform::update::is_offered(&release, &installed) {
             "yes"
         } else {
             "no"

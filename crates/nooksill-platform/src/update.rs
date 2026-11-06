@@ -287,6 +287,16 @@ fn parse_release(doc: &Json) -> Result<Release, UpdateError> {
     })
 }
 
+/// 这个版本该不该推给当前这份安装？
+///
+/// 通道规则：dev 构建跟 dev 通道（预发布也提示），正式版只收正式版 ——
+/// 否则稳定版用户会被推一个预发布，等于替他把稳定性降级。
+#[must_use]
+pub fn is_offered(release: &Release, installed: &Version) -> bool {
+    let on_dev_channel = installed.build.is_some();
+    (on_dev_channel || !release.prerelease) && release.version.is_newer_than(installed)
+}
+
 /// Round-trip time for a tiny request to `url`, in milliseconds.
 ///
 /// This measures DNS + TLS + HTTP, which is what the user actually waits for;
@@ -498,6 +508,38 @@ mod tests {
     #[test]
     fn empty_release_list_reports_no_release() {
         assert!(pick_newest(&[]).is_none());
+    }
+
+    #[test]
+    fn dev_builds_follow_the_dev_channel_only() {
+        let rel = |tag: &str, pre: bool| Release {
+            tag: tag.to_owned(),
+            version: Version::parse(tag).unwrap(),
+            notes: String::new(),
+            exe: Asset {
+                name: "a.exe".to_owned(),
+                url: "u".to_owned(),
+            },
+            sha256: Asset {
+                name: "a.exe.sha256".to_owned(),
+                url: "v".to_owned(),
+            },
+            prerelease: pre,
+        };
+        let stable = Version::parse("2.0.0").unwrap();
+        let dev = Version::parse("2.0.0-9-abc1234").unwrap();
+
+        assert!(!is_offered(&rel("2.0.0", false), &stable), "同名不算更新");
+        assert!(is_offered(&rel("2.0.1", false), &stable));
+        assert!(
+            !is_offered(&rel("2.0.1-9-abc1234", true), &stable),
+            "正式版不收预发布"
+        );
+        assert!(
+            is_offered(&rel("2.0.1-9-abc1234", true), &dev),
+            "dev 收预发布"
+        );
+        assert!(is_offered(&rel("2.0.1", false), &dev), "dev 也收正式版");
     }
 
     #[test]
