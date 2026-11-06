@@ -236,6 +236,52 @@ fn pick_newest(list: &[Json]) -> Option<Release> {
     best
 }
 
+/// 版本号不一定在 `tag_name` 里。
+///
+/// 滚动预发布的 tag 固定是 `dev`（每次覆盖同一个 release），版本写在标题
+/// （`Development build 2.0.0-8-abc1234`）和资产名
+/// （`NookSill-2.0.0-8-abc1234-win64-debug.exe`）里。三个来源依次尝试，
+/// 资产名排在标题前：它是构建产物自己带的名字，比人手写的标题可靠。
+fn version_of(doc: &Json) -> Option<Version> {
+    if let Some(tag) = doc.get("tag_name").and_then(Json::as_str) {
+        if let Some(v) = version_in(tag) {
+            return Some(v);
+        }
+    }
+    if let Some(assets) = doc.get("assets").and_then(Json::as_arr) {
+        for item in assets {
+            if let Some(name) = item.get("name").and_then(Json::as_str) {
+                if let Some(v) = version_in(name) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    let title = doc.get("name").and_then(Json::as_str)?;
+    title.split_whitespace().find_map(version_in)
+}
+
+/// 从一段文本里抠出版本号。
+///
+/// 认三种写法：`v1.0.0`、`1.0.0-8-abc1234`、`NookSill-1.0.0-8-abc1234-win64.exe`。
+/// 做法是找到第一个「数字开头」的位置，从那里截到最后一个点分数字/构建号为止，
+/// 再把显示用的 `text` 重建成规整形式 —— 资产名里的前后缀不该进界面。
+fn version_in(raw: &str) -> Option<Version> {
+    let start = raw.find(|c: char| c.is_ascii_digit())?;
+    let rest = &raw[start..];
+    let mut parsed = Version::parse(rest)?;
+    // 只接受「点分三段都在合理范围」的解析结果，避免把 `2026.11.06` 这种
+    // 日期或 `2.0.0.1` 之后的垃圾当成版本。
+    if parsed.major > 999 || parsed.minor > 999 || parsed.patch > 999 {
+        return None;
+    }
+    parsed.text = match parsed.build {
+        Some(build) => format!("{}.{}.{}-{build}", parsed.major, parsed.minor, parsed.patch),
+        None => format!("{}.{}.{}", parsed.major, parsed.minor, parsed.patch),
+    };
+    Some(parsed)
+}
+
 /// Both endpoints return the same object shape.
 fn parse_release(doc: &Json) -> Result<Release, UpdateError> {
     let tag = doc
@@ -243,7 +289,7 @@ fn parse_release(doc: &Json) -> Result<Release, UpdateError> {
         .and_then(Json::as_str)
         .ok_or(UpdateError::Json)?
         .to_owned();
-    let version = Version::parse(&tag).ok_or(UpdateError::Json)?;
+    let version = version_of(doc).ok_or(UpdateError::Json)?;
     let notes = doc
         .get("body")
         .and_then(Json::as_str)
@@ -503,6 +549,36 @@ mod tests {
         let picked = pick_newest(list.as_arr().expect("array")).expect("one winner");
         assert_eq!(picked.version.text, "2.0.0", "草稿与缺资产的都要跳过");
         assert!(picked.prerelease, "选中的是预发布，界面要说清楚");
+    }
+
+    /// 真实载荷：滚动预发布的 tag 是 `dev`，版本在标题与资产名里。
+    #[test]
+    fn version_is_read_from_title_or_asset_when_tag_is_a_channel_name() {
+        let doc = json::parse(
+            r#"{"tag_name":"dev","name":"Development build 2.0.0-8-00cb41d",
+                "draft":false,"prerelease":true,
+                "assets":[{"name":"NookSill-2.0.0-8-00cb41d-win64-debug.exe","browser_download_url":"u"},
+                          {"name":"NookSill-2.0.0-8-00cb41d-win64-debug.exe.sha256","browser_download_url":"v"}]}"#,
+        )
+        .expect("parses");
+        let release = parse_release(&doc).expect("dev release parses");
+        assert_eq!(release.version.major, 2);
+        assert_eq!(release.version.build, Some(8));
+        assert_eq!(release.version.text, "2.0.0-8", "显示用的文本要干净");
+        assert!(release.prerelease);
+    }
+
+    #[test]
+    fn normal_tag_still_wins() {
+        let doc = json::parse(
+            r#"{"tag_name":"v1.2.3","name":"NookSill 1.2.3","draft":false,"prerelease":false,
+                "assets":[{"name":"NookSill-1.2.3-win64.exe","browser_download_url":"u"},
+                          {"name":"NookSill-1.2.3-win64.exe.sha256","browser_download_url":"v"}]}"#,
+        )
+        .expect("parses");
+        let release = parse_release(&doc).expect("release parses");
+        assert_eq!(release.version.text, "1.2.3");
+        assert_eq!(release.version.build, None);
     }
 
     #[test]
