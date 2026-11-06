@@ -17,9 +17,11 @@ use windows::Win32::Networking::WinHttp::{
     WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
-/// Requests are small; 16 MB is a hard stop so a hostile mirror cannot make us
-/// allocate without bound.
-const MAX_BODY: usize = 16 * 1024 * 1024;
+/// Body caps. API answers and DoH replies are kilobytes; a release asset is a
+/// 7 MB stable exe or a ~35 MB debug one. The cap exists so a hostile mirror
+/// cannot make us allocate without bound — it is not a size policy.
+pub const SMALL_BODY: usize = 16 * 1024 * 1024;
+pub const LARGE_BODY: usize = 128 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum NetError {
@@ -29,7 +31,8 @@ pub enum NetError {
     Win32(&'static str),
     /// Server answered with a non-2xx status.
     Status(u32),
-    TooLarge,
+    /// Body exceeded the caller's cap.
+    TooLarge(usize),
 }
 
 impl fmt::Display for NetError {
@@ -38,7 +41,7 @@ impl fmt::Display for NetError {
             Self::BadUrl => write!(f, "URL 格式不正确"),
             Self::Win32(what) => write!(f, "{what} 失败"),
             Self::Status(code) => write!(f, "HTTP {code}"),
-            Self::TooLarge => write!(f, "响应超过 16 MB"),
+            Self::TooLarge(cap) => write!(f, "响应超过 {} MB 上限", cap / (1024 * 1024)),
         }
     }
 }
@@ -56,7 +59,12 @@ pub struct Response {
 ///
 /// `headers` is the raw block WinHTTP expects, e.g.
 /// `"Accept: application/json\r\nUser-Agent: NookSill\r\n"`.
-pub fn get(url: &str, headers: &str, timeout_ms: i32) -> Result<Response, NetError> {
+pub fn get(
+    url: &str,
+    headers: &str,
+    timeout_ms: i32,
+    max_body: usize,
+) -> Result<Response, NetError> {
     let parts = split_url(url).ok_or(NetError::BadUrl)?;
 
     let agent = wide("NookSill/1.0");
@@ -121,7 +129,7 @@ pub fn get(url: &str, headers: &str, timeout_ms: i32) -> Result<Response, NetErr
         .map_err(|_| NetError::Win32("WinHttpReceiveResponse"))?;
 
     let status = status_code(request.raw())?;
-    let body = read_body(request.raw())?;
+    let body = read_body(request.raw(), max_body)?;
     if !(200..300).contains(&status) {
         return Err(NetError::Status(status));
     }
@@ -146,7 +154,7 @@ fn status_code(request: *mut core::ffi::c_void) -> Result<u32, NetError> {
     Ok(code)
 }
 
-fn read_body(request: *mut core::ffi::c_void) -> Result<Vec<u8>, NetError> {
+fn read_body(request: *mut core::ffi::c_void, max_body: usize) -> Result<Vec<u8>, NetError> {
     let mut body = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
@@ -173,8 +181,8 @@ fn read_body(request: *mut core::ffi::c_void) -> Result<Vec<u8>, NetError> {
             return Ok(body);
         }
         body.extend_from_slice(&chunk[..read as usize]);
-        if body.len() > MAX_BODY {
-            return Err(NetError::TooLarge);
+        if body.len() > max_body {
+            return Err(NetError::TooLarge(max_body));
         }
     }
 }

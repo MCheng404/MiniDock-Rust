@@ -195,7 +195,7 @@ fn api_headers() -> String {
 }
 
 fn fetch_release(url: &str) -> Result<Release, UpdateError> {
-    let res = net::get(url, &api_headers(), TIMEOUT_MS)?;
+    let res = net::get(url, &api_headers(), TIMEOUT_MS, net::SMALL_BODY)?;
     let text = String::from_utf8_lossy(&res.body);
     let doc = json::parse(&text).map_err(|_| UpdateError::Json)?;
     parse_release(&doc)
@@ -204,7 +204,7 @@ fn fetch_release(url: &str) -> Result<Release, UpdateError> {
 /// Newest non-draft entry from `/releases` — pre-releases included.
 fn newest_published() -> Result<Release, UpdateError> {
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=15");
-    let res = net::get(&url, &api_headers(), TIMEOUT_MS)?;
+    let res = net::get(&url, &api_headers(), TIMEOUT_MS, net::SMALL_BODY)?;
     let text = String::from_utf8_lossy(&res.body);
     let doc = json::parse(&text).map_err(|_| UpdateError::Json)?;
     let list = doc.as_arr().ok_or(UpdateError::Json)?;
@@ -351,14 +351,20 @@ pub fn is_offered(release: &Release, installed: &Version) -> bool {
 pub fn probe(url: &str) -> Option<u128> {
     let start = Instant::now();
     let headers = format!("User-Agent: {UA}\r\n");
-    net::get(url, &headers, PROBE_TIMEOUT_MS).ok()?;
+    net::get(url, &headers, PROBE_TIMEOUT_MS, net::SMALL_BODY).ok()?;
     Some(start.elapsed().as_millis())
 }
 
 /// DoH (Cloudflare) A-record lookup. `None` when DoH itself is unreachable.
 pub fn resolve_doh(host: &str) -> Option<Vec<String>> {
     let url = format!("https://cloudflare-dns.com/dns-query?name={host}&type=A");
-    let res = net::get(&url, "Accept: application/dns-json\r\n", PROBE_TIMEOUT_MS).ok()?;
+    let res = net::get(
+        &url,
+        "Accept: application/dns-json\r\n",
+        PROBE_TIMEOUT_MS,
+        net::SMALL_BODY,
+    )
+    .ok()?;
     let text = String::from_utf8_lossy(&res.body);
     let doc = json::parse(&text).ok()?;
     let answers = doc.get("Answer")?.as_arr()?;
@@ -429,7 +435,8 @@ pub fn pick_mirror(target: &str, test_all: bool, allow_direct: bool) -> Option<S
 pub fn download(base: &str, asset: &Asset) -> Result<Vec<u8>, UpdateError> {
     let url = mirror_url(base, &asset.url);
     let headers = format!("User-Agent: {UA}\r\n");
-    let res = net::get(&url, headers.as_str(), TIMEOUT_MS)?;
+    // 资产是裸 exe：debug 版本能到 35 MB，别用 API 那档上限。
+    let res = net::get(&url, headers.as_str(), TIMEOUT_MS, net::LARGE_BODY)?;
     Ok(res.body)
 }
 
