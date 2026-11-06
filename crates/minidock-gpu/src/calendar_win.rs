@@ -625,6 +625,28 @@ fn physical_size(ppp: f32) -> (i32, i32) {
 ///
 /// `anchor` 与返回值都是物理像素。
 fn place(pw: i32, ph: i32, anchor: (f32, f32, f32, f32), edge: Edge, ppp: f32) -> (i32, i32) {
+    place_in(
+        pw,
+        ph,
+        anchor,
+        edge,
+        ppp,
+        minidock_platform::display::monitor_rect(0),
+    )
+}
+
+/// 与 [`place`] 相同，但显示器范围由调用方给。
+///
+/// 抽出来是为了让单测可复现：CI 的虚拟屏只有 1024×768，用真实
+/// `monitor_rect(0)` 会把弹层夹到别处，"居中"的断言于是依赖机器。
+fn place_in(
+    pw: i32,
+    ph: i32,
+    anchor: (f32, f32, f32, f32),
+    edge: Edge,
+    ppp: f32,
+    mon: minidock_core::layout::Rect,
+) -> (i32, i32) {
     let (al, at, ar, ab) = anchor;
     let ax = (al + ar) * 0.5;
     let ay = (at + ab) * 0.5;
@@ -642,9 +664,8 @@ fn place(pw: i32, ph: i32, anchor: (f32, f32, f32, f32), edge: Edge, ppp: f32) -
             at - ph as f32 + pm as f32 - gap as f32,
         ),
     };
-    // 夹进主显示器。用的是 `g_mi.rcMonitor`（不是工作区）：
+    // 夹进显示器。用的是 `rcMonitor`（不是工作区）：
     // 弹层压到任务栏上是可接受的，跑出屏幕不可接受。
-    let mon = minidock_platform::display::monitor_rect(0);
     let (mut xi, mut yi) = (x.round() as i32, y.round() as i32);
     if xi + pw > mon.right {
         xi = mon.right - pw;
@@ -693,10 +714,23 @@ pub fn today() -> (i32, u32, u32) {
 mod tests {
     use super::*;
 
+    /// 单测一律给一块固定的虚拟屏：CI 的虚拟屏只有 1024×768，
+    /// 用真实 `monitor_rect(0)` 会把弹层夹走，断言就变成看机器脸色。
+    fn screen() -> minidock_core::layout::Rect {
+        minidock_core::layout::Rect::new(0, 0, 2560, 1440)
+    }
+
     /// 底部栏（最常见）时，弹层应当在卡片上方。
     #[test]
     fn places_above_the_card_for_a_bottom_dock() {
-        let (x, y) = place(392, 480, (1000.0, 900.0, 1100.0, 960.0), Edge::Bottom, 1.0);
+        let (x, y) = place_in(
+            392,
+            480,
+            (1000.0, 900.0, 1100.0, 960.0),
+            Edge::Bottom,
+            1.0,
+            screen(),
+        );
         assert!(y + 480 <= 960, "弹层底边应当不越过卡片顶部");
         assert!((x + 196 - 1050).abs() <= 1, "应当水平居中于卡片");
     }
@@ -708,7 +742,14 @@ mod tests {
     /// 边缘 4 像素，看起来才是"贴着"而不是"隔着一条缝"。
     #[test]
     fn places_below_the_card_for_a_top_dock() {
-        let (_, y) = place(392, 480, (1000.0, 0.0, 1100.0, 60.0), Edge::Top, 1.0);
+        let (_, y) = place_in(
+            392,
+            480,
+            (1000.0, 0.0, 1100.0, 60.0),
+            Edge::Top,
+            1.0,
+            screen(),
+        );
         assert!(
             y + PM as i32 >= 60,
             "内容区顶边应当在卡片底部之下，实际 {}",
@@ -719,7 +760,14 @@ mod tests {
     /// 左侧竖向栏时弹层在卡片右边。
     #[test]
     fn places_right_of_the_card_for_a_left_dock() {
-        let (x, _) = place(392, 480, (0.0, 400.0, 60.0, 460.0), Edge::Left, 1.0);
+        let (x, _) = place_in(
+            392,
+            480,
+            (0.0, 400.0, 60.0, 460.0),
+            Edge::Left,
+            1.0,
+            screen(),
+        );
         assert!(
             x + PM as i32 >= 60,
             "内容区左边应当在卡片右侧，实际 {}",
@@ -727,12 +775,22 @@ mod tests {
         );
     }
 
-    /// 靠边时会被夹进显示器，不会跑到屏幕外。
+    /// 靠边时会被夹进显示器，不会跑到屏幕外。用小屏才能真的触发夹取。
     #[test]
     fn clamps_into_the_monitor() {
-        let (x, y) = place(392, 480, (0.0, 900.0, 40.0, 960.0), Edge::Bottom, 1.0);
+        let small = minidock_core::layout::Rect::new(0, 0, 1024, 768);
+        let (x, y) = place_in(
+            392,
+            480,
+            (0.0, 700.0, 40.0, 760.0),
+            Edge::Bottom,
+            1.0,
+            small,
+        );
         assert!(x >= 0, "左边越界: {x}");
         assert!(y >= 0, "上边越界: {y}");
+        assert!(x + 392 <= small.right, "右边越界: {}", x + 392);
+        assert!(y + 480 <= small.bottom, "下边越界: {}", y + 480);
     }
 
     /// 命中区不重叠，且都落在面板内。
