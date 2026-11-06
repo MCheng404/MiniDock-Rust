@@ -160,6 +160,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: tag matches Cargo version
+        id: ver
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -169,6 +170,7 @@ jobs:
             echo "::error::标签 v$tag 与 Cargo.toml 的 $version 不一致"
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: package
         shell: bash
@@ -187,6 +189,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          name: MiniDock ${{ steps.ver.outputs.version }}
           # 裸 exe + 校验和，不打 zip。
           files: |
             dist/*.exe
