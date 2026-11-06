@@ -1,5 +1,6 @@
 //! Frame pacing helpers.
 
+use egui_wgpu::wgpu::TextureFormatFeatureFlags;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
 
@@ -30,6 +31,36 @@ pub const fn auto_msaa_samples(area: u64, pref: u32) -> u32 {
             }
         }
     }
+}
+
+/// Resolve a requested sample count against what the **device** accepts.
+///
+/// The adapter reports driver-level counts (this machine: 1/2/4/8), but 2 and 8
+/// are only legal once the device enabled
+/// `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`. Without it the WebGPU spec
+/// guarantees just 1 and 4 for `Rgba8UnormSrgb`, and asking for 2 is a
+/// validation error rather than a fallback - that is what used to panic on
+/// full-screen surfaces.
+///
+/// When the requested count is unavailable, round **up** to 4 instead of down
+/// to 1: 2x was chosen to save memory, but silently dropping antialiasing is a
+/// quality change, not a memory change.
+#[must_use]
+pub fn resolve_samples(
+    wanted: u32,
+    adapter_flags: TextureFormatFeatureFlags,
+    adapter_specific: bool,
+) -> u32 {
+    if wanted <= 1 {
+        return 1;
+    }
+    if adapter_specific && adapter_flags.sample_count_supported(wanted) {
+        return wanted;
+    }
+    if adapter_flags.sample_count_supported(4) {
+        return 4;
+    }
+    1
 }
 
 /// DWM composition interval in milliseconds. Falls back to 60 Hz on error.
@@ -73,6 +104,22 @@ mod tests {
         assert_eq!(auto_msaa_samples(2560 * 1600, 0), 2);
         assert_eq!(auto_msaa_samples(2560 * 1600, 4), 4, "forced 4x");
         assert_eq!(auto_msaa_samples(1320 * 1080, 1), 1, "forced off");
+    }
+
+    #[test]
+    fn msaa_two_requires_the_adapter_specific_feature() {
+        use egui_wgpu::wgpu::TextureFormatFeatureFlags as F;
+        let all = F::MULTISAMPLE_X2 | F::MULTISAMPLE_X4 | F::MULTISAMPLE_X8;
+        // 没声明特性时 2x 是非法值：升到 4，不能降到 1（那是改画质）。
+        assert_eq!(resolve_samples(2, all, false), 4);
+        assert_eq!(resolve_samples(2, all, true), 2);
+        // 4 是规范保证的档位，两种设备都要给。
+        assert_eq!(resolve_samples(4, all, false), 4);
+        assert_eq!(resolve_samples(4, all, true), 4);
+        // 硬件连 4 都不支持时只能退回单采样。
+        assert_eq!(resolve_samples(4, F::MULTISAMPLE_X2, false), 1);
+        assert_eq!(resolve_samples(0, all, true), 1);
+        assert_eq!(resolve_samples(1, all, true), 1);
     }
 
     #[test]

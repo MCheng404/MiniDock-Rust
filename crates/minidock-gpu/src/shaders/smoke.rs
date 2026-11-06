@@ -82,7 +82,10 @@ impl SmokeShader {
             return None;
         }
         let need = (fields.len() * 4) as u64;
-        if self.fields.is_none() {
+        // The grid is re-bucketed when the bar changes width (hover zoom), so the
+        // field buffer must grow with it - writing past the end is a validation
+        // error, and this used to be the crash on the first expanded frame.
+        if self.fields.as_ref().is_none_or(|b| b.size() < need) {
             self.fields = Some(self.rt.buffer(
                 "smoke-fields",
                 need,

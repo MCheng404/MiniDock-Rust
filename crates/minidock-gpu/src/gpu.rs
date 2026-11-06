@@ -186,9 +186,19 @@ impl Gpu {
         };
 
         let info = adapter.get_info();
+        // 2x MSAA 只在设备声明了 adapter-specific 格式特性时才合法：WebGPU 对
+        // `Rgba8UnormSrgb` 只保证 [1, 4]，而大窗口走 2x 省显存。请求这个特性
+        // 没有额外开销，拿不到就退回规范保证的档位（见 `perf::resolve_samples`）。
+        let mut features = wgpu::Features::empty();
+        if adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("minidock"),
-            required_features: wgpu::Features::empty(),
+            required_features: features,
             required_limits: Self::device_limits(&adapter),
             // Dock 每帧只有一两个 bind group，不需要分配器替性能多留余量。
             // 实测（AMD 610M 核显，空设备）：Performance 164 MB → MemoryUsage 102 MB。

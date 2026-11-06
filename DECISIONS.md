@@ -3334,3 +3334,34 @@ MSAA 只在大窗口降采样）。节拍改动是设计值：动画最大唤醒
 
 **验证**：`plan_toggle` 四条单测（记住前方案 / 还原 / 无记忆回平衡 /
 读不到仍能进节能）；真机只读测试读到 `381b4222-f694-41f0`（平衡）。
+
+**补记（2026-11-06，崩溃修复）**：上面第 4 条的"面积自适应 MSAA"上线后，
+全屏起动台一开就 panic：
+
+```
+In Device::create_texture, label = 'minidock-offscreen-msaa'
+  Sample count 2 is not supported by format Rgba8UnormSrgb on this device.
+  The WebGPU spec guarantees [1, 4] samples... With the
+  TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES feature your device supports [1, 2, 4, 8].
+```
+
+起因是两套事实对不上：`Adapter::get_texture_format_features` 报的是**驱动**
+能力（[1,2,4,8]），而设备创建时没声明
+`TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`，`create_texture` 就按 WebGPU
+规范只认 [1,4] —— 2 在这里是**非法值**，不是"不支持就降级"。
+
+改法分两半，缺一不可：
+
+1. `gpu.rs` 在适配器支持时请求该特性（没有额外开销）；
+2. `perf::resolve_samples` 把"设备实际能接受什么"作为唯一判据：有特性才认
+   适配器的 2/8；没有就只认规范保证的 1/4。请求值不可用时**向上取 4**，
+   不向下取 1 —— 2x 当初是为省显存选的，悄悄砍掉抗锯齿是改画质，不是省显存。
+
+同一轮还修掉一个被这个崩溃挡住的问题：`SmokeShader::raster` 的字段缓冲
+只在第一次创建（`if self.fields.is_none()`），而烟雾网格会随栏体宽度重新分档
+（256×128 → 384×128），于是 `write_buffer` 写到缓冲外沿。改为"容量不够就重建"。
+两处都是"一次性分配 + 尺寸会变"的同类错误。
+
+**验证**：`MINIDOCK_DEBUG_OPEN=launchpad` 与"设置窗口 + 起动台同开"两种
+复现路径各跑 12 秒无 panic（改前 100% 崩在 create_texture）；
+`msaa_two_requires_the_adapter_specific_feature` 覆盖 2/4/0/1 四档。

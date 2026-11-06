@@ -103,13 +103,13 @@ impl FrameRenderer {
             .adapter
             .get_texture_format_features(Gpu::COLOR_FORMAT)
             .flags;
+        let adapter_specific = gpu
+            .device
+            .features()
+            .contains(egui_wgpu::wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
         let area = u64::from(width) * u64::from(height);
         let wanted = crate::perf::auto_msaa_samples(area, crate::gpu::msaa_preference());
-        let samples = if wanted > 1 && flags.sample_count_supported(wanted) {
-            wanted
-        } else {
-            1
-        };
+        let samples = crate::perf::resolve_samples(wanted, flags, adapter_specific);
         let offscreen = Offscreen::new(&gpu.device, width, height, Gpu::COLOR_FORMAT, samples);
         let presenter = LayeredPresenter::new(width as i32, height as i32)?;
 

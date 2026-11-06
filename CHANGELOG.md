@@ -5,6 +5,21 @@
 
 ---
 
+## 0.9.23 — 修崩溃：全屏起动台开不出来（2026-11-06）
+
+- **2x MSAA 触发 wgpu 校验错误**。设备没声明
+  `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` 时，WebGPU 只保证
+  `Rgba8UnormSrgb` 支持 [1, 4] 采样，而我们按适配器报告的 [1,2,4,8] 选了 2，
+  `create_texture` 直接 panic —— 任何面积 > 2 M 像素的窗口都会中招，起动台
+  是全屏所以必现（与设置窗口是否打开无关）。现在：适配器支持就请求该特性；
+  `perf::resolve_samples` 以设备实际能力为准，不可用时向上取 4（不悄悄砍
+  抗锯齿）。ADR-067 补记。
+- **烟雾字段缓冲写越界**。`SmokeShader::raster` 的缓冲只在首帧创建，而网格
+  按栏体宽度重新分档（256×128 → 384×128）后 `write_buffer` 越界报错。改为
+  容量不足即重建。这个 bug 原本被上面的崩溃挡在后面。
+- 验证：`MINIDOCK_DEBUG_OPEN=launchpad` 与「设置窗口 + 起动台同开」各跑
+  12 秒无 panic（改前必崩）。
+
 ## 0.9.22 — 同步上游 1.7.x 的三处行为（2026-11-06）
 
 - 节能磁贴读**真实**电源方案（`PowerGetActiveScheme`），打开面板时回读；
