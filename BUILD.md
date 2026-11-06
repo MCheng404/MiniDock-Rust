@@ -26,6 +26,8 @@ source scripts/env.sh              # 必须。注入 INCLUDE/LIB/PATH + CC/CXX/A
 ./scripts/build.sh --clippy        # -D warnings
 ./scripts/build.sh --fmt           # 仅检查格式
 ./scripts/build.sh --exe           # 打印产物路径
+./scripts/build.sh --version       # 打印本次构建钉住的版本号
+./scripts/package.sh [--release]   # 构建 + 按版本号打包到 dist/（CI 用同一脚本）
 ```
 
 PowerShell 等价入口：`powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Mode test`。
@@ -64,7 +66,33 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
   没有需要传给后端的窗口句柄。
 - `Win32_Graphics_GdiPlus` feature 已随 GDI+ 老实现一起删掉（ADR-035）。
 
-## 四、产物
+## 四、版本号与产物
+
+### 4.1 版本号怎么来的
+
+**唯一来源是 `scripts/version.rs`**，被两个 `build.rs` `include!` 进来：
+
+| 条件 | 版本 | 用在哪 |
+|---|---|---|
+| `MINIDOCK_VERSION` 有值 | 原样使用 | CI 显式指定（预留） |
+| `PROFILE=release` | `X.Y.Z`（`Cargo.toml` 的 workspace 版本） | Release 稳定版 |
+| 其它（debug） | `X.Y.Z-dev.<构建编号>` | Debug 版 |
+
+构建编号取 `MINIDOCK_BUILD`，没有就取 `git rev-list --count HEAD`（随提交单调递增），
+再没有就是 `0`。CI 用 `MINIDOCK_BUILD=${{ github.run_number }}`。
+
+三处必须一致，所以只在构建期算一次、分发下去：
+
+```
+scripts/version.rs ──┬── crates/minidock-core/build.rs  →  env!("MINIDOCK_VERSION") → minidock_core::VERSION（关于页）
+                     ├── crates/minidock-gpu/build.rs   →  exe 的 VERSIONINFO（属性 → 详细信息）
+                     └── target/<triple>/<profile>/MINIDOCK_VERSION  →  package.sh 的产物名
+```
+
+`./scripts/build.sh --version` 直接读最后那个文件；`scripts/package.sh` 也只读它，
+**不重新推导** —— 产物名必须等于 exe 里那个号。
+
+### 4.2 直接产物
 
 | 目标 | 路径 | 说明 |
 |---|---|---|
@@ -74,6 +102,23 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
 
 `Cargo.toml` 里 `[[bin]]` 是显式声明的；`src/bin/` 下没有其它自动发现的可执行文件。
 README 里早期提过的 `minidock-spike`、`MiniDock.exe` 都已在 ADR-035 / ADR-036 删除。
+
+### 4.3 分发包（`scripts/package.sh`）
+
+```
+dist/MiniDock-0.9.25-win64/               minidock-dock.exe + LICENSE + README.md
+dist/MiniDock-0.9.25-dev.58-win64-debug/  同上（--pdb 时另加 minidock_dock.pdb）
+```
+
+- 目录名 = `MiniDock-<版本>-win64[-debug]`，版本与 exe 资源一致。
+- **exe 文件名不变**（`minidock-dock.exe`）：改名会让 debug 的 `minidock_dock.pdb`
+  对不上，也和我们所有文档/脚本里的路径冲突。要让用户看到的是**包名**。
+- pdb 默认不进包：debug 的 PDB 有 200 MB 量级，每个提交都传一遍不划算，
+  需要时加 `--pdb`。
+- 有 `zip` 命令时同时产出同名 `.zip`；CI 的 release 用 `Compress-Archive` 现场压。
+
+首次 `cargo build` 要编译 wgpu（naga、wgpu-hal、DX12 后端），**冷启动 3–6 分钟**属正常；
+之后增量在 10–30 秒。release 首次更久（fat LTO）。
 
 首次 `cargo build` 要编译 wgpu（naga、wgpu-hal、DX12 后端），**冷启动 3–6 分钟**属正常；
 之后增量在 10–30 秒。release 首次更久（fat LTO）。
@@ -192,7 +237,7 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 | `cargo fetch` 卡住 | 首次拉取 wgpu/egui 依赖树 | 需要网络；缓存后离线可构建 |
 | RDP/虚拟机里没画面 | DXGI 复制或 DX12 不可用 | M3 会加 CPU 模糊 fallback；M0 仅作提示 |
 
-## 六、测试分层
+## 七、测试分层
 
 | 层 | 命令 | 依赖 |
 |---|---|---|
@@ -203,3 +248,31 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 
 `core` 的测试**不依赖 Windows**，可以放到任意 CI runner 上跑；这是把纯逻辑
 单独拆 crate 的主要动机。
+
+## 八、CI（`.github/workflows/build.yml`）
+
+三段式，跑在 `windows-latest`：
+
+| job | 触发 | 干什么 |
+|---|---|---|
+| `gate` | 每次 push / PR | `fmt --check` → `clippy -D warnings` → `--lib --tests`（与本地 `--gate` 同一条命令） |
+| `debug` | push 到 `main` | `MINIDOCK_BUILD=<run_number>` → `package.sh` → 上传 `MiniDock-<ver>-win64-debug`（保留 14 天） |
+| `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 版本一致 → `package.sh --release` → 压缩 → 建 Release，正文从 `CHANGELOG.md` 对应小节抽 |
+
+发版流程就是三步：
+
+```bash
+# 1) 改 Cargo.toml 的 workspace version 与 CHANGELOG 顶层小节为同一个号
+# 2) 提交
+git commit -am "release: 0.9.26"
+# 3) 打标签（不带 v 前缀推上去也行，workflow 两种都认，但只匹配 v*）
+git tag v0.9.26 && git push origin v0.9.26
+```
+
+两个刻意的选择：
+
+- **不用 `msvc-dev-cmd` 之外的魔法**：`env.sh` 本来就有"PATH 里已有 cl.exe 就直接用"
+  这条路径，CI 上由 `ilammy/msvc-dev-cmd` 触发它，本地由 VS 开发者 shell 触发，
+  同一条代码路径。
+- **标签与版本号强校验**：打错标签（比如 `v0.9.26` 而 Cargo 还是 `0.9.25`）
+  直接 fail，而不是发出一个版本号对不上的包。

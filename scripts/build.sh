@@ -16,6 +16,8 @@
 #   ./scripts/build.sh --fmt          # 格式化
 #   ./scripts/build.sh --gate         # 完整门禁：fmt + clippy + test（提交前跑这个）
 #   ./scripts/build.sh --exe          # 打印产物路径
+#   ./scripts/build.sh --version      # 打印本次构建钉住的版本号
+#   ./scripts/package.sh [--release]  # 构建 + 按版本号打包到 dist/
 #
 # 其余参数原样透传给 cargo（如 -p <crate>、--nocapture）。
 
@@ -40,6 +42,7 @@ while [ $# -gt 0 ]; do
         --fmt)     ACTION=fmt; shift ;;
         --gate)    ACTION=gate; shift ;;
         --exe)     ACTION=exe; shift ;;
+        --version) ACTION=version; shift ;;
         *) EXTRA+=("$1"); shift ;;
     esac
 done
@@ -94,5 +97,15 @@ case "$ACTION" in
     exe)
         # ADR-035 之后唯一的 Dock 可执行文件；早期这里写的是已删除的 MiniDock.exe。
         echo "$ROOT/target/$TARGET/$(profile_dir)/minidock-dock.exe"
+        ;;
+    version)
+        # 由构建脚本写出（`crates/minidock-core/build.rs`），与 exe 资源同源。
+        f="$ROOT/target/$TARGET/$(profile_dir)/MINIDOCK_VERSION"
+        if [ -f "$f" ]; then
+            cat "$f"
+        else
+            echo "尚未构建：先跑一次 ./scripts/build.sh" >&2
+            exit 1
+        fi
         ;;
 esac

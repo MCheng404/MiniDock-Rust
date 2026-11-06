@@ -26,10 +26,12 @@ pub mod store;
 pub mod tool;
 pub mod units;
 
-/// 进程级常量。版本号单独维护：它与 `MiniDock.ini` 的兼容性有关，
-/// 不跟着 crate 版本走（crate 版本可能因为内部重构跳动）。
+/// 进程级常量。
 pub const APP_NAME: &str = "MiniDock";
-pub const APP_VERSION: &str = "1.2.0";
+
+/// 构建时写入的版本号：Release 是 `X.Y.Z`，Debug 是 `X.Y.Z-dev.<构建编号>`。
+/// 与 exe 的 VERSIONINFO、产物文件名同源（`scripts/version.rs`）。
+pub const VERSION: &str = env!("MINIDOCK_VERSION");
 /// 单实例互斥体名。
 pub const SINGLETON_MUTEX: &str = "Local\\MiniDock_Wangcy_Singleton";
 

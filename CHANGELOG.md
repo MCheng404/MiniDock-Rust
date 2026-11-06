@@ -5,6 +5,25 @@
 
 ---
 
+## 0.9.25 — 构建机制、版本号与 CI（2026-11-06）
+
+- 版本号统一到 `scripts/version.rs`，两个 `build.rs` `include!` 同一份逻辑：
+  Debug 是 `X.Y.Z-dev.<构建编号>`，Release 是 `X.Y.Z`。构建编号取 `MINIDOCK_BUILD`
+  （CI 传 run number），本地回落 `git rev-list --count HEAD`。
+- 三处分发同源：`minidock_core::VERSION`（关于页）、exe 的 VERSIONINFO（属性页）、
+  `target/<triple>/<profile>/MINIDOCK_VERSION`（`package.sh` 的产物名）。
+  `package.sh` 只读那个文件，不重新推导。
+- workspace 版本 `0.1.0` → `0.9.25`，与 CHANGELOG 对齐；删掉名不副实的
+  `APP_VERSION = "1.2.0"`（从未被引用过）。
+- 新增 `scripts/package.sh`：产出 `dist/MiniDock-<ver>-win64[-debug]/`
+  （exe + LICENSE + README）；`--pdb` 才带调试符号（debug 的 PDB 有 200 MB 量级）。
+  `./scripts/build.sh --version` 打印本次构建钉住的版本。
+- 新增 `.github/workflows/build.yml` 三段式：`gate`（每次 push / PR）、
+  `debug`（push 到 main，带 run number 出包）、`release`（`v*` 标签，先校验
+  标签与 `Cargo.toml` 一致，再打包建 Release，正文从本文件对应小节抽）。
+- exe 资源补 `LegalCopyright` / `OriginalFilename` / `InternalName`；
+  FileVersion 与 ProductVersion 同时写数值与字符串，属性页不会再吞掉 dev 后缀。
+
 ## 0.9.24 — 设置新增「关于」页（2026-11-06）
 
 - 新页 `about.rs`：版本 / 构建、项目地址、作者主页、许可（GNU GPL v3.0 or

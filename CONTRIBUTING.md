@@ -97,5 +97,8 @@ fix: 时钟开启时栏体右端被裁
   写"做了什么 / 为什么 / 已知问题"，**已知问题不要省**。
 - 新的技术取舍追加到 [`DECISIONS.md`](DECISIONS.md) 的末尾，**不删旧条目** ——
   错误的决策留着，才有人知道为什么不能重犯。
-- `crates/minidock-core/src/lib.rs` 的 `APP_VERSION` 与 crate 版本**分开**维护：
-  前者跟 ini 兼容性走，后者跟内部重构走。
+- 版本号只有一个来源：`scripts/version.rs`（构建期跑一次）。**改版本 = 改
+  `Cargo.toml` 的 workspace `version`**，并在 `CHANGELOG.md` 里开一个同名小节；
+  其它地方不要再写死版本号。Debug 的 `-dev.<构建编号>` 由构建脚本自己加。
+- 发版＝版本号对齐后打 `v*` 标签，CI 会校验标签与 `Cargo.toml` 一致再出包。
+  流程见 [`BUILD.md`](BUILD.md) 第八节。

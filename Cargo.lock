@@ -656,11 +656,11 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "minidock-core"
-version = "0.1.0"
+version = "0.9.25"
 
 [[package]]
 name = "minidock-gpu"
-version = "0.1.0"
+version = "0.9.25"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "minidock-platform"
-version = "0.1.0"
+version = "0.9.25"
 dependencies = [
  "minidock-core",
  "windows",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "minidock-settings"
-version = "0.1.0"
+version = "0.9.25"
 dependencies = [
  "egui",
  "egui_kittest",

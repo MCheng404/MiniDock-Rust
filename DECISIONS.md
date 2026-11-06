@@ -3365,3 +3365,41 @@ In Device::create_texture, label = 'minidock-offscreen-msaa'
 **验证**：`MINIDOCK_DEBUG_OPEN=launchpad` 与"设置窗口 + 起动台同开"两种
 复现路径各跑 12 秒无 panic（改前 100% 崩在 create_texture）；
 `msaa_two_requires_the_adapter_specific_feature` 覆盖 2/4/0/1 四档。
+
+---
+
+## ADR-070 · 版本号单一来源：构建期算一次，三处分发
+
+**背景**：版本号原先有三处可能不一致：`Cargo.toml` 的 `0.1.0`（很久没动）、
+`core::APP_VERSION = "1.2.0"`（抄上游的，从没被引用）、exe 里没写 VERSIONINFO。
+CHANGELOG 又是另一套编号（0.9.x）。用户看到的、属性页看到的、产物名上写的，
+随时可能各说各话。Debug 与 Release 也没有区分手段。
+
+**决定**：
+
+1. 唯一的版本计算逻辑放 `scripts/version.rs`，被
+   `crates/minidock-core/build.rs` 与 `crates/minidock-gpu/build.rs` `include!`。
+2. 规则：`MINIDOCK_VERSION` 有值→原样用；`PROFILE=release`→`X.Y.Z`；否则
+   `X.Y.Z-dev.<构建编号>`。构建编号取 `MINIDOCK_BUILD`，回落
+   `git rev-list --count HEAD`，再回落 0。
+3. 分发三处，全部由同一次计算得出：`cargo:rustc-env=MINIDOCK_VERSION`
+   （`minidock_core::VERSION` → 关于页）、VERSIONINFO（属性页）、
+   `target/<triple>/<profile>/MINIDOCK_VERSION`（`scripts/package.sh` 读它拼产物名）。
+4. `Cargo.toml` 版本改为与 CHANGELOG 同号（0.9.25），删掉 `APP_VERSION`。
+
+**依据**：产物名、关于页、属性页三者不一致是最容易在发版时翻车的地方，而
+"再算一遍"是这类不一致的根源。让 build script 算一次、把结果落成文件，
+下游只读不推，就把这个问题从流程问题变成了结构问题（没有第二处代码能算错）。
+
+构建编号用 git 提交数而不是时间戳：同一棵树在任意机器上得到同一个号，
+`cargo clean` 前后不会跳变，出包可复现。CI 用 `run_number` 是因为 CI 上没有
+完整的 reflog，且要保证"每次跑都不重复"。
+
+**代价**：debug 号随提交单调增长，与 CHANGELOG 的小版本号无关——两者是不同
+维度的东西（一个是"第几次构建"，一个是"第几个发布"）。`rerun-if-changed` 挂在
+`.git/logs/HEAD` 上，提交后第一次构建会重编 core 与 gpu（几秒）。`include!`
+共享源码不能写 `//!` 文档（E0753），`scripts/version.rs` 用行注释。
+
+**验证**：本机 debug 构建属性页与关于页都是 `0.9.25-dev.58`，release 为
+`0.9.25`（7.4 MB 单文件）；`./scripts/package.sh --release` 产出
+`dist/MiniDock-0.9.25-win64/`。

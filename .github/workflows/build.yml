@@ -1,0 +1,130 @@
+name: build
+
+# 三段式：
+#   gate     每次 push / PR 都跑，格式 + lint + 测试
+#   debug    push 到 main 时出一个带构建编号的调试包（版本 X.Y.Z-dev.<run>）
+#   release  打 v* 标签时出稳定版，并把它挂到 GitHub Release 上
+#
+# 版本号只有一个来源：`scripts/version.rs`。CI 只通过环境变量影响它
+# （`MINIDOCK_BUILD` = run number），不在这里拼字符串。
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # 增量缓存对 CI 无意义，关掉能少一类"本地好好的、CI 炸了"的问题。
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  gate:
+    name: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --target $env:TARGET --workspace --all-targets -- -D warnings
+
+      - name: test
+        # --lib --tests：跳过 doctest，与本地 `build.sh --gate` 一致。
+        run: cargo test --target $env:TARGET --workspace --lib --tests
+
+  debug:
+    name: debug
+    needs: gate
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    env:
+      # build.rs 会把它拼成 `X.Y.Z-dev.<run>`；release 档位不读这个变量。
+      MINIDOCK_BUILD: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: package
+        shell: bash
+        run: ./scripts/package.sh
+
+      - name: read version
+        id: ver
+        shell: bash
+        run: echo "value=$(tr -d '[:space:]' < target/$TARGET/debug/MINIDOCK_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiniDock-${{ steps.ver.outputs.value }}-win64-debug
+          path: dist/MiniDock-${{ steps.ver.outputs.value }}-win64-debug/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: release
+    needs: gate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: tag matches Cargo version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag=$tag cargo=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::标签 v$tag 与 Cargo.toml 的 $version 不一致"
+            exit 1
+          fi
+
+      - name: package
+        shell: bash
+        run: ./scripts/package.sh --release
+
+      - name: zip
+        shell: pwsh
+        run: |
+          $dir = Get-Item "dist/MiniDock-*-win64" | Select-Object -First 1
+          Compress-Archive -Path $dir.FullName -DestinationPath "$($dir.FullName).zip"
+          Get-ChildItem dist
+
+      - name: release notes from changelog
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < target/$TARGET/release/MINIDOCK_VERSION)"
+          awk -v v="$version" 'index($0, "## " v) == 1 { p = 1; next } /^## / { p = 0 } p' CHANGELOG.md > notes.md
+          wc -l notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          body_path: notes.md
+          fail_on_unmatched_files: true

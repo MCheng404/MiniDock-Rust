@@ -17,7 +17,7 @@ const ART: f32 = 32.0;
 
 pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
     card(ctx, ui, "MiniDock", "Windows 桌面 Dock。", |_ctx, ui| {
-        value_row(ui, "版本", env!("CARGO_PKG_VERSION"));
+        value_row(ui, "版本", minidock_core::VERSION);
         value_row(
             ui,
             "构建",
