@@ -200,8 +200,18 @@ fn swap_rb(dst: &mut [u32], src: &[u32]) {
 }
 
 /// Swap R/B from padded source rows into a tightly packed destination.
-/// SAFETY: both slices are 4-byte aligned with at least the documented lengths.
+/// Picks AVX2 when the CPU has it; the scalar path stays as reference.
 fn swap_rb_strided(dst: &mut [u8], src: &[u8], row: usize, rows: usize, stride: usize) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 is present, and the slice lengths are the caller's contract.
+        unsafe { swap_rb_strided_avx2(dst, src, row, rows, stride) };
+        return;
+    }
+    swap_rb_strided_scalar(dst, src, row, rows, stride);
+}
+
+fn swap_rb_strided_scalar(dst: &mut [u8], src: &[u8], row: usize, rows: usize, stride: usize) {
     let pixels = row / 4;
     for y in 0..rows {
         let s = &src[y * stride..y * stride + row];
@@ -209,6 +219,46 @@ fn swap_rb_strided(dst: &mut [u8], src: &[u8], row: usize, rows: usize, stride: 
         let s32 = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u32>(), pixels) };
         let d32 = unsafe { std::slice::from_raw_parts_mut(d.as_mut_ptr().cast::<u32>(), pixels) };
         swap_rb(d32, s32);
+    }
+}
+
+/// Byte shuffle: [b0,b1,b2,b3] -> [b2,b1,b0,b3], i.e. B and R swapped.
+/// The pattern repeats every 16 bytes, so it fits one `vpshufb` per 128-bit lane.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn swap_rb_strided_avx2(dst: &mut [u8], src: &[u8], row: usize, rows: usize, stride: usize) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_setr_epi8, _mm256_shuffle_epi8, _mm256_storeu_si256,
+    };
+    let pixels = row / 4;
+    let mask = _mm256_setr_epi8(
+        2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15, 2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11,
+        14, 13, 12, 15,
+    );
+    // Rows narrower than one vector fall back to the scalar path.
+    if pixels < 8 {
+        swap_rb_strided_scalar(dst, src, row, rows, stride);
+        return;
+    }
+    let mut y = 0;
+    while y < rows {
+        let s = src[y * stride..y * stride + row].as_ptr();
+        let d = dst[y * row..(y + 1) * row].as_mut_ptr();
+        let mut i = 0;
+        while i + 8 <= pixels {
+            let v = unsafe { _mm256_loadu_si256(s.add(i * 4).cast::<__m256i>()) };
+            let r = _mm256_shuffle_epi8(v, mask);
+            unsafe { _mm256_storeu_si256(d.add(i * 4).cast::<__m256i>(), r) };
+            i += 8;
+        }
+        if i < pixels {
+            // Overlapping store of the last full vector: cheaper than a scalar tail.
+            let j = pixels - 8;
+            let v = unsafe { _mm256_loadu_si256(s.add(j * 4).cast::<__m256i>()) };
+            let r = _mm256_shuffle_epi8(v, mask);
+            unsafe { _mm256_storeu_si256(d.add(j * 4).cast::<__m256i>(), r) };
+        }
+        y += 1;
     }
 }
 
@@ -224,7 +274,24 @@ impl Drop for LayeredPresenter {
 
 #[cfg(test)]
 mod tests {
-    use super::{swap_rb, swap_rb_strided};
+    use super::{swap_rb, swap_rb_strided, swap_rb_strided_scalar};
+
+    /// SIMD path must be bit-identical to the scalar reference, including
+    /// tails, the overlapping last vector and rows narrower than one vector.
+    #[test]
+    fn simd_path_matches_scalar_for_every_width() {
+        let rows = 3usize;
+        for px in (1..=40usize).chain([391, 1320]) {
+            let row = px * 4;
+            let stride = row + 12;
+            let src: Vec<u8> = (0..stride * rows).map(|i| (i * 37 % 251) as u8).collect();
+            let mut fast = vec![0u8; row * rows];
+            let mut slow = vec![0u8; row * rows];
+            swap_rb_strided(&mut fast, &src, row, rows, stride);
+            swap_rb_strided_scalar(&mut slow, &src, row, rows, stride);
+            assert_eq!(fast, slow, "{px}px wide");
+        }
+    }
 
     #[test]
     fn swap_rb_strided_skips_row_padding() {
