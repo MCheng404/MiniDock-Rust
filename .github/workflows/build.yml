@@ -127,13 +127,17 @@ jobs:
           sha8="${GITHUB_SHA:0:8}"
 
           {
-            echo "自动构建，每次提交覆盖本发布。"
+            echo "Automated build of the \`dev\` channel — every commit to the default branch replaces this release."
             echo
-            echo "- 版本：\`$VERSION\`"
-            echo "- 提交：[\`$sha8\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)"
-            echo "- 运行：[$GITHUB_RUN_NUMBER](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Build time | $(date -u '+%Y-%m-%d %H:%M:%S') UTC |"
+            echo "| Commit | [\`$sha8\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA) |"
+            echo "| Workflow run | [$GITHUB_RUN_NUMBER](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |"
+            echo "| SHA-256 | \`$(cut -d' ' -f1 "$sum")\` |"
             echo
-            echo "稳定版请看 [最新正式发布](https://github.com/$GITHUB_REPOSITORY/releases/latest)。"
+            echo "Stable builds: [latest release](https://github.com/$GITHUB_REPOSITORY/releases/latest)."
           } > debug-notes.md
 
           if ! gh release view "$tag" > /dev/null 2>&1; then

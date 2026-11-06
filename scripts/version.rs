@@ -10,10 +10,11 @@
 // |---|---|
 // | `MINIDOCK_VERSION` set | used verbatim (CI passes the tag / run number) |
 // | `PROFILE == release` | `X.Y.Z` — the stable version |
-// | otherwise | `X.Y.Z-dev.<build>` — build number |
+// | otherwise | `X.Y.Z-<build>-<sha>` — stable prefix, build number, commit |
 //
 // The build number comes from `MINIDOCK_BUILD`, else `git rev-list --count`
-// (monotonic across commits), else `0`.
+// (monotonic across commits), else `0`. The short commit comes from
+// `GITHUB_SHA` in CI, else `git rev-parse --short`, else `nogit`.
 
 #[derive(Debug)]
 pub struct Version {
@@ -58,10 +59,32 @@ fn triple(text: &str) -> [u16; 3] {
     ]
 }
 
-/// Build number encoded in a `-dev.<n>` suffix, if any.
-fn suffix_build(text: &str) -> Option<u64> {
-    let (_, rest) = text.split_once("-dev.")?;
-    rest.parse().ok()
+/// Build number is the first dash-separated group after the stable prefix.
+fn build_from_suffix(text: &str) -> Option<u64> {
+    let (_, rest) = text.split_once('-')?;
+    rest.split('-').next()?.parse().ok()
+}
+
+/// Short commit hash: `<7 hex>` from `GITHUB_SHA`, else `git rev-parse --short`.
+fn short_sha() -> String {
+    if let Ok(sha) = std::env::var("GITHUB_SHA") {
+        let sha = sha.trim();
+        if sha.len() >= 7 {
+            return sha[..7].to_owned();
+        }
+    }
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output()
+    {
+        if out.status.success() {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !sha.is_empty() {
+                return sha;
+            }
+        }
+    }
+    "nogit".to_owned()
 }
 
 pub fn resolve(pkg_version: &str) -> Version {
@@ -69,7 +92,7 @@ pub fn resolve(pkg_version: &str) -> Version {
         let explicit = explicit.trim().to_owned();
         if !explicit.is_empty() {
             let [a, b, c] = triple(&explicit);
-            let d = suffix_build(&explicit).unwrap_or(0) as u16;
+            let d = build_from_suffix(&explicit).unwrap_or(0) as u16;
             return Version {
                 text: explicit,
                 quad: [a, b, c, d],
@@ -85,9 +108,10 @@ pub fn resolve(pkg_version: &str) -> Version {
         };
     }
 
+    // `1.0.0-12-4055a6c`: 稳定前缀 + 第几次构建 + 具体提交号。
     let n = build_number();
     Version {
-        text: format!("{pkg_version}-dev.{n}"),
+        text: format!("{pkg_version}-{n}-{}", short_sha()),
         quad: [a, b, c, (n & 0xffff) as u16],
     }
 }

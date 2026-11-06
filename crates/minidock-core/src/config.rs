@@ -106,6 +106,8 @@ fn section_of_numeric(name: &str) -> &'static str {
         | "UiAccentCcIcons" => return "appearance",
         // 帧率与同步（Rust 版自有）。
         "FrameCap" | "VSync" | "Msaa" => return "performance",
+        // 更新器（Rust 版自有）。
+        "NetSecureDns" | "NetMirrorAll" => return "update",
         // 右键菜单毛玻璃。
         "MenuFrost" => return "menu",
         // 分割线拖动等比缩放。
@@ -295,6 +297,9 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     // 默认开 —— 用户要的就是图标跟着主题色走；关掉回落各自的中性配色。
     ("UiAccentDockIcons", 0, 1, 1, true, false),
     ("UiAccentCcIcons", 0, 1, 1, true, false),
+    // 更新器（Rust 版自有，藏在「关于」页的隐藏入口后面）。
+    ("NetSecureDns", 0, 1, 1, true, false),
+    ("NetMirrorAll", 0, 1, 0, true, false),
 ];
 
 impl Key {
@@ -510,6 +515,11 @@ impl Key {
     pub const VSYNC: Key = Key::Numeric(99);
     /// `Msaa`：0 = 按窗口面积自动，1/2/4 = 强制档位。
     pub const MSAA: Key = Key::Numeric(100);
+    /// `NetSecureDns`：更新时用 DoH 校验系统 DNS 是否被污染（默认开）。
+    pub const NET_SECURE_DNS: Key = Key::Numeric(103);
+    /// `NetMirrorAll`：镜像测速是否全部测完再选（默认"够快就先上"）。
+    pub const NET_MIRROR_ALL: Key = Key::Numeric(104);
+
     /// `UiAccentDockIcons`：Dock 图标（内置条目 / 首字占位）是否应用主题色。
     pub const UI_ACCENT_DOCK_ICONS: Key = Key::Numeric(101);
     /// `UiAccentCcIcons`：控制中心磁贴图标是否应用主题色。
@@ -672,6 +682,8 @@ impl Key {
         Key::MSAA,
         Key::UI_ACCENT_DOCK_ICONS,
         Key::UI_ACCENT_CC_ICONS,
+        Key::NET_SECURE_DNS,
+        Key::NET_MIRROR_ALL,
     ];
 
     /// 需要读写的全部键：行序表在前，自有键在后。
@@ -1679,6 +1691,8 @@ mod tests {
             (Key::MSAA, "Msaa"),
             (Key::UI_ACCENT_DOCK_ICONS, "UiAccentDockIcons"),
             (Key::UI_ACCENT_CC_ICONS, "UiAccentCcIcons"),
+            (Key::NET_SECURE_DNS, "NetSecureDns"),
+            (Key::NET_MIRROR_ALL, "NetMirrorAll"),
         ];
         for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");

@@ -122,6 +122,12 @@ pub struct SettingsState {
     pub adapter_note: String,
     /// 底部状态条。
     pub status: String,
+    /// 「关于」页的隐藏入口已解锁（连点版本号 5 次）。窗口一关就复位。
+    pub advanced: bool,
+    /// 版本号被连点的次数。
+    pub version_clicks: u8,
+    /// 更新器当前状态，由 GPU 层在后台线程里刷新。
+    pub update: UpdateView,
     /// 顶栏搜索框的内容：非空时只显示命中的导航标签。
     pub nav_filter: String,
     /// 当前展开的说明气泡（点击钉住 / 悬停 3 秒自动展开）。
@@ -168,6 +174,9 @@ impl Default for SettingsState {
             card_h_prev: Vec::new(),
             card_h: Vec::new(),
             row_bands_prev: Vec::new(),
+            advanced: false,
+            version_clicks: 0,
+            update: UpdateView::default(),
             row_bands: Vec::new(),
         }
     }
@@ -194,6 +203,28 @@ pub enum Command {
     Import,
     /// 用默认浏览器打开一个链接。
     OpenUrl(&'static str),
+    /// 检查更新（后台线程，结果回到 [`UpdateView`]）。
+    CheckUpdate,
+    /// 下载并校验新版本。
+    DownloadUpdate,
+    /// 用已下载的文件替换本程序并重启。
+    ApplyUpdate,
+}
+
+/// 更新器给界面看的那一面。
+///
+/// 只放字符串和布尔：设置层不认识网络类型，GPU 层负责把
+/// `update::Release` 翻译成这几行字。
+#[derive(Clone, Debug, Default)]
+pub struct UpdateView {
+    /// 一行状态文字（"正在检查…" / "已是最新" / "发现 1.0.1" / 错误）。
+    pub status: String,
+    /// 有新版本可下。
+    pub available: bool,
+    /// 已下载并校验完成，等重启。
+    pub ready: bool,
+    /// 正在跑网络请求，按钮置灰。
+    pub busy: bool,
 }
 
 /// 一帧的结果。

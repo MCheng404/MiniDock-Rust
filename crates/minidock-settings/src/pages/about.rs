@@ -2,6 +2,8 @@
 
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
+use minidock_core::config::Key;
+
 use super::about_art::MARK;
 use super::widgets::{card, Ctx};
 use super::Command;
@@ -16,8 +18,8 @@ const ROW_H: f32 = 44.0;
 const ART: f32 = 32.0;
 
 pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
-    card(ctx, ui, "MiniDock", "Windows 桌面 Dock。", |_ctx, ui| {
-        value_row(ui, "版本", minidock_core::VERSION);
+    card(ctx, ui, "MiniDock", "Windows 桌面 Dock。", |ctx, ui| {
+        version_row(ctx, ui);
         value_row(
             ui,
             "构建",
@@ -28,6 +30,8 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             },
         );
     });
+
+    update_card(ctx, ui);
 
     card(
         ctx,
@@ -55,6 +59,97 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
         ui.add_space(4.0);
         super::widgets::button(ctx, ui, "查看许可全文", Command::OpenUrl(LICENSE_URL));
     });
+
+    // 隐藏入口：连点版本号 5 次才会出现，设置窗口一关就收回。
+    if ctx.state.advanced {
+        card(
+            ctx,
+            ui,
+            "高级",
+            "网络与更新行为，改动即时生效。",
+            |ctx, ui| {
+                super::widgets::toggle(
+                    ctx,
+                    ui,
+                    Key::NET_SECURE_DNS,
+                    "使用安全的 DNS",
+                    "用 DoH 校验系统解析结果；发现被污染就不走直连，改走镜像",
+                );
+                super::widgets::toggle(
+                    ctx,
+                    ui,
+                    Key::NET_MIRROR_ALL,
+                    "镜像全部测速后再选",
+                    "关闭：某个镜像够快就先下，不再等其余测完",
+                );
+            },
+        );
+    }
+}
+
+/// 版本号那一行。连点 5 次解锁隐藏的「高级」卡片。
+fn version_row(ctx: &mut Ctx<'_>, ui: &mut Ui) {
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // 自绘控件也要有 AccessKit 信息：读屏软件要能读到，kittest 也要能点到。
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "版本"));
+    let painter = ui.painter();
+    painter.text(
+        rect.left_center(),
+        Align2::LEFT_CENTER,
+        "版本",
+        FontId::proportional(14.0),
+        ui.visuals().text_color(),
+    );
+    painter.text(
+        rect.right_center(),
+        Align2::RIGHT_CENTER,
+        minidock_core::VERSION,
+        FontId::monospace(11.5),
+        ui.visuals().weak_text_color(),
+    );
+    if resp.clicked() {
+        ctx.state.version_clicks = ctx.state.version_clicks.saturating_add(1);
+        if ctx.state.version_clicks >= 5 {
+            ctx.state.advanced = true;
+        }
+    }
+    ui.add_space(7.0);
+}
+
+/// 更新卡片：状态一行 + 按阶段出现的按钮。
+fn update_card(ctx: &mut Ctx<'_>, ui: &mut Ui) {
+    card(
+        ctx,
+        ui,
+        "更新",
+        "从 GitHub 检查新版本。",
+        |ctx, ui| {
+            let view = ctx.state.update.clone();
+            let text = if view.status.is_empty() {
+                "尚未检查".to_owned()
+            } else {
+                view.status.clone()
+            };
+            ui.label(RichText::new(text).small().weak());
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                if view.busy {
+                    ui.label(RichText::new("请稍候…").small());
+                    return;
+                }
+                super::widgets::button(ctx, ui, "检查更新", Command::CheckUpdate);
+                if view.available && !view.ready {
+                    super::widgets::button(ctx, ui, "下载并校验", Command::DownloadUpdate);
+                }
+                if view.ready {
+                    super::widgets::button(ctx, ui, "重启并更新", Command::ApplyUpdate);
+                }
+            });
+        },
+    );
 }
 
 /// Label on the left, muted value on the right.

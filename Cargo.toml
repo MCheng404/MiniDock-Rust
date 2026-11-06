@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 # egui 0.37 / egui-wgpu 0.37 require 1.95.
 rust-version = "1.95"
@@ -34,6 +34,10 @@ egui_kittest = "0.37"
 # dedicated threads in minidock-gpu::worker.
 rayon = "1.12"
 
+# SHA-256 for the updater: verify a downloaded exe against the release's
+# `.sha256` asset before it is allowed to replace anything.
+sha2 = "0.10"
+
 pollster = "1.0"
 
 # Pinned rev: upstream can change the uniform layout without notice.
@@ -52,6 +56,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_OpenGL",
     "Win32_Graphics_Dwm",
     "Win32_Media_Audio",
+    "Win32_Networking_WinHttp",
     "Win32_Media_Audio_Endpoints",
     "Win32_Storage_FileSystem",
     "Win32_Security",

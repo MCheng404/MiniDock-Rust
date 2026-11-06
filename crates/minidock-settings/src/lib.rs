@@ -16,7 +16,7 @@ pub mod fonts;
 pub mod pages;
 pub mod text_field;
 
-pub use pages::{settings_ui, Command, Outcome, Page, SettingsState};
+pub use pages::{settings_ui, Command, Outcome, Page, SettingsState, UpdateView};
 
 /// 左侧导航栏宽度（逻辑像素）。**写死**，不随标签内容变化。
 ///

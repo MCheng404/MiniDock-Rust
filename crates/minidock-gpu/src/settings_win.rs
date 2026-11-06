@@ -285,6 +285,10 @@ impl SettingsWindow {
     }
 
     pub fn hide(&mut self) {
+        // 隐藏入口只在本次打开期间有效：关掉窗口就收回「高级」卡片，
+        // 下次进来要重新连点版本号 5 次。
+        self.state.advanced = false;
+        self.state.version_clicks = 0;
         self.renderer.stop_live_frost();
         crate::frost::allow_capture(self.hwnd);
         unsafe {
@@ -294,6 +298,13 @@ impl SettingsWindow {
         self.close_requested = false;
         // 窗口藏起来就别再催并重绘了，否则每 16 ms 一帧纯浪费。
         self.next_repaint = None;
+    }
+
+    /// 外部（后台线程）改了 `state` 之后叫醒窗口画一帧。
+    pub fn wake(&mut self) {
+        if self.visible {
+            self.next_repaint = Some(Instant::now());
+        }
     }
 
     /// 到下一帧的时间。`None` = 没有待办，主循环可以阻塞等消息。

@@ -76,10 +76,11 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
 |---|---|---|
 | `MINIDOCK_VERSION` 有值 | 原样使用 | CI 显式指定（预留） |
 | `PROFILE=release` | `X.Y.Z`（`Cargo.toml` 的 workspace 版本） | Release 稳定版 |
-| 其它（debug） | `X.Y.Z-dev.<构建编号>` | Debug 版 |
+| 其它（debug） | `X.Y.Z-<构建编号>-<提交号>` | Debug 版（如 `1.1.0-66-fe678af`） |
 
 构建编号取 `MINIDOCK_BUILD`，没有就取 `git rev-list --count HEAD`（随提交单调递增），
-再没有就是 `0`。CI 用 `MINIDOCK_BUILD=${{ github.run_number }}`。
+再没有就是 `0`。提交号是 7 位短哈希：CI 用 `GITHUB_SHA`，本地 `git rev-parse --short`。
+CI 用 `MINIDOCK_BUILD=${{ github.run_number }}`。
 
 三处必须一致，所以只在构建期算一次、分发下去：
 
@@ -108,8 +109,8 @@ README 里早期提过的 `minidock-spike`、`MiniDock.exe` 都已在 ADR-035 / 
 ```
 dist/MiniDock-1.0.0-win64.exe
 dist/MiniDock-1.0.0-win64.exe.sha256
-dist/MiniDock-1.0.0-dev.60-win64-debug.exe          （--pdb 时另加同名 .pdb）
-dist/MiniDock-1.0.0-dev.60-win64-debug.exe.sha256
+dist/MiniDock-1.1.0-66-fe678af-win64-debug.exe     （--pdb 时另加同名 .pdb）
+dist/MiniDock-1.1.0-66-fe678af-win64-debug.exe.sha256
 ```
 
 - **裸文件，不压 zip**：GitHub Release 上是 exe 与校验和两个下载项，用户下下来

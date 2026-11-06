@@ -12,8 +12,10 @@ pub mod audio;
 pub mod display;
 pub mod gpu;
 pub mod icon;
+pub mod json;
 pub mod launch;
 pub mod launchpad;
+pub mod net;
 pub mod occlusion;
 pub mod paths;
 pub mod shortcut;
@@ -21,6 +23,7 @@ pub mod single_instance;
 pub mod sysact;
 pub mod sysinfo;
 pub mod theme;
+pub mod update;
 pub mod win;
 
 pub use appbar::AppBar;

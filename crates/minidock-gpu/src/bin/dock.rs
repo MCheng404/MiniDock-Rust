@@ -170,6 +170,12 @@ struct App {
     size: (i32, i32),
     menu_slot: MenuSlot,
     settings_slot: Option<Pin<Box<SettingsWindow>>>,
+    /// 更新检查/下载的后台线程通道。UI 线程只 `try_recv`。
+    update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
+    /// 最近一次拿到的发布信息（下载时要用）。
+    update_release: Option<minidock_platform::update::Release>,
+    /// 已下载并校验通过的暂存文件。
+    update_staged: Option<std::path::PathBuf>,
 
     // ---- 后台线程。UI 线程只 `try_recv`，永远不等它们 ----
     /// 取图标（shell / COM，串行）。
@@ -500,6 +506,9 @@ impl App {
             calendar_slot,
             cc_slot,
             launchpad_slot,
+            update_rx: None,
+            update_release: None,
+            update_staged: None,
             debug_opened,
             watcher: minidock_gpu::popup::Watcher::default(),
             panel_was_open: false,
@@ -846,6 +855,8 @@ impl App {
         let before = self.mount_key();
 
         let (changed, cmd) = tick_settings(&self.gpu, &mut self.settings_slot, &mut self.dock)?;
+        // 后台线程的结果每轮搬一次；它自己会 `wake` 设置窗口。
+        self.pump_update();
         let mut need_frame = false;
 
         if changed {
@@ -2848,6 +2859,18 @@ impl App {
                 sysact::open_uri(url);
                 false
             }
+            Command::CheckUpdate => {
+                self.start_update_check();
+                false
+            }
+            Command::DownloadUpdate => {
+                self.start_update_download();
+                false
+            }
+            Command::ApplyUpdate => {
+                self.apply_update();
+                false
+            }
             Command::ToggleAutostart(on) => {
                 if theme::set_autostart(on) {
                     // 写完重新读真值：策略把写入拦下来时，写函数也可能返回成功。
@@ -2970,4 +2993,171 @@ fn raw_input(size: (u32, u32), ppp: f32, start: Instant) -> egui::RawInput {
         },
     );
     raw
+}
+
+/// 更新器线程发回主线程的消息。
+///
+/// 一律带 `String` / `PathBuf`：后台线程不认识 UI 状态，翻译是主线程的事。
+enum UpdateMsg {
+    /// 一行进度文字（"正在检查…"）。
+    Status(String),
+    /// 发现新版本，附带发布信息（下载要用它的资产地址）。
+    Available(Box<minidock_platform::update::Release>),
+    /// 已经是最新，没有可下的。
+    UpToDate,
+    /// 下载 + 校验完成，落在磁盘上等替换。
+    Staged(std::path::PathBuf),
+    /// 任何一步失败，内容是给用户看的原因。
+    Failed(String),
+}
+
+impl App {
+    /// 检查更新：起一条线程，主线程继续跑。
+    fn start_update_check(&mut self) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateMsg::Status("正在检查…".to_owned()));
+            match minidock_platform::update::latest_release() {
+                Ok(rel) => {
+                    let installed =
+                        minidock_platform::update::Version::parse(minidock_core::VERSION);
+                    if installed.is_some_and(|v| rel.version.is_newer_than(&v)) {
+                        let _ = tx.send(UpdateMsg::Available(Box::new(rel)));
+                    } else {
+                        let _ = tx.send(UpdateMsg::UpToDate);
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(UpdateMsg::Failed(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// 下载：先按开关选镜像（安全 DNS 判定污染时不允许直连），再下 + 校验。
+    fn start_update_download(&mut self) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let Some(release) = self.update_release.clone() else {
+            return;
+        };
+        let secure_dns = self.dock.cfg.get_i32(Key::NET_SECURE_DNS) != 0;
+        let test_all = self.dock.cfg.get_i32(Key::NET_MIRROR_ALL) != 0;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let allow_direct =
+                !(secure_dns && minidock_platform::update::dns_looks_poisoned("github.com"));
+            let _ = tx.send(UpdateMsg::Status(if allow_direct {
+                "正在测速选镜像…".to_owned()
+            } else {
+                "系统 DNS 疑似被污染，只用镜像…".to_owned()
+            }));
+            let base =
+                minidock_platform::update::pick_mirror(&release.sha256.url, test_all, allow_direct);
+            let Some(base) = base else {
+                let _ = tx.send(UpdateMsg::Failed("没有可用镜像".to_owned()));
+                return;
+            };
+            let label = if base.is_empty() {
+                "GitHub 直连"
+            } else {
+                base.as_str()
+            };
+            let _ = tx.send(UpdateMsg::Status(format!("从 {label} 下载…")));
+            match minidock_platform::update::stage(&base, &release) {
+                Ok(path) => {
+                    let _ = tx.send(UpdateMsg::Staged(path));
+                }
+                Err(e) => {
+                    let _ = tx.send(UpdateMsg::Failed(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// 把后台线程的消息搬进设置窗口的状态里。
+    fn pump_update(&mut self) {
+        let Some(rx) = self.update_rx.as_ref() else {
+            return;
+        };
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        if messages.is_empty() {
+            return;
+        }
+
+        let mut finished = false;
+        for msg in messages {
+            let mut view = self
+                .settings_slot
+                .as_ref()
+                .map(|sw| sw.state.update.clone())
+                .unwrap_or_default();
+            match msg {
+                UpdateMsg::Status(text) => {
+                    view.status = text;
+                    view.busy = true;
+                }
+                UpdateMsg::Available(release) => {
+                    view.status = format!("发现新版本 {}", release.version.text);
+                    view.available = true;
+                    view.busy = false;
+                    self.update_release = Some(*release);
+                    finished = true;
+                }
+                UpdateMsg::UpToDate => {
+                    view.status = "已是最新版本".to_owned();
+                    view.available = false;
+                    view.busy = false;
+                    finished = true;
+                }
+                UpdateMsg::Staged(path) => {
+                    view.status = "已下载并校验通过，重启后生效".to_owned();
+                    view.ready = true;
+                    view.busy = false;
+                    self.update_staged = Some(path);
+                    finished = true;
+                }
+                UpdateMsg::Failed(why) => {
+                    view.status = format!("失败：{why}");
+                    view.busy = false;
+                    finished = true;
+                }
+            }
+            if let Some(sw) = self.settings_slot.as_mut() {
+                sw.state.update = view;
+                sw.wake();
+            }
+        }
+        if finished {
+            self.update_rx = None;
+        }
+    }
+
+    /// 用下载好的文件替换自己并重启。成功时不返回（进程退出）。
+    fn apply_update(&mut self) {
+        let Some(staged) = self.update_staged.clone() else {
+            return;
+        };
+        match minidock_platform::update::apply_and_restart(&staged) {
+            Ok(()) => {
+                // 走正常退出：AppBar 注销、配置写盘都在析构里。
+                std::process::exit(0);
+            }
+            Err(e) => {
+                if let Some(sw) = self.settings_slot.as_mut() {
+                    sw.state.update.status = format!("替换失败：{e}");
+                    sw.wake();
+                }
+            }
+        }
+    }
 }

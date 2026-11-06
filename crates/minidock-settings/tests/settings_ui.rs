@@ -8,7 +8,7 @@
 
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
-use minidock_core::config::{BgMode, Config};
+use minidock_core::config::{BgMode, Config, Key};
 use minidock_settings::{settings_ui, Command, Page, SettingsState};
 
 #[derive(Debug)]
@@ -378,5 +378,41 @@ fn 控件右边缘对齐() {
         "开关右边缘 {} 与下拉右边缘 {} 没对齐",
         toggle.right(),
         combo.right()
+    );
+}
+
+/// 隐藏入口：连点版本号 5 次才解锁「高级」，少一次都不行。
+#[test]
+fn 连点版本号五次才解锁高级入口() {
+    let mut h = new_harness();
+    h.state_mut().ui.page = Page::About;
+    h.run();
+
+    for _ in 0..4 {
+        h.get_by_label("版本").click();
+        h.run();
+    }
+    assert!(!h.state().ui.advanced, "四次还不该解锁");
+    assert!(
+        h.query_by_label("使用安全的 DNS").is_none(),
+        "没解锁就不该有高级项"
+    );
+
+    h.get_by_label("版本").click();
+    h.run();
+    assert!(h.state().ui.advanced, "第五次点击解锁");
+
+    // 解锁后高级卡片出现，两个开关都在默认值上：安全 DNS 开、镜像全测关。
+    h.get_by_label("使用安全的 DNS");
+    h.get_by_label("镜像全部测速后再选");
+    assert_eq!(
+        h.state().cfg.get_i32(Key::NET_SECURE_DNS),
+        1,
+        "安全 DNS 默认开"
+    );
+    assert_eq!(
+        h.state().cfg.get_i32(Key::NET_MIRROR_ALL),
+        0,
+        "默认够快就先下"
     );
 }
