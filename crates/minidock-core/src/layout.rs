@@ -320,11 +320,12 @@ impl WidgetStrip {
         self.items.get(i)?.as_ref()?;
         let gap_w = gap + 6.0;
         if self.on_left {
-            // 左侧：从栏体左缘往左倒着排。
-            // `u` 从 `bar_l - gap_w` 起，每个成员先减去自己的宽度。
+            // Lay out right-to-left from the bar's left edge.
             let mut u = bar_l - gap_w;
             for j in (0..self.len).rev() {
-                let (_, wj) = self.items[j].expect("len 之内必有值");
+                // `build()` fills the first `len` slots, but the fields are
+                // public. A hole must resolve to `None`, not panic the UI.
+                let (_, wj) = self.items[j]?;
                 u -= wj as f32;
                 if j == i {
                     return Some(u);
@@ -333,13 +334,14 @@ impl WidgetStrip {
             }
             None
         } else {
-            // 右侧：从栏体右缘往外排。
+            // Lay out left-to-right from the bar's right edge.
             let mut u = bar_l + bar_w + gap_w;
             for j in 0..self.len {
                 if j == i {
                     return Some(u);
                 }
-                u += self.items[j].expect("len 之内必有值").1 as f32 + gap_w;
+                let (_, wj) = self.items[j]?;
+                u += wj as f32 + gap_w;
             }
             None
         }
@@ -672,7 +674,10 @@ pub fn magnify_weight(distance: f32, radius: f32) -> f32 {
 /// 同样的判定（用槽位中心距离，而不是矩形包含），因为放大动画期间
 /// 图标的实际矩形与槽位并不重合 —— 用矩形判定会导致悬停抖动。
 #[must_use]
-#[allow(clippy::too_many_arguments)] // 参数就是这一组几何量，拆开反而更难对照
+#[expect(
+    clippy::too_many_arguments,
+    reason = "geometry bundle maps 1:1 to upstream"
+)]
 pub fn hit_index(
     u: f32,
     v: f32,
@@ -992,6 +997,34 @@ mod tests {
 
     fn work() -> Rect {
         Rect::new(0, 0, 1920, 1040)
+    }
+
+    /// A hole in the strip resolves to `None` instead of panicking.
+    #[test]
+    fn sparse_widget_strip_does_not_panic() {
+        let mut items = [None; 7];
+        items[0] = Some((WidgetKind::Clock, 100));
+        items[1] = None; // hole
+        items[2] = Some((WidgetKind::Resource, 90));
+        let strip = WidgetStrip {
+            items,
+            len: 3,
+            extra: 0.0,
+            on_left: false,
+        };
+
+        // i=0 returns before reading the hole.
+        assert_eq!(strip.left_of(0, 500.0, 200.0, 8.0), Some(714.0));
+        assert_eq!(strip.left_of(2, 500.0, 200.0, 8.0), None);
+        assert_eq!(strip.left_of(9, 500.0, 200.0, 8.0), None);
+
+        // Left-side layout walks backwards; only the leftmost slot sees the hole.
+        let left = WidgetStrip {
+            on_left: true,
+            ..strip
+        };
+        assert_eq!(left.left_of(2, 500.0, 200.0, 8.0), Some(396.0));
+        assert_eq!(left.left_of(0, 500.0, 200.0, 8.0), None);
     }
 
     #[test]

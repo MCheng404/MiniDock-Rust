@@ -302,6 +302,17 @@ impl SettingsWindow {
         self.visible && self.next_repaint.is_some_and(|t| t <= Instant::now())
     }
 
+    /// Time until the next repaint. `None` = hidden, `MAX` = idle.
+    #[must_use]
+    pub fn repaint_in(&self) -> Option<Duration> {
+        if !self.visible {
+            return None;
+        }
+        Some(self.next_repaint.map_or(Duration::MAX, |t| {
+            t.saturating_duration_since(Instant::now())
+        }))
+    }
+
     /// 画一帧并呈现。返回 egui 想要的光标与下一次重绘延时。
     ///
     /// `cfg` 是 Dock 用的同一份；`settings_ui` 在里面改的东西下一帧就生效，
@@ -339,12 +350,12 @@ impl SettingsWindow {
         self.cursor_to_system(out.cursor);
         self.update_stats(started.elapsed().as_secs_f32() * 1000.0);
 
-        // egui 自己知道下一次该在什么时候画（`Duration::MAX` = 没有待办）。
-        // "越快越好"给 0 —— Dock 的目标就是 60 fps，按 16 ms 排既不掉帧也不空转。
+        // No rate cap: a zero repaint delay means "as soon as possible".
+        // The main loop reads `repaint_in()` to wake at this deadline.
         self.next_repaint = if out.repaint_delay == Duration::MAX {
             None
         } else if out.repaint_delay.is_zero() {
-            Some(Instant::now() + Duration::from_millis(16))
+            Some(Instant::now() + Duration::from_millis(1))
         } else {
             Some(Instant::now() + out.repaint_delay)
         };

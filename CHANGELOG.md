@@ -5,6 +5,165 @@
 
 ---
 
+## 0.9.20 — 帧率设置、延迟与内存（ADR-067，2026-11-06）
+
+- 性能页新增「帧率与同步」卡片：`FrameCap`（0–240，默认 0 = 不限）、
+  `VSync`（按 DWM 刷新率对齐）、`Msaa`（自动 / 关 / 2x / 4x，下次启动生效）。
+  三键进 `[performance]` 段，`CONFIG_VERSION` 升到 3。
+- 取消硬编码帧率限制：删除烟雾 `SMOKE_FRAME` 33 ms 节流及 `next_smoke`；
+  动画分支 16 ms 上限改为统一节拍；设置窗口 `Duration::ZERO` 的 16 ms → 1 ms。
+- 降低绘制延迟：设置窗口 `repaint_in()` 并入主循环等待（消除最长 1000 ms
+  的兜底停顿）；面板轮询 24 → 8 ms。
+- 内存：`msyh.ttc`（8.04 MiB）改为全进程共享，8 窗口时约省 56 MiB；
+  MSAA 大窗口 4x → 2x，2560×1600 约省 31 MiB。
+- 验证：`perf` 节拍 / MSAA 纯函数单测、字体共享单测、DWM 真机测试
+  （实测 16 ms）通过；门禁 383 条测试全绿。
+- 保留：空闲态 `FS_CHECK_MS` 长睡不变（「空闲 0 帧」承诺）。
+
+---
+
+## 0.9.19 — 统一 GPU shader 框架（ADR-066，2026-11-06）
+
+- 新建 `gpu/shaders/`：`ShaderRuntime` 统一 compute pipeline 缓存、
+  `Rgba8Unorm` 输出纹理、egui native texture 注册与回读；WGSL 分文件。
+  frost 从 `blur_gpu.rs` 迁入 `shaders/frost.rs` + `frost.wgsl`。
+- 烟雾光栅化迁 GPU：`smoke.wgsl` 一趟完成 raster + post（双线性、三层
+  噪声、调色、预乘、第二色、增益），输出纹理直接注册给 egui，
+  **每帧约 1.2 MB 位图上传消失**；CPU 只留 `Fluid::step` 与三个场。
+- 图标圆角遮罩（`icon.wgsl`）、烟团贴图（`puff.wgsl`）同样迁 GPU，
+  CPU 版本留作回退与像素级参考。
+- 图标线程允许提交 wgpu compute；线程不变式收敛为「不碰 `egui::Context`」。
+- 质量：6 条 GPU/CPU 逐通道对照 + 1 条端到端出帧真机测试全部通过。
+- 门禁：fmt / `clippy -D warnings` / 380 条测试全绿。
+- 边界：`Fluid::step`、`Noise` 表、bbox 几何、GDI 格式重排、`swap_rb`
+  呈现桥接保留 CPU，判据见 ARCHITECTURE 第三节。
+
+---
+
+## 0.9.18 — IO 与渲染效率（ADR-065，2026-11-06）
+
+- frost 模糊迁到 WGSL compute（`src/blur_gpu.rs`）：两趟可分离高斯 +
+  圆角 coverage，输出 `Rgba8Unorm` 直接注册给 egui，**零回读**。
+  capture 线程只抓屏，字节用 `Arc` 共享给 UI 线程，不再做 CPU 卷积。
+- `blur_rgba` / `compose` 保留为回退路径与像素级对照基准。
+- 主呈现路径合并回读与 DIB 写入（`with_mapped_pixels` +
+  `upload_rgba_strided`）：每帧少一次 1–6 MB 堆分配与整帧拷贝。
+  `draw_frame` 抽出后 `render` / `render_rgba` 仍共用一份绘制逻辑。
+- 实测（debug，同机）：
+  - 640×400 / r=12：CPU blur **242.25 ms** → GPU 提交 **1.78 ms/帧**，
+    10 帧排空 30.66 ms。
+  - 1320×1080 呈现：**6.78 → 6.01 ms/帧**（1.13x），逐像素一致。
+- 质量不变：两条真机测试（compute 输出 vs CPU 参考、egui 出帧 vs CPU
+  出帧）逐通道差 ≤1，均通过。
+- 门禁全绿；Dock 整体窗口路径本轮未真机运行。
+
+---
+
+## 0.9.17 — 依赖更新与遗留写法清理（ADR-064，2026-11-06）
+
+- `cargo update`：12 个传递依赖到约束内最新（js-sys / web-sys 0.3.107、
+  wasm-bindgen 0.2.130、toml 1.2.0、log 0.4.35 等）。直接依赖均已是
+  crates.io 最新版；`glass-backdrop` 上游 HEAD 与固定 rev 一致。
+- `rust-version` 1.88 → 1.95：egui 0.37 / egui-wgpu 0.37 要求 1.95，
+  原声明低于依赖下限。
+- 删死代码：`tool_win::_unused`、`launchpad_win::client_size`（含无用 import）。
+- 删多余豁免：`resmon_win::ppp` 的 `#[allow(dead_code)]`（字段在用）。
+  7 处 `#[allow(clippy::too_many_arguments)]` 改带 reason 的 `#[expect]`；
+  `bin/dock.rs` 一处原本挂在 3 参数的 `frost_spec` 上，连同错位的文档注释
+  一并修正到 `show_menu`。
+- `probe.rs` 两处必须保留的字段豁免改 `#[expect]` 并写明原因。
+- 本轮触及的代码注释改为纯英文、简短；Cargo.toml 注释同步。
+
+验证：`fmt` / `clippy -D warnings` / 379 条测试全绿；两条 `--ignored`
+真机测试通过。Dock 整体窗口路径本轮未真机运行。
+
+---
+
+## 0.9.16 — 第二轮依赖库官方 API 审查（ADR-063，2026-11-06）
+
+接着 0.9.11 的 egui 审查，把 `windows 0.62.2` / `wgpu 30` / Win32 GDI 的
+用法逐条对回官方文档与本地依赖源码。没有新功能，四处改动都有可核查的依据。
+
+### 修：ADR-029 的前提是错的 —— 删掉手写 COM vtable 调用
+
+`platform::shortcut` 原来绕过 wrapper 直接调 `IShellLinkW::GetPath` 的
+vtable，理由是"生成的 wrapper 签名与 COM ABI 不符"。复核 `windows-0.62.2`
+的生成源码：
+
+```rust
+pub unsafe fn GetPath(&self, pszfile: &mut [u16],
+                      pfd: *mut WIN32_FIND_DATAW, fflags: u32) -> Result<()>
+pub unsafe fn GetArguments(&self, pszargs: &mut [u16]) -> Result<()>
+```
+
+与 Microsoft Learn 的 `GetPath(LPWSTR, int, WIN32_FIND_DATAW*, DWORD)` 完全
+一致。ADR-029 里记的 `(&self, flags) -> Result<PWSTR>` 是同一个 Shell 命名
+空间下 **`IKnownFolder::GetPath`**（`mod.rs:27649`），另一个接口。现在只调
+官方 wrapper，`Interface::vtable` / `PWSTR` 那套手工 ABI 代码整段删除，
+升级 `windows` 不再需要核对 vtable 布局。
+
+- 新增 `wide_to_string` 纯函数 + 3 条单测（首个 NUL 截断、空/无 NUL）。
+- 保留 `#[ignore]` 的真机解析测试作为 COM 通路验收。
+
+### 修：图标第三层兜底把图标画到了屏幕上
+
+`platform::icon::draw_into_dib` 创建 32 位 DIB 后，直接把 `GetDC(NULL)` 的
+**屏幕 DC** 交给 `DrawIconEx`，从未 `SelectObject` 把 DIB 选进 DC。结果是
+图标画到屏幕左上角、DIB 恒全 0、`has_visible_pixels()` 永远为假 ——
+第三层兜底从未生效。前两层能覆盖多数现代图标，所以一直没暴露。
+
+- 按 Microsoft Learn `CreateDIBSection` 的 Remarks 补上：内存 DC →
+  `SelectObject(dib)` → `DrawIconEx` → `GdiFlush` → 恢复旧对象 → `DeleteDC`。
+- 所有可能提前 `?` 的计算挪到创建 DIB **之前**，避免漏掉 `DeleteObject`。
+- BGRA→RGBA 的两份相同循环抽成 `bgra_to_rgba` 并补单测。
+- 新增 `#[ignore]` 真机测试：加载系统图标断言 DIB 里真的有像素。
+
+### 加固：wgpu 回读的 map/unmap 生命周期
+
+`offscreen::read_pixels` 依据 wgpu 30 官方文档整理：
+
+- `PollType::Wait` 的语义是"提交完成**且回调已调用**"，所以 poll 返回后
+  用 `try_recv` 取结果即可；原来的 `recv()` 在回调没投递时会让 UI 线程
+  永久挂死。
+- `Buffer::unmap` 之前不能再 `map_async`。原来 `get_mapped_range()` 失败
+  时直接 `?` 返回，缓冲区留在 mapped 状态，之后每帧回读都会失败。
+  现在把取像素包进闭包，**所有**路径都走到 `unmap`。
+- 行去对齐抽成纯函数 `unpad_rows` + 4 条单测（有/无填充、坏几何、零高度）。
+
+### 加固：core::layout 不再有生产 `expect`
+
+`WidgetStrip::left_of` 的两处 `items[j].expect("len 之内必有值")` 改成
+`Option::?`：条带字段是 `pub`，手工构造或将来改填充
+规则都可能留下空洞，坏数据应当退化为"定位失败"而不是让 UI 线程 panic。
+新增 `sparse_widget_strip_does_not_panic` 覆盖左右两侧与越界下标。
+
+### 文档
+
+`BUILD.md` 的依赖表与产物表还停在 M0（列着已删除的 `crossbeam-channel` /
+`arc-swap` / `raw-window-handle`、`minidock-spike.exe` / `MiniDock.exe`），
+`README.md` 的启动命令指向已删除的 spike、hooks 配置命令少一个空格，
+`ARCHITECTURE.md` 第六节仍写着 `ArcSwap` + GPU compute 模糊。全部对齐实现
+（`ARCHITECTURE.md` 顺带按 `.gitattributes` 的 `eol=lf` 规范回 LF）。
+
+### 门禁与验证
+
+- `fmt --check` / `clippy -D warnings` / `cargo test --workspace`：全绿，
+  379 条测试通过（core 228 / gpu 93 / platform 37 / settings 21）。
+- **真机验证**（桌面会话，显式 `--ignored`，两条都过）：
+  - `resolves_a_real_start_menu_shortcut` →
+    `Access.lnk -> C:\Program Files\Microsoft Office\root\Office16\MSACCESS.EXE`，
+    证明官方 wrapper 的 COM 通路可用，不需要手写 vtable。
+  - `dib_fallback_draws_into_the_dib_not_the_screen` → 通过；修复前 DIB
+    恒全 0，这条测试必然拿到 `None`。
+- egui-wgpu 的 `textures_delta` 顺序核对后**不改**：官方 `winit.rs` 同样是
+  先 `set` 上传、在 submit 之后才 `free`，与 `frame.rs` 一致。
+- 顺手修 `scripts/build.sh --exe`：它还打印着 ADR-035 已删除的
+  `MiniDock.exe`，改成 `minidock-dock.exe`。
+- **未验证**：Dock 整体（透明窗口、命中、出帧）本轮没有真机运行；这轮改动
+  只覆盖纯逻辑、快捷方式解析与取图标路径。
+
+---
+
 ## 0.9.15 — 烟雾几何重构：跟着栏体走、网格不再抖（ADR-062，2026-11-05）
 
 ### 改：`Fluid` 的位置改由「栏体矩形」直接给定

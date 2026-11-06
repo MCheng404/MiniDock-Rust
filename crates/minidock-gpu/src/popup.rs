@@ -19,9 +19,8 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
 
-/// 轮询间隔。24 ms 是"人感觉不到延迟"与"不白烧 CPU"的折中：
-/// 面板开着时每秒醒 42 次，每次只读两个按键状态，量级是微秒。
-pub const POLL_MS: u32 = 24;
+/// 轮询间隔。8 ms：面板开着时读两个按键状态，缩小"点外面收起"的延迟。
+pub const POLL_MS: u32 = 8;
 
 /// 按键监视：把"按下瞬间"从持续按住里分出来。
 #[derive(Debug, Default)]

@@ -1,20 +1,16 @@
-//! 从路径取图标（HICON → RGBA）。
+//! HICON to RGBA, in three fallbacks:
+//! 1. `GetIconInfo` + `GetDIBits(hbmColor)` for 32-bit icons with alpha.
+//! 2. Rebuild alpha from `hbmMask` for legacy 24-bit icons.
+//! 3. `DrawIconEx` into a 32-bit DIB (see `draw_into_dib`).
 //!
-//! 三条取像素的路径，从优到劣：
-//!
-//! 1. `GetIconInfo` + `GetDIBits(hbmColor)`：32 位图标自带 alpha；
-//! 2. 全透明（老式 24 位图标，alpha 全 0）→ 用 `hbmMask` 造 alpha；
-//! 3. 仍拿不到 → `DrawIconEx` 画进 32 位 DIB。
-//!
-//! 不经 GDI+ 中转：`GdipCreateBitmapFromHICON` 会给不少图标留一块黑底。
-//!
-//! 尺寸先 JUMBO（256）再 EXTRALARGE（48）。Dock 图标在 150% DPI 下最大
-//! 88 逻辑点 ≈ 132 像素，48 像素放大后会糊。
+//! GDI+ is skipped: `GdipCreateBitmapFromHICON` leaves a black background.
+//! JUMBO (256) is tried before EXTRALARGE (48) for 150% DPI.
 
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
-    CreateDIBSection, DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC, GetDIBits,
+    GetObjectW, ReleaseDC, SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
+    HBITMAP, HGDIOBJ,
 };
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
@@ -268,25 +264,33 @@ fn from_color_bitmap(hbm_color: HBITMAP, hbm_mask: HBITMAP) -> Option<IconBitmap
         }
     }
 
-    // BGRA → RGBA。顺带把全透明像素的 RGB 清零：
-    // 预乘 alpha 的绘制路径里，残留的 RGB 会在边缘透出脏色。
-    let mut rgba = vec![0u8; pixels * 4];
-    for i in 0..pixels {
-        let s = i * 4;
-        let a = bgra[s + 3];
-        if a == 0 {
-            continue;
-        }
-        rgba[s] = bgra[s + 2];
-        rgba[s + 1] = bgra[s + 1];
-        rgba[s + 2] = bgra[s];
-        rgba[s + 3] = a;
-    }
+    let rgba = bgra_to_rgba(&bgra);
     Some(IconBitmap {
         width: w,
         height: h,
         rgba,
     })
+}
+
+/// BGRA to RGBA; fully transparent pixels are zeroed.
+fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
+    let mut rgba = vec![0u8; bgra.len()];
+    // Ignore the trailing remainder (callers always pass a multiple of 4).
+    for (src, dst) in bgra
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgba.as_chunks_mut::<4>().0)
+    {
+        if src[3] == 0 {
+            continue;
+        }
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = src[3];
+    }
+    rgba
 }
 
 /// 读一张 32 位位图的像素，返回 **BGRA**（GDI 的原生顺序）。
@@ -325,15 +329,20 @@ fn read_dib(hbm: HBITMAP, w: u32, h: u32) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// 第三层：把图标直接画进 32 位 DIB。`DrawIconEx` 会正确处理掩码与 alpha。
+/// Fallback: draw the icon into a 32-bit DIB with `DrawIconEx`.
+/// The DIB must be selected into a memory DC before drawing, and `GdiFlush`
+/// must run before reading `bits` (Microsoft Learn, CreateDIBSection Remarks).
 fn draw_into_dib(hicon: HICON) -> Option<IconBitmap> {
-    // 先问图标本身多大；问不到就按 256 试（jumbo 的常见尺寸）。
+    // Resolve every fallible computation before creating GDI objects; an early
+    // return past that point would leak the DIB handle.
     let size = icon_size(hicon).unwrap_or(256);
+    let side = i32::try_from(size).ok()?;
+    let pixels = usize::try_from(size).ok()? * usize::try_from(size).ok()?;
 
     let mut bi = BITMAPINFO::default();
     bi.bmiHeader.biSize = u32::try_from(std::mem::size_of::<BITMAPINFOHEADER>()).ok()?;
-    bi.bmiHeader.biWidth = i32::try_from(size).ok()?;
-    bi.bmiHeader.biHeight = -i32::try_from(size).ok()?;
+    bi.bmiHeader.biWidth = side;
+    bi.bmiHeader.biHeight = -side;
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = 0;
@@ -347,38 +356,34 @@ fn draw_into_dib(hicon: HICON) -> Option<IconBitmap> {
         return None;
     }
 
-    let dc = unsafe { GetDC(None) };
-    if dc.is_invalid() {
+    // Memory DC compatible with the screen; the DIB is the render target.
+    let screen = unsafe { GetDC(None) };
+    if screen.0.is_null() {
         let _ = unsafe { DeleteObject(HGDIOBJ(dib.0)) };
         return None;
     }
-    let (sw, sh) = match (i32::try_from(size), i32::try_from(size)) {
-        (Ok(a), Ok(b)) => (a, b),
-        _ => return None,
-    };
-    let drawn = unsafe { DrawIconEx(dc, 0, 0, hicon, sw, sh, 0, None, DI_NORMAL) };
+    let dc = unsafe { CreateCompatibleDC(Some(screen)) };
+    unsafe { ReleaseDC(None, screen) };
+    if dc.0.is_null() {
+        let _ = unsafe { DeleteObject(HGDIOBJ(dib.0)) };
+        return None;
+    }
+
+    let old = unsafe { SelectObject(dc, HGDIOBJ(dib.0)) };
+    let drawn = unsafe { DrawIconEx(dc, 0, 0, hicon, side, side, 0, None, DI_NORMAL) };
     unsafe {
-        ReleaseDC(None, dc);
+        // `bits` is shared with GDI; flush before reading it.
+        let _ = GdiFlush();
+        SelectObject(dc, old); // restore before deleting the DIB
+        let _ = DeleteDC(dc);
     }
     if drawn.is_err() {
         let _ = unsafe { DeleteObject(HGDIOBJ(dib.0)) };
         return None;
     }
 
-    let pixels = usize::try_from(size).ok()? * usize::try_from(size).ok()?;
     let raw = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), pixels * 4) };
-    let mut rgba = vec![0u8; pixels * 4];
-    for i in 0..pixels {
-        let s = i * 4;
-        let a = raw[s + 3];
-        if a == 0 {
-            continue;
-        }
-        rgba[s] = raw[s + 2];
-        rgba[s + 1] = raw[s + 1];
-        rgba[s + 2] = raw[s];
-        rgba[s + 3] = a;
-    }
+    let rgba = bgra_to_rgba(raw);
     let _ = unsafe { DeleteObject(HGDIOBJ(dib.0)) };
 
     let bmp = IconBitmap {
@@ -413,4 +418,42 @@ fn icon_size(hicon: HICON) -> Option<u32> {
         return None;
     }
     u32::try_from(bm.bmWidth).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION};
+
+    #[test]
+    fn bgra_conversion_swaps_channels_and_clears_transparent_rgb() {
+        let bgra = [
+            10, 20, 30, 255, // opaque
+            40, 50, 60, 0, // alpha 0 -> zeroed
+            1, 2, 3, 128, // alpha preserved
+        ];
+        assert_eq!(
+            bgra_to_rgba(&bgra),
+            vec![30, 20, 10, 255, 0, 0, 0, 0, 3, 2, 1, 128]
+        );
+    }
+
+    #[test]
+    fn bgra_conversion_tolerates_empty_and_ragged_input() {
+        assert!(bgra_to_rgba(&[]).is_empty());
+        // A trailing partial pixel is dropped, not read out of bounds.
+        assert_eq!(bgra_to_rgba(&[1, 2, 3, 4, 9, 9]), vec![3, 2, 1, 4, 0, 0]);
+    }
+
+    /// Real HICON must produce visible pixels in the DIB.
+    /// Run: `cargo test -p minidock-platform --lib icon -- --ignored`
+    #[test]
+    #[ignore = "需要桌面会话，显式 --ignored 运行"]
+    fn dib_fallback_draws_into_the_dib_not_the_screen() {
+        // Shared system icon; do not call DestroyIcon.
+        let hicon = unsafe { LoadIconW(None, IDI_APPLICATION) }.expect("加载系统图标");
+        let bmp = draw_into_dib(hicon).expect("DIB 里应当有可见像素");
+        assert!(bmp.has_visible_pixels());
+        assert_eq!(bmp.width, bmp.height);
+    }
 }

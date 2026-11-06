@@ -10,7 +10,11 @@
 //! - 打包 Noto Sans SC 子集要 +1~3 MB，而系统字体本来就在；
 //! - 代价是"换机器可能没有这个字体"，所以按优先级逐个尝试并返回是否成功。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// One copy of the font bytes is shared by every `egui::Context` in the
+/// process. `FontData` wraps an `Arc<Blob>`, so cloning it is cheap.
+static CJK: OnceLock<Option<Arc<egui::FontData>>> = OnceLock::new();
 
 /// 按优先级尝试的系统字体。第一个能读到的就装。
 const CANDIDATES: &[(&str, u32)] = &[
@@ -21,25 +25,26 @@ const CANDIDATES: &[(&str, u32)] = &[
     (r"C:\Windows\Fonts\simsun.ttc", 0), // 宋体
 ];
 
-/// 装载 CJK 字体。返回是否成功（失败时界面仍可用，只是中文会变方块）。
-pub fn install_cjk(ctx: &egui::Context) -> bool {
-    let Some((path, index)) = CANDIDATES
+fn load_cjk() -> Option<Arc<egui::FontData>> {
+    let (path, index) = CANDIDATES
         .iter()
-        .find(|(p, _)| std::path::Path::new(p).is_file())
-    else {
-        return false;
-    };
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-
+        .find(|(p, _)| std::path::Path::new(p).is_file())?;
+    let bytes = std::fs::read(path).ok()?;
     let mut data = egui::FontData::from_owned(bytes);
     data.index = *index; // TTC 里选第几个 face
+    Some(Arc::new(data))
+}
+
+/// 装载 CJK 字体。返回是否成功（失败时界面仍可用，只是中文会变方块）。
+pub fn install_cjk(ctx: &egui::Context) -> bool {
+    let Some(data) = CJK.get_or_init(load_cjk).as_ref() else {
+        return false;
+    };
 
     let mut fonts = egui::FontDefinitions::default();
     fonts
         .font_data
-        .insert("system-cjk".to_owned(), Arc::new(data));
+        .insert("system-cjk".to_owned(), data.clone());
     // 插到族表最前：中文优先用系统字体，拉丁字形仍会回落到后面自带的字体。
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
@@ -54,6 +59,8 @@ pub fn install_cjk(ctx: &egui::Context) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn font_file_is_discoverable_on_this_machine() {
         // 这条不是断言"一定有字体"，而是给出诊断：开发机没有中文字体时
@@ -62,5 +69,19 @@ mod tests {
             .iter()
             .any(|(p, _)| std::path::Path::new(p).is_file());
         eprintln!("CJK 字体可用: {found}");
+    }
+
+    #[test]
+    fn font_bytes_are_shared_between_contexts() {
+        let a = egui::Context::default();
+        let b = egui::Context::default();
+        if !install_cjk(&a) || !install_cjk(&b) {
+            eprintln!("no CJK font on this machine; skip");
+            return;
+        }
+        let data = CJK.get().unwrap().as_ref().unwrap();
+        let refs = Arc::strong_count(data);
+        eprintln!("shared CJK font refs: {refs}");
+        assert!(refs >= 3, "static + 2 contexts must share one Arc");
     }
 }

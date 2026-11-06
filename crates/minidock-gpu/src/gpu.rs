@@ -10,7 +10,22 @@
 //! - 非空 → 在 DX12 实例里按**名字**匹配。匹配不到就回退自动并在日志里说清楚，
 //!   而不是让程序起不来 —— 换机器、换驱动都会让名字变。
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use egui_wgpu::wgpu;
+
+/// MSAA preference from config: 0 = auto, 1/2/4 = forced. Process-wide,
+/// read when each `FrameRenderer` is created.
+static MSAA_PREF: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_msaa_preference(v: i32) {
+    MSAA_PREF.store(v.clamp(0, 4) as u32, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn msaa_preference() -> u32 {
+    MSAA_PREF.load(Ordering::Relaxed)
+}
 
 /// GPU 初始化错误。
 #[derive(Debug)]

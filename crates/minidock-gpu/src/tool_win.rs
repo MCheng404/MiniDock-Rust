@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, CornerRadius, FontId, Rect as EguiRect};
-use minidock_core::tool::{format_ms, Todo, ToolMode, ToolState, MAX_TODOS};
+use minidock_core::tool::{format_ms, ToolMode, ToolState, MAX_TODOS};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -934,7 +934,3 @@ pub fn summary(state: &ToolState, now_ms: i64) -> String {
         state.todos.len()
     )
 }
-
-/// 空待办列表的占位（避免 `Todo` 未使用警告）。
-#[allow(dead_code)]
-fn _unused(_: Todo) {}

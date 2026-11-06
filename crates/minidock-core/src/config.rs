@@ -63,7 +63,7 @@ pub enum Key {
 }
 
 /// 新配置格式的版本号。改动键名或分区就 +1。
-pub const CONFIG_VERSION: i32 = 2;
+pub const CONFIG_VERSION: i32 = 3;
 
 /// 新版存放元信息的段。
 pub const META_SECTION: &str = "meta";
@@ -103,6 +103,8 @@ fn section_of_numeric(name: &str) -> &'static str {
         "LpFrost" => return "widgets.launchpad",
         // 设置窗口毛玻璃 / 栏体左右内边距 / 界面缩放。
         "UiFrost" | "HPad" | "UiScale" | "UiAccent" | "UiAccentDock" => return "appearance",
+        // 帧率与同步（Rust 版自有）。
+        "FrameCap" | "VSync" | "Msaa" => return "performance",
         // 右键菜单毛玻璃。
         "MenuFrost" => return "menu",
         // 分割线拖动等比缩放。
@@ -283,6 +285,11 @@ pub const NUMERIC_KEYS: &[(&str, i32, i32, i32, bool, bool)] = &[
     ("UiAccent", -1, 16777215, -1, false, false),
     // 主题色是否也作用到 Dock（栏体渐变 + 运行指示点）。
     ("UiAccentDock", 0, 1, 0, true, false),
+    // Frame pacing. FrameCap 0 = unlimited; VSync aligns to DWM refresh.
+    ("FrameCap", 0, 240, 0, false, false),
+    ("VSync", 0, 1, 0, true, false),
+    // MSAA samples: 0 = auto by window area, 1/2/4 = forced (next launch).
+    ("Msaa", 0, 4, 0, false, false),
 ];
 
 impl Key {
@@ -492,6 +499,12 @@ impl Key {
     pub const UI_ACCENT: Key = Key::Numeric(96);
     /// `UiAccentDock`：主题色是否同步到 Dock。
     pub const UI_ACCENT_DOCK: Key = Key::Numeric(97);
+    /// `FrameCap`：帧率上限，0 = 不限制。
+    pub const FRAME_CAP: Key = Key::Numeric(98);
+    /// `VSync`：与 DWM 合成刷新率对齐。
+    pub const VSYNC: Key = Key::Numeric(99);
+    /// `Msaa`：0 = 按窗口面积自动，1/2/4 = 强制档位。
+    pub const MSAA: Key = Key::Numeric(100);
 }
 
 impl Key {
@@ -645,6 +658,9 @@ impl Key {
         Key::UI_SCALE,
         Key::UI_ACCENT,
         Key::UI_ACCENT_DOCK,
+        Key::FRAME_CAP,
+        Key::VSYNC,
+        Key::MSAA,
     ];
 
     /// 需要读写的全部键：行序表在前，自有键在后。
@@ -892,6 +908,7 @@ impl Key {
             Key::Blur => (1, 14),
             Key::Margin => (0, 150),
             Key::PlateRadius => (0, 50),
+            Key::FRAME_CAP => (0, 240),
             _ => return None,
         })
     }
@@ -1630,6 +1647,9 @@ mod tests {
             (Key::UI_SCALE, "UiScale"),
             (Key::UI_ACCENT, "UiAccent"),
             (Key::UI_ACCENT_DOCK, "UiAccentDock"),
+            (Key::FRAME_CAP, "FrameCap"),
+            (Key::VSYNC, "VSync"),
+            (Key::MSAA, "Msaa"),
         ];
         for &(key, name) in pairs {
             assert_eq!(key.name(), name, "常量与表行错位");
@@ -1985,7 +2005,8 @@ mod tests {
         let mut out = Ini::new();
         c.write_ini(&mut out);
         assert_eq!(out.get("appearance", "icon_size"), Some("64"));
-        assert_eq!(out.get(META_SECTION, "version"), Some("2"));
+        let version = CONFIG_VERSION.to_string();
+        assert_eq!(out.get(META_SECTION, "version"), Some(version.as_str()));
     }
 
     /// 每个键的段名都得是合法且已知的段，否则写出来的文件会散成
@@ -2069,7 +2090,8 @@ mod tests {
 
         // 旧段应当被清掉，新段就位，版本号写上。
         assert_eq!(ini.len_of(LEGACY_SECTION), 0, "旧段没删干净");
-        assert_eq!(ini.get(META_SECTION, "version"), Some("2"));
+        let version = CONFIG_VERSION.to_string();
+        assert_eq!(ini.get(META_SECTION, "version"), Some(version.as_str()));
         // 条目段必须原样保留 —— 升级只管配置，不碰条目。
         assert_eq!(ini.get("Items", "Count"), Some("1"));
 

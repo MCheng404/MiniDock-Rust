@@ -22,11 +22,11 @@ source scripts/env.sh          # Inject MSVC + Windows SDK
 cargo build                    # Default Target: x86_64-pc-windows-msvc
 cargo test  --workspace        # Logic Layer + Settings Interface (No Need for Monitor / GPU)
 ./scripts/build.sh --gate      # Full Gate Check: fmt + clippy + Test (Run This Before Submission)
-# M0 Spike: Transparent GPU Window + Settings Interface, Exit with Esc
-./scripts/build.sh --run -p minidock-gpu --bin minidock-spike
+# Run the Dock (the only executable; the M0 spike was removed in ADR-036)
+./scripts/build.sh --run -p minidock-gpu --bin minidock-dock
 # Memory Probe: Compare Each Backend on the Same Graphics Card (Table See Section 5 of BUILD.md)
 ./scripts/probe-mem.sh
-PROBE_LIST=1./target/x86_64-pc-windows-msvc/release/probe.exe   # First Check Adapter List
+PROBE_LIST=1 ./target/x86_64-pc-windows-msvc/release/probe.exe   # First Check Adapter List
 ```
-**After Cloning, Do It Once** `git config core.hooksPath.githooks`, Otherwise the `fmt` / `clippy` Gate Check Before Submission Will Not Take Effect. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for Submission Information Format and Branch Convention.
+**After Cloning, Do It Once** `git config core.hooksPath .githooks`, Otherwise the `fmt` / `clippy` Gate Check Before Submission Will Not Take Effect. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for Submission Information Format and Branch Convention.
 Dependency Versions: `egui 0.37` / `egui-wgpu 0.37` / `wgpu 30` / `windows 0.62`, All Taking the Latest at Present.

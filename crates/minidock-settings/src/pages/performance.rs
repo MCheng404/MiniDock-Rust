@@ -3,8 +3,8 @@
 use egui::{RichText, Ui};
 use minidock_core::config::{BgMode, Config, Key};
 
-use super::options::{CLOCK_SHOW_OPTS, DATE_FMT_OPTS};
-use super::widgets::{button, card, combo, row, toggle, toggle_derived, Ctx};
+use super::options::{CLOCK_SHOW_OPTS, DATE_FMT_OPTS, MSAA_OPTS};
+use super::widgets::{button, card, combo, row, slider, toggle, toggle_derived, Ctx};
 use super::Command;
 
 pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
@@ -16,6 +16,29 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
                 .weak(),
         );
     });
+
+    card(
+        ctx,
+        ui,
+        "帧率与同步",
+        "默认不限制帧率；需要省电时可设上限或对齐刷新率。",
+        |ctx, ui| {
+            slider(ctx, ui, Key::FRAME_CAP, "帧率上限（0 = 不限制）", " FPS");
+            toggle(
+                ctx,
+                ui,
+                Key::VSYNC,
+                "垂直同步",
+                "按 DWM 合成刷新率对齐出帧，覆盖帧率上限",
+            );
+            combo(ctx, ui, Key::MSAA, "抗锯齿（下次启动生效）", MSAA_OPTS);
+            ui.label(
+                RichText::new("降低抗锯齿档位可显著减少每窗口的常驻显存。")
+                    .small()
+                    .weak(),
+            );
+        },
+    );
 
     card(ctx, ui, "当前占用", "", |ctx, ui| {
         ui.monospace(&ctx.state.stats);

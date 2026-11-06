@@ -27,10 +27,10 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, RegisterClassW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SW_SHOW,
-    WM_APP, WM_CHAR, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, SW_SHOW, WM_APP, WM_CHAR,
+    WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
@@ -282,7 +282,7 @@ impl LaunchpadWindow {
             drag_page: 0,
             icons: HashMap::new(),
             asked: HashMap::new(),
-            loader: IconLoader::spawn(Waker::new(hwnd)).ok(),
+            loader: IconLoader::spawn(Waker::new(hwnd), Some(gpu)).ok(),
             ime: Ime::new(),
             menu: None,
             menu_at: (0.0, 0.0),
@@ -1347,20 +1347,13 @@ impl LaunchpadWindow {
             .find(|(_, r)| r.contains(p))
             .map(|(h, _)| *h)
     }
-
-    /// 客户区尺寸（逻辑点）。
-    #[allow(dead_code)]
-    fn client_size(&self) -> (f32, f32) {
-        let mut rc = windows::Win32::Foundation::RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut rc);
-        }
-        (rc.right as f32 / self.ppp, rc.bottom as f32 / self.ppp)
-    }
 }
 
 /// 画整个起动台。返回（命中区，图标区）。
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "argument group is the API boundary"
+)]
 fn draw(
     ui: &mut egui::Ui,
     dark: bool,
@@ -1912,7 +1905,10 @@ fn hit_cell_in(
     Some(Hit::Cell(row * cols + col))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "argument group is the API boundary"
+)]
 fn draw_folder_panel(
     ui: &mut egui::Ui,
     dark: bool,

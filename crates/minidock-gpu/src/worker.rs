@@ -27,13 +27,17 @@
 //!
 //! # 线程里绝对不做的事
 //!
-//! - 不碰 `wgpu::Device` / `egui::Context`（纹理与图集必须由 UI 线程上传）；
+//! - 不碰 `egui::Context`（纹理注册与图集上传必须由 UI 线程做）；
 //! - 不创建窗口、不改窗口状态；
 //! - 不持有 `Dock` 的引用（只处理自己那份数据的副本）。
+//!
+//! `wgpu` compute 是例外：`Device` / `Queue` 是 `Send + Sync`，图标圆角
+//! 遮罩在工作线程提交 compute 并回读，不经过 egui。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -51,6 +55,9 @@ use minidock_platform::win::ensure_com;
 use rayon::prelude::*;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+
+use crate::gpu::Gpu;
+use crate::shaders::icon::IconShader;
 
 /// "后台有结果可取"的自定义消息。
 ///
@@ -122,12 +129,14 @@ pub struct IconLoader {
 
 impl IconLoader {
     /// 起一个取图标线程。线程创建失败时返回错误，调用方可以退回同步加载。
-    pub fn spawn(waker: Waker) -> std::io::Result<Self> {
+    pub fn spawn(waker: Waker, gpu: Option<&Gpu>) -> std::io::Result<Self> {
+        let shader: Option<Arc<IconShader>> =
+            gpu.map(|g| Arc::new(IconShader::new(&g.device, &g.queue)));
         let (req_tx, req_rx) = mpsc::channel::<IconRequest>();
         let (res_tx, res_rx) = mpsc::channel::<ReadyIcon>();
         let thread = thread::Builder::new()
             .name("minidock-icons".to_owned())
-            .spawn(move || icon_thread(req_rx, res_tx, waker))?;
+            .spawn(move || icon_thread(req_rx, res_tx, waker, shader))?;
         Ok(Self {
             tx: Some(req_tx),
             rx: res_rx,
@@ -158,7 +167,12 @@ impl Drop for IconLoader {
     }
 }
 
-fn icon_thread(rx: Receiver<IconRequest>, tx: Sender<ReadyIcon>, waker: Waker) {
+fn icon_thread(
+    rx: Receiver<IconRequest>,
+    tx: Sender<ReadyIcon>,
+    waker: Waker,
+    shader: Option<Arc<IconShader>>,
+) {
     // 这个线程要碰 shell 的 COM 对象（`SHGetImageList` 返回的 `IImageList`），
     // 必须**在本线程**初始化 COM。`ensure_com` 是每线程一次，任意线程可调。
     ensure_com();
@@ -189,7 +203,7 @@ fn icon_thread(rx: Receiver<IconRequest>, tx: Sender<ReadyIcon>, waker: Waker) {
         // 上多核的地方。
         let ready: Vec<ReadyIcon> = fetched
             .into_par_iter()
-            .filter_map(|(req, bmp)| bmp.map(|b| process(&req, b)))
+            .filter_map(|(req, bmp)| bmp.map(|b| process(&req, b, shader.as_deref())))
             .collect();
 
         let produced = !ready.is_empty();
@@ -218,7 +232,7 @@ fn fetch_icon(req: &IconRequest) -> Option<IconBitmap> {
 }
 
 /// 纯 CPU 的那一半：判定填充方式、按需做圆角遮罩。
-fn process(req: &IconRequest, bmp: IconBitmap) -> ReadyIcon {
+fn process(req: &IconRequest, bmp: IconBitmap, shader: Option<&IconShader>) -> ReadyIcon {
     let fit = fit_icon(
         &bmp.rgba,
         bmp.width,
@@ -227,7 +241,12 @@ fn process(req: &IconRequest, bmp: IconBitmap) -> ReadyIcon {
     );
     let mut rgba = bmp.rgba;
     if let Some(r) = fit.rounded {
-        apply_round_mask(&mut rgba, bmp.width, fit.bbox, r);
+        let bbox = (fit.bbox.x0, fit.bbox.y0, fit.bbox.x1, fit.bbox.y1);
+        let masked = shader.and_then(|s| s.round_mask(&rgba, bmp.width, bmp.height, bbox, r));
+        match masked {
+            Some(out) => rgba = out,
+            None => apply_round_mask(&mut rgba, bmp.width, fit.bbox, r),
+        }
     }
     ReadyIcon {
         index: req.index,
@@ -655,7 +674,7 @@ mod tests {
     #[test]
     #[ignore = "要调 shell，手动运行"]
     fn icon_loader_extracts_on_a_worker_thread() {
-        let loader = IconLoader::spawn(Waker::new(HWND::default())).expect("起线程");
+        let loader = IconLoader::spawn(Waker::new(HWND::default()), None).expect("起线程");
         loader.submit(IconRequest {
             index: 0,
             kind: ItemKind::File,
@@ -744,7 +763,7 @@ mod tests {
             height: 2,
             rgba: vec![255u8; 16],
         };
-        let ready = process(&req, bmp);
+        let ready = process(&req, bmp, None);
         assert_eq!(ready.index, 3);
         assert_eq!(ready.path, r"C:\x\a.exe");
         assert_eq!((ready.width, ready.height), (2, 2));

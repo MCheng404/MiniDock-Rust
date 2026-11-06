@@ -95,24 +95,18 @@ impl LayeredPresenter {
         })
     }
 
-    /// 把 RGBA（预乘）写成 BGRA 到 DIB。
-    ///
-    /// 每帧一次、1320×1080 下是 140 万像素，按 u32 搬运而不是四次字节赋值。
-    ///
-    /// 实测（release，同机）：u32 交换 0.80 ms/帧，原逐字节写法 1.16 ms/帧，
-    /// **约 1.45x**。只是省 0.36 ms，不是什么数量级 —— 真要紧的开销在
-    /// GPU 回读和 `UpdateLayeredWindow`，这里属于顺手能做对的地方。
-    pub fn upload_rgba(&mut self, rgba: &[u8]) {
-        let pixels = (self.width as usize) * (self.height as usize);
-        debug_assert_eq!(rgba.len(), pixels * 4);
+    /// Write padded RGBA rows straight into the DIB, swapping R/B.
+    /// The present path never allocates a tightly packed intermediate buffer.
+    pub fn upload_rgba_strided(&mut self, src: &[u8], src_stride: usize) {
+        let row = self.width as usize * 4;
+        let rows = self.height as usize;
+        debug_assert!(src_stride >= row);
+        debug_assert!(src.len() >= src_stride * rows.saturating_sub(1) + row);
 
-        // SAFETY: `bits` 由 `CreateDIBSection` 分配，长度恰为 pixels*4；
-        // 调用方保证 `rgba` 同长。
-        // 两个切片都对齐到 u32：DIB 按 4 字节对齐分配，rgba 来自 wgpu
-        // 回读缓冲（本身就是 4 字节对齐的像素数组）。
-        let src = unsafe { std::slice::from_raw_parts(rgba.as_ptr().cast::<u32>(), pixels) };
-        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits.cast::<u32>(), pixels) };
-        swap_rb(dst, src);
+        // SAFETY: `bits` owns rows*row bytes; source and DIB rows are 4-byte
+        // aligned (wgpu readback is 256-byte aligned per row).
+        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, row * rows) };
+        swap_rb_strided(dst, src, row, rows, src_stride);
     }
 
     /// 调试用：读 DIB 里的一个像素（BGRA）。
@@ -168,6 +162,19 @@ fn swap_rb(dst: &mut [u32], src: &[u32]) {
     }
 }
 
+/// Swap R/B from padded source rows into a tightly packed destination.
+/// SAFETY: both slices are 4-byte aligned with at least the documented lengths.
+fn swap_rb_strided(dst: &mut [u8], src: &[u8], row: usize, rows: usize, stride: usize) {
+    let pixels = row / 4;
+    for y in 0..rows {
+        let s = &src[y * stride..y * stride + row];
+        let d = &mut dst[y * row..(y + 1) * row];
+        let s32 = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u32>(), pixels) };
+        let d32 = unsafe { std::slice::from_raw_parts_mut(d.as_mut_ptr().cast::<u32>(), pixels) };
+        swap_rb(d32, s32);
+    }
+}
+
 impl Drop for LayeredPresenter {
     fn drop(&mut self) {
         unsafe {
@@ -180,7 +187,71 @@ impl Drop for LayeredPresenter {
 
 #[cfg(test)]
 mod tests {
-    use super::swap_rb;
+    use super::{swap_rb, swap_rb_strided};
+
+    #[test]
+    fn swap_rb_strided_skips_row_padding() {
+        // Two 1-pixel rows, padded to 8 bytes each.
+        let row = 4usize;
+        let stride = 8usize;
+        let pixels = [0xAABB_CCDDu32, 0, 0x1122_3344u32, 0];
+        let src: Vec<u8> = pixels.iter().flat_map(|p| p.to_ne_bytes()).collect();
+        let mut dst = vec![0u8; row * 2];
+        swap_rb_strided(&mut dst, &src, row, 2, stride);
+
+        let mut expected = vec![0u8; row * 2];
+        let packed = [0xAABB_CCDDu32, 0x1122_3344u32];
+        let expected_u32 =
+            unsafe { std::slice::from_raw_parts_mut(expected.as_mut_ptr().cast::<u32>(), 2) };
+        swap_rb(expected_u32, &packed);
+        assert_eq!(dst, expected);
+    }
+
+    /// Old present path (tight copy + swap) vs direct strided write.
+    /// Prints numbers only; the result equality is asserted.
+    #[test]
+    #[ignore = "throughput benchmark; run with --ignored"]
+    fn strided_present_throughput() {
+        const W: usize = 1320;
+        const H: usize = 1080;
+        const REPS: usize = 20;
+        let row = W * 4;
+        let stride = row.div_ceil(256) * 256;
+        let padded: Vec<u8> = (0..H * stride).map(|i| (i % 251) as u8).collect();
+        let mut dst_old = vec![0u8; row * H];
+        let mut dst_new = vec![0u8; row * H];
+
+        // Old path allocates a tight buffer every frame, exactly like
+        // `Offscreen::read_pixels` -> `unpad_rows`.
+        let t0 = std::time::Instant::now();
+        for _ in 0..REPS {
+            let mut tight = Vec::with_capacity(row * H);
+            for y in 0..H {
+                tight.extend_from_slice(&padded[y * stride..y * stride + row]);
+            }
+            let s = unsafe { std::slice::from_raw_parts(tight.as_ptr().cast::<u32>(), W * H) };
+            let d = unsafe {
+                std::slice::from_raw_parts_mut(dst_old.as_mut_ptr().cast::<u32>(), W * H)
+            };
+            swap_rb(d, s);
+        }
+        let old = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..REPS {
+            swap_rb_strided(&mut dst_new, &padded, row, H, stride);
+        }
+        let new = t1.elapsed();
+
+        println!(
+            "old (tight copy + swap): {:.2} ms/frame | strided: {:.2} ms/frame | {:.2}x | equal={}",
+            old.as_secs_f64() * 1000.0 / REPS as f64,
+            new.as_secs_f64() * 1000.0 / REPS as f64,
+            old.as_secs_f64() / new.as_secs_f64(),
+            dst_old == dst_new
+        );
+        assert_eq!(dst_old, dst_new);
+    }
 
     #[test]
     fn swap_rb_matches_byte_wise_reference() {

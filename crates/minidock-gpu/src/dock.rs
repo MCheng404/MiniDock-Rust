@@ -1593,7 +1593,7 @@ impl Dock {
     }
 
     /// 单个图标：可选底盘 + 首字占位。
-    #[allow(clippy::too_many_arguments)] // 参数就是画一张图标所需的全部输入
+    #[expect(clippy::too_many_arguments, reason = "all inputs for one icon")]
     fn paint_icon(
         &self,
         painter: &egui::Painter,

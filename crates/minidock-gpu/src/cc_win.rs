@@ -466,7 +466,10 @@ impl CcWindow {
 }
 
 /// 画整块。返回（磁贴命中区，滑块命中区）。
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "argument group is the API boundary"
+)]
 fn draw_panel(
     ui: &mut egui::Ui,
     dark: bool,

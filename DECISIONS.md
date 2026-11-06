@@ -832,6 +832,12 @@ C 版用 `hash(边, 厚度, 显示器矩形)` 判断要不要重新提交。问�
 
 ## ADR-029 · `.lnk` 解析绕过 windows crate 的 wrapper，直接调 vtable
 
+> **2026-11-06 修订：本条的技术前提有误，已作废，见文末 ADR-063。**
+> `windows` 0.62.2 给 `IShellLinkW::GetPath` 生成的 wrapper 与 COM ABI
+> 完全一致；下面记的 `(&self, flags) -> Result<PWSTR>` 其实是另一个接口
+> `IKnownFolder::GetPath` 的签名。手写 vtable 调用已整体删除。
+> 原文保留，作为"同一命名空间下同名方法会串台"的记录。
+
 **背景**：判断"应用是否在运行"需要把 `.lnk` 还原成真实 exe 路径。
 
 **问题**：`windows` 0.62 给 `IShellLinkW::GetPath` / `GetArguments`
@@ -3018,3 +3024,223 @@ if saw { Pumped::Frames } else { Pumped::Idle }
 （半径 = 栏体高 / 2），若本轮之后仍有直角，说明来源不是掩码 —— 下一轮
 要用 `MINIDOCK_SMOKE_TRACE` 的 `maxA` 配合逐像素采样定位（可能是烟团粒子
 或位图被窗口边界裁切）。
+
+---
+
+## ADR-063 · 第二轮依赖库官方 API 审查：ADR-029 作废，改用生成 wrapper
+
+**背景**：0.9.11 对 egui 0.37 做过一轮"对照官方文档"的审查，清掉了
+`Id::new` 的弃用豁免并改用 `set_theme`。本轮把同一套方法用到其余依赖：
+`windows 0.62.2`、`wgpu 30.0.1`、Win32 GDI，以及 egui-wgpu 的帧管线顺序。
+依据一律取**本地 cargo 缓存里的依赖源码**（与 docs.rs 同源、可离线复核）
+加上 Microsoft Learn 的 Win32 文档，不凭印象改。
+
+### 一、ADR-029 的结论是错的 —— 本条取代它
+
+ADR-029 记着"`windows` 0.62 给 `IShellLinkW::GetPath` 生成的 wrapper 只传
+两个参数，照它调用是 UB"，于是手写了一次 COM vtable 调用。逐字核对
+`windows-0.62.2/src/Windows/Win32/UI/Shell/mod.rs`：
+
+| 位置 | 签名 |
+|---|---|
+| `mod.rs:39951` `IShellLinkW::GetPath` | `(&self, pszfile: &mut [u16], pfd: *mut WIN32_FIND_DATAW, fflags: u32) -> Result<()>` |
+| `mod.rs:39983` `IShellLinkW::GetArguments` | `(&self, pszargs: &mut [u16]) -> Result<()>` |
+| `mod.rs:40042` vtable `GetPath` | `(*mut c_void, PWSTR, i32, *mut WIN32_FIND_DATAW, u32) -> HRESULT` |
+
+wrapper 与 COM ABI 一一对应，且正是 Microsoft Learn
+`IShellLinkW::GetPath(LPWSTR, int, WIN32_FIND_DATAW*, DWORD)` 的四个参数；
+文档还明确 `pfd` 可以为 NULL。
+
+**误判来源**：同一个 `mod.rs` 的 `27649` 行是 **`IKnownFolder::GetPath`**，
+签名恰好是 `(&self, dwflags: u32) -> Result<PWSTR>` —— 与 ADR-029 抄下来的
+"错误 wrapper"一字不差。两个接口都在 `Win32::UI::Shell` 下且都叫 `GetPath`，
+按名字搜文档时极易串台。
+
+**决定**：删掉 `Interface::vtable` / `as_raw` / `PWSTR` 的手工调用，直接用
+生成的 wrapper。保留 `#[ignore]` 的真实 `.lnk` 解析测试作为验收。
+**代价**：无。手工 ABI 代码原本要随 `windows` 大版本重新核对，这个负担现在
+回到上游。`ADR-029` 原文按约定保留，但以本条为准。
+
+**教训**：判定"生成的绑定与 ABI 不符"之前，先确认查到的是**哪个接口**的
+签名；同命名空间下同名方法不止一个。
+
+### 二、DIB 兜底必须走内存 DC（真实缺陷）
+
+`platform::icon::draw_into_dib` 创建 DIB 后把 `GetDC(NULL)` 的屏幕 DC 交给
+`DrawIconEx`，从未把 DIB `SelectObject` 进 DC。按 Microsoft Learn
+`CreateDIBSection` 的 Remarks：DIB 是"能直接写像素的位图"，要用 GDI 往里画
+必须先选进 DC，读 `bits` 前还要 `GdiFlush` 保证绘制排空。原实现的实际后果是
+**图标画到屏幕左上角、DIB 恒全 0**，第三层兜底永远返回 `None`。
+
+**决定**：内存 DC → `SelectObject(dib)` → `DrawIconEx` → `GdiFlush` →
+恢复旧对象 → `DeleteDC` → 读 `bits` → `DeleteObject`。同时把所有可能提前
+`?` 的计算挪到创建 DIB 之前（原代码有一条路径会漏掉 `DeleteObject`，
+GDI 句柄不随 Rust 栈帧释放）。
+
+**为什么一直没被发现**：前两层（32 位彩色位图 / 掩码造 alpha）覆盖了绝大多数
+现代图标，只有黑白或特殊图标才落到第三层。这类"看起来实现好了、其实
+一次都没跑通"的分支，和 ADR-049 记过的点击问题是同一类。
+
+### 三、wgpu 回读：回调与 unmap 都做成有界的
+
+依据 `wgpu-types-30.0.1` 的 `PollType::Wait` 文档（"block until the given
+submission has completed execution, **and any callbacks have been invoked**"）
+与 `Buffer::unmap` 文档（unmap 之后缓冲区才能被 GPU 再用）：
+
+1. `poll(wait_indefinitely())` 返回后回调必然已调用，用 `try_recv()` 取代
+   `recv()` —— 驱动异常时返回可报告的错误，而不是让 UI 线程永久挂死。
+2. `get_mapped_range()` 失败时原实现直接 `?` 返回，缓冲区留在 mapped 状态，
+   **此后每一帧**的 `map_async` 都会失败。取像素改包进闭包，所有路径
+   都走到 `unmap()`。
+3. 行去对齐抽成纯函数 `unpad_rows`，让"256 字节对齐 → 紧密 RGBA"这段
+   内存搬运能在没有 GPU 的环境里单测。
+
+### 四、核对后**不改**的（避免以后重复试）
+
+| 项 | 官方实现 | 结论 |
+|---|---|---|
+| `textures_delta` 顺序 | `egui-wgpu-0.37.0/src/winit.rs` 也是先 `set`（569 行）上传、submit 之后才 `free`（775 行） | 与 `frame.rs` 一致，不动 |
+| `Context::run_ui` | `egui-0.37.0/src/context.rs:950`，主推入口，闭包收 `&mut Ui` | 用法正确 |
+| `Renderer::update_buffers` → `render` | 官方要求先 `update_buffers`，否则 `render` panic | 顺序正确 |
+| `RendererOptions::dithering` | 官方为大面积低透明度渐变提供 | 已开，保留 |
+| rayon `into_par_iter().filter_map().collect()` | 官方惯用的数据并行写法 | 保持 |
+| `PollType::wait_indefinitely()` | 官方提供的 `Wait { submission_index: None, timeout: None }` 便捷构造，**未弃用** | 保持 |
+
+### 五、验证与限制
+
+门禁 `fmt --check` / `clippy -D warnings` / `cargo test --workspace` 全绿
+（379 条）；新增 10 条单测（shortcut 2、icon 3、offscreen 4、layout 1）。
+两处真机验收在桌面会话显式跑过 `--ignored`：
+
+```text
+Access.lnk -> C:\Program Files\Microsoft Office\root\Office16\MSACCESS.EXE
+icon::tests::dib_fallback_draws_into_the_dib_not_the_screen ... ok
+```
+
+前者证明生成的 wrapper 确实按 ABI 传参，后者在修复前必然失败（DIB 全 0）。
+Dock 整体的窗口/命中/出帧本轮未真机运行，不假称验过。
+
+**何时重新考虑**：升级 `windows` 大版本时重跑一次
+`cargo test -p minidock-platform --lib -- --ignored`；若上游改动了
+`IShellLinkW` 的生成签名，测试会立刻抓到。
+
+---
+
+## ADR-064 · MSRV 跟随依赖，lint 豁免改用 `#[expect]`
+
+**决定**：
+
+1. `rust-version` 1.88 → 1.95。egui 0.37 / egui-wgpu 0.37 的
+   `rust-version = 1.95`，原声明低于依赖下限，在 1.88–1.94 上根本编不过。
+2. 不再用 `#[allow]` 兜底：必须保留的豁免改 `#[expect(..., reason = "...")]`，
+   不再触发的豁免直接删，死代码删掉而不是留占位函数。
+3. 本轮起新增/修改的代码注释用纯英文、简短、不加修饰词；文档条目只写
+   「改了什么 + 依据 + 验证」。
+
+**依据**：`#[expect]` 在 lint 不再触发时报
+`unfulfilled_lint_expectations`（`-D warnings` 下是编译错误）。本轮就靠它
+抓到 `bin/dock.rs` 一处挂错函数的 `#[allow(clippy::too_many_arguments)]`：
+它挂在 3 参数的 `frost_spec` 上，9 参数的 `show_menu` 另有一份，中间还夹着
+描述菜单、却被 rustdoc 算作 `frost_spec` 说明的文档注释。
+
+**代价**：升级 rustc / clippy 时，阈值变化会让部分 `#[expect]` 变错误，
+需要当场判断是删豁免还是改代码 —— 这正是要的反馈，比静默留着 `#[allow]`
+强。
+
+**范围**：直接依赖已全部是 crates.io 最新版本，本轮只更新传递依赖；
+`glass-backdrop` 的上游 HEAD 等于固定 rev，无更新空间。
+
+---
+
+## ADR-065 · frost 用 GPU compute，呈现路径零中间缓冲
+
+**背景**：CPU blur 在 640×400 / r=12 实测（debug）242 ms/次，实时路径每
+100 ms 一次，是最大的单点 CPU 开销。呈现路径每帧还要把回读缓冲紧密化成
+Vec 再交换通道写 DIB，多一次 1–6 MB 分配与整帧拷贝。
+
+**决定**：
+
+1. `blur_gpu.rs`：WGSL 两趟可分离高斯 + 圆角 coverage，输出
+   `Rgba8Unorm` storage texture，用 `Renderer::register_native_texture`
+   注册给 egui。egui-wgpu 0.37 的纹理格式正是 `Rgba8Unorm`，与 CPU
+   `ColorImage` 路径颜色空间一致 —— 所以可以零回读且逐像素对齐。
+2. 权重与边界夹取沿用 `glass_backdrop`；CPU `blur_rgba` / `compose`
+   保留为回退与测试基准，GPU 不可用时自动退回 CPU。
+3. `Live` 线程只抓屏，字节用 `Arc` 共享；**不碰 device**，线程不变式保持。
+4. `Offscreen::with_mapped_pixels` + `present::upload_rgba_strided`：
+   映射期间直接写 DIB。`draw_frame` 抽出，`render` / `render_rgba` 仍共用。
+
+**质量验证**：两条真机 `#[ignore]` 测试逐通道差 ≤1（compute 输出 vs CPU
+参考、egui 出帧 vs CPU 出帧），均通过。
+
+**实测（debug，同机）**：CPU blur 242 ms → GPU 提交 1.78 ms/帧，10 帧排空
+30.66 ms；呈现 6.78 → 6.01 ms/帧（1.13x），像素一致。release 下 CPU blur
+原本约 20 ms，收益缩小但仍显著。
+
+**代价**：每个开毛玻璃的窗口多一份 compute pipeline 与 GPU 缓冲，首次
+调用时懒创建。WGSL 与 CPU 公式必须同步改，否则一致性测试立刻红。
+
+---
+
+## ADR-066 · 所有像素着色器统一到 GPU compute 框架
+
+**背景**：CPU 侧仍有四类逐像素着色器：frost 模糊（已有 GPU 实现但在独立
+模块）、烟雾 raster/post（每帧约 1.2 MB 位图上传，30 fps ≈ 36 MB/s）、
+图标圆角遮罩、烟团贴图。WGSL 与 CPU 公式分散，无法统一验证。
+
+**决定**：
+
+1. `gpu/shaders/ShaderRuntime` 统一 device/queue、pipeline 缓存、
+   `Rgba8Unorm` 输出纹理、egui native texture 注册与回读；WGSL 分文件。
+2. frost 迁入框架；烟雾 raster + post 合成一趟 compute，输出直接注册，
+   消除每帧位图上传；图标遮罩与烟团贴图同样走框架（低频路径回读）。
+3. CPU 实现全部保留为回退与像素级基准，不删。
+4. 工作线程允许提交 wgpu compute（`Device`/`Queue` 是 `Send + Sync`），
+   不变式收敛为「不碰 `egui::Context`，纹理注册必须在 UI 线程」。
+
+**质量验证**：7 条 `#[ignore]` 真机测试（frost 3、smoke 2、icon 1、
+puff 1）逐通道差 ≤1 或通过出帧断言，全部通过。
+
+**代价与边界**：
+
+- 烟雾每帧仍需上传 `al|ox|oy` 三个流场（约 0.6 MB，比原 1.2 MB 位图
+  少一半）。彻底消除要连 `Fluid::step` 一起 GPU 化，但流体是混沌系统，
+  逐像素一致性不可验证，本轮不做。
+- 图标与烟团贴图 GPU 化后仍需一次回读（低频、≤256 KB）；净 CPU 计算
+  减少，但不是零往返。
+- `present::swap_rb` 方向是 GPU→CPU，Win32 DIB 是硬约束，不迁；
+  `platform::icon::bgra_to_rgba` 是 GDI 格式重排且 platform 层不依赖
+  wgpu，同样保留。
+
+---
+
+## ADR-067 · 帧率可配、取消硬上限、缩减常驻内存
+
+**背景**：主循环有三处硬编码帧率上限（烟雾 33 ms、动画 16 ms、设置窗口
+16 ms），用户无法调整；每个 `FrameRenderer` 各自把 8.04 MiB 的
+`msyh.ttc` 读进内存；MSAA 固定 4x，2560×1600 窗口单块 MSAA 纹理 62.5 MiB。
+
+**决定**：
+
+1. `[performance]` 新增 `FrameCap`（0 = 不限，默认）、`VSync`（按
+   `DwmGetCompositionTimingInfo` 实际刷新率对齐）、`Msaa`（0 自动 / 1/2/4
+   强制，下次启动生效）。`CONFIG_VERSION` 2 → 3，测试断言改为跟随常量。
+2. 删除 `SMOKE_FRAME` / `next_smoke`；活跃态统一由 `perf::pacing_ms`
+   决定唤醒间隔。空闲态仍睡满 `FS_CHECK_MS`，「空闲 0 帧」不变。
+3. 设置窗口 `repaint_in()` 并入 `wait()` 的 timeout，消除原先 1 秒兜底；
+   面板轮询 24 → 8 ms。
+4. CJK 字体改 `OnceLock<Arc<FontData>>` 全进程共享；MSAA 按面积自适应
+   （> 2 M 物理像素用 2x），保留配置覆盖。
+
+**依据**：字体共享与面积自适应 MSAA 不改变像素输出（字体仍是同一份字节，
+MSAA 只在大窗口降采样）。节拍改动是设计值：动画最大唤醒延迟 16 → 1 ms，
+设置窗口最长停顿 1000 → 1 ms，面板 24 → 8 ms；真机 DWM 刷新间隔实测
+16 ms。
+
+**代价**：默认不限帧率时，烟雾/动画开启会持续同步回读，CPU 占用上升；
+用户可用 `FrameCap` 或 `VSync` 收回。大窗口 2x 的抗锯齿略弱于 4x，
+`Msaa=4` 可强制恢复。`Msaa` 只在启动时读，改动需重启窗口。
+
+**验证**：`perf` 纯函数单测、字体共享单测、DWM 真机测试通过；门禁 383 条
+测试全绿。既有 `scanner_reports_running_apps`（ignored）仍因本机无可枚举
+窗口超时，与本条无关。

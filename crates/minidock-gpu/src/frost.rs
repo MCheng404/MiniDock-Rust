@@ -1,47 +1,19 @@
-//! 毛玻璃背景层：抓窗口背后的桌面 → 可分离高斯模糊 → 圆角 alpha → egui 纹理。
+//! Frost background: GDI capture -> GPU separable gaussian -> egui texture.
 //!
-//! 数据来源是 [`glass_backdrop`]：
+//! `glass_backdrop` supplies the capture (BitBlt), the gaussian weights and
+//! the rounded-rect SDF. The blur runs in `blur_gpu` (WGSL compute) and the
+//! result is registered with egui directly, so there is no GPU->CPU readback.
+//! `blur_rgba` and `compose` here are the CPU fallback and the test reference.
 //!
-//! - `capture::DesktopCapture` —— GDI `BitBlt` / `StretchBlt` 抓桌面；
-//! - `blur::normalized_gaussian_weights` —— 与 WGSL 侧同一份权重的 CPU 模型；
-//! - `glass::glass_sdf` —— 圆角矩形的带符号距离，用来给背景层裁圆角。
+//! Capture resolution is 25% of the client area. A visible panel is excluded
+//! from screen capture (`WDA_EXCLUDEFROMCAPTURE`), otherwise GDI captures the
+//! panel itself. This also hides the panel from screenshots.
 //!
-//! ## 为什么不用它的 SPIR-V 管线
-//!
-//! `glass-backdrop` 给的是「抓背景 → GPU 模糊链 → `fs_glass` 全屏 pass →
-//! 预乘 alpha 交换链」这条 Vulkan 路径。MiniDock 没有交换链：渲染是
-//! `egui → 离屏 sRGB 纹理 → CPU 回读 → 预乘 BGRA DIB →
-//! UpdateLayeredWindow`（见 [`crate::frame`]）。所以这里把模糊放在 CPU
-//! 上做一次，把结果当一张普通 egui 纹理画在 UI 最底层。
-//!
-//! ## 两次抓取：开窗前的定妆 + 开着时的实时
-//!
-//! 面板显示之前先同步抓一次（[`Spec::apply`]），第一帧就有背景，不会先闪
-//! 一下实心底色。之后由 [`Live`] 线程按节拍持续重抓，桌面在动（播视频、
-//! 拖窗口）时模糊跟着动 —— 只用开窗前那一次的话，用户看到的是"糊了一张
-//! 静态截图"。
-//!
-//! 线程里做三件事：GDI 抓屏（~20 ms）→ 和上一帧逐字节比较（不同才继续）
-//! → 模糊 + 圆角（~20 ms）。**没变化就什么都不做**，并且把抓取间隔翻倍
-//! 退避到 [`LIVE_IDLE_MAX`]：静态桌面上的开销从 20% 掉到 2% 量级。
-//!
-//! ## 为什么要把自己排除出抓屏
-//!
-//! 面板一上屏，GDI 抓到的就是"桌面 + 面板自己"，直接拿来当背景会得到
-//! 无限嵌套的镜像。上游的做法是 `WDA_EXCLUDEFROMCAPTURE`，这里沿用：
-//! 窗口被排除后，抓屏读到的是它**背后**的真实内容（实测分层窗口同样生效）。
-//!
-//! 代价是这块面板在屏幕捕获里彻底消失 —— 用户截屏 / 录屏时看不到它。
-//! 这是实时模糊绕不开的取舍：不排除自己就只能抓到自己。所以只在面板
-//! **可见且开着毛玻璃**时设置，隐藏时立刻恢复（见 [`allow_capture`]）。
-//!
-//! ## 预乘 alpha
-//!
-//! 背景层在面板内部是**不透明**的（alpha=255）：模糊后的桌面要完全替换掉
-//! 真实桌面，而不是叠一层半透明再透出一次真桌面（那样会看到双重影像）。
-//! 圆角外侧才渐隐到 0。面板自己的 tint 是半透明的，叠在背景层之上。
+//! `Live` polls at 100 ms and backs off to 800 ms on a static desktop. Captured
+//! bytes are shared with the UI thread via `Arc`, avoiding a second full copy.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -85,16 +57,30 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// 开窗前调用：抓一次背景 → 模糊 → 交给渲染器。
-    ///
-    /// 捕获失败（最小化、GDI 出错）时撤掉背景层，面板会按
-    /// `renderer.frost_on() == false` 自动退回近实心底色 —— 留一张空白纹理
-    /// 会让整个面板变透明，比没有毛玻璃更糟。
+    /// Capture once before the panel is shown. Falls back to CPU blur when the
+    /// GPU pipeline is unavailable.
     pub fn apply(self, renderer: &mut FrameRenderer, hwnd: HWND, ppp: f32) {
-        if let Some(image) = capture_once(hwnd.0 as isize, ppp, self.corner_pt, self.radius) {
-            renderer.set_frost(image);
-        } else {
+        let mut cap = match DesktopCapture::new(true) {
+            Ok(c) => c,
+            Err(_) => {
+                renderer.clear_frost();
+                return;
+            }
+        };
+        let captured = cap
+            .capture_behind_pct(hwnd.0 as isize, CAPTURE_PCT)
+            .ok()
+            .flatten();
+        let Some((bits, w, h)) = captured else {
             renderer.clear_frost();
+            return;
+        };
+        if renderer.set_frost_gpu(bits, w, h, self, ppp) {
+            return;
+        }
+        match compose(bits, w, h, self, ppp) {
+            Some(image) => renderer.set_frost(image),
+            None => renderer.clear_frost(),
         }
     }
 }
@@ -118,31 +104,35 @@ pub fn allow_capture(hwnd: HWND) {
     }
 }
 
-/// 面板可见期间的实时背景抓取线程。
-///
-/// 拿到的帧交给 [`FrameRenderer::set_frost`]；线程自己在每次产出后
-/// `PostMessage(WM_APP_WAKE)` 把 UI 线程叫起来重绘。
+/// One captured frame. Bytes are shared with the UI thread, not copied again.
+#[derive(Clone, Debug)]
+pub struct FrostFrame {
+    pub bits: Arc<Vec<u8>>,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Background capture thread for a visible panel.
 #[derive(Debug)]
 pub struct Live {
-    /// 只用来在线程退出时断开 `recv_timeout`；`None` = 已请求停止。
+    /// Dropping the sender unblocks `recv_timeout` when the panel closes.
     tx: Option<Sender<()>>,
-    rx: Receiver<ColorImage>,
-    /// 从不 join：抓屏可能正卡在 GDI 里，退出时等它只会拖慢关闭。
+    rx: Receiver<FrostFrame>,
+    /// Never joined: a GDI capture may still be in flight at shutdown.
     _thread: JoinHandle<()>,
 }
 
 impl Live {
-    /// 起一条抓取线程。线程创建失败时返回 `None`（面板退回静态背景）。
     #[must_use]
-    pub fn start(hwnd: HWND, spec: Spec, ppp: f32) -> Option<Self> {
+    pub fn start(hwnd: HWND) -> Option<Self> {
         let (tx, cmd_rx) = mpsc::channel::<()>();
-        let (img_tx, rx) = mpsc::channel::<ColorImage>();
+        let (img_tx, rx) = mpsc::channel::<FrostFrame>();
         let waker = Waker::new(hwnd);
-        // `HWND` 里是裸指针，不能跨线程；句柄本体的数值可以。
+        // `HWND` is a raw pointer; only its numeric value crosses threads.
         let raw = hwnd.0 as isize;
         let thread = std::thread::Builder::new()
             .name("minidock-frost".to_owned())
-            .spawn(move || run(raw, spec, ppp, &img_tx, waker, &cmd_rx))
+            .spawn(move || run(raw, &img_tx, waker, &cmd_rx))
             .ok()?;
         Some(Self {
             tx: Some(tx),
@@ -151,14 +141,11 @@ impl Live {
         })
     }
 
-    /// 取走最新一帧。
-    ///
-    /// UI 线程慢的时候通道里可能积压好几帧，只保留最后一帧：背景晚一帧
-    /// 无所谓，追着补旧帧反而会让画面越拖越旧。
-    pub(crate) fn latest(&self) -> Option<ColorImage> {
+    /// Keep only the newest frame; stale backgrounds are worse than a drop.
+    pub(crate) fn latest(&self) -> Option<FrostFrame> {
         let mut newest = None;
-        while let Ok(image) = self.rx.try_recv() {
-            newest = Some(image);
+        while let Ok(frame) = self.rx.try_recv() {
+            newest = Some(frame);
         }
         newest
     }
@@ -171,51 +158,51 @@ impl Drop for Live {
     }
 }
 
-/// 抓取线程主体。
-fn run(
-    hwnd: isize,
-    spec: Spec,
-    ppp: f32,
-    out: &Sender<ColorImage>,
-    waker: Waker,
-    stop: &Receiver<()>,
-) {
+/// Capture loop. Blur and upload happen on the UI thread in `FrameRenderer`.
+fn run(hwnd: isize, out: &Sender<FrostFrame>, waker: Waker, stop: &Receiver<()>) {
     let Ok(mut cap) = DesktopCapture::new(true) else {
         return;
     };
-    let mut prev: Vec<u8> = Vec::new();
+    let mut prev: Option<Arc<Vec<u8>>> = None;
     let mut dims = (0u32, 0u32);
     let mut interval = LIVE_INTERVAL;
     let mut seq = 0u64;
 
     loop {
         let started = Instant::now();
-        // 最小化（`Ok(None)`）或抓取失败：这一轮跳过，按原节拍重试。
         if let Ok(Some((bits, w, h))) = cap.capture_behind_pct(hwnd, CAPTURE_PCT) {
-            let same = dims == (w, h) && prev == bits;
+            let same = dims == (w, h) && prev.as_deref().is_some_and(|p| p.as_slice() == bits);
             if same {
-                // 桌面没动：翻倍退避，别拿抓屏功耗换一个不会变的背景。
                 interval = (interval * 2).min(LIVE_IDLE_MAX);
             } else {
-                let diff = if trace() { count_diff(&prev, bits) } else { 0 };
+                let diff = if trace() {
+                    count_diff(prev.as_deref().map_or(&[][..], Vec::as_slice), bits)
+                } else {
+                    0
+                };
                 dims = (w, h);
-                prev.clear();
-                prev.extend_from_slice(bits);
+                let snapshot = Arc::new(bits.to_vec());
+                prev = Some(snapshot.clone());
                 interval = LIVE_INTERVAL;
-                if let Some(image) = compose(bits, w, h, spec, ppp) {
-                    if trace() {
-                        report(seq, bits, w, h, started.elapsed(), diff);
-                        seq += 1;
-                    }
-                    if out.send(image).is_err() {
-                        return;
-                    }
-                    waker.wake();
+                if trace() {
+                    report(seq, bits, w, h, started.elapsed(), diff);
+                    seq += 1;
                 }
+                if out
+                    .send(FrostFrame {
+                        bits: snapshot,
+                        w,
+                        h,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                waker.wake();
             }
         }
 
-        // 抓 + 模糊的耗时要扣掉，否则实际节拍是"间隔 + 耗时"。
+        // Subtract capture time so the interval is a real period.
         match stop.recv_timeout(interval.saturating_sub(started.elapsed())) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
@@ -402,7 +389,7 @@ fn clamp_taps(row: &[f32], x: usize, r: usize, weights: &[f32]) -> f32 {
 ///
 /// 只有四个角需要算 SDF：圆角半径以外的像素覆盖率恒为 255。四角方块按
 /// 半径截断，整幅图跑一遍 SDF 在实时路径上（每秒十次）是纯浪费。
-fn apply_round_alpha(rgba: &mut [u8], w: usize, h: usize, corner: f32) {
+pub(crate) fn apply_round_alpha(rgba: &mut [u8], w: usize, h: usize, corner: f32) {
     if corner <= 0.0 {
         return; // `blur_rgba` 已经把 alpha 写成 255
     }
@@ -447,26 +434,9 @@ fn put_alpha(rgba: &mut [u8], off: usize, a: u8) {
     }
 }
 
-/// 抓一次背景并做成可直接上传的图像。
-///
-/// - `hwnd`：目标窗口（开窗前的同步路径里**必须还没显示**）；
-/// - `ppp`：每逻辑点的物理像素数，用来把圆角半径换到捕获图尺度；
-/// - `corner_pt`：面板圆角（逻辑点）；
-/// - `radius`：高斯半径（捕获图 texel）。
-///
-/// 返回 `None` 时调用方应退回实心底色，不要留一张空白纹理 —— 那会让整个
-/// 面板变成透明，比没有毛玻璃更糟。
-#[must_use]
-fn capture_once(hwnd: isize, ppp: f32, corner_pt: f32, radius: u32) -> Option<ColorImage> {
-    let mut cap = DesktopCapture::new(true).ok()?;
-    let (bytes, w, h) = cap.capture_behind_pct(hwnd, CAPTURE_PCT).ok()??;
-    compose(bytes, w, h, Spec { radius, corner_pt }, ppp)
-}
-
-/// 抓到的原始 BGRA → 模糊 → 圆角 → egui 图像。
-///
-/// 捕获图是窗口的 `CAPTURE_PCT%`，圆角与 ppp 都要按同一比例缩。
-fn compose(bits: &[u8], w: u32, h: u32, spec: Spec, ppp: f32) -> Option<ColorImage> {
+/// CPU fallback: captured bytes -> blur -> rounded alpha -> egui image.
+/// Also the golden reference for the GPU compute path in tests.
+pub(crate) fn compose(bits: &[u8], w: u32, h: u32, spec: Spec, ppp: f32) -> Option<ColorImage> {
     let (w, h) = (w as usize, h as usize);
     let need = w.checked_mul(h)?.checked_mul(4)?;
     if w == 0 || h == 0 || bits.len() < need {

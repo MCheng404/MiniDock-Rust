@@ -39,24 +39,41 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
 
 ## 三、依赖版本
 
+`rust-version = 1.95`（egui 0.37 / egui-wgpu 0.37 的下限）；工具链只声明
+`channel = stable`，不锁具体版本号。
+
 | crate | 版本 | 说明 |
 |---|---|---|
 | `egui` | 0.37 | 只开 `default_fonts`；中文字体运行时装载 |
 | `egui-wgpu` | 0.37 | 提供 `Renderer` 与 `wgpu` **重导出** |
 | `wgpu` | 30.0.1 | **不单独声明版本**，用 `egui_wgpu::wgpu`，避免与 egui 侧漂移 |
 | `egui_kittest` | 0.37 | 仅 dev-dependency，不进产物 |
-| `windows` | 0.62 | 官方绑定，feature 并集写在 workspace |
-| `rayon` / `crossbeam-channel` / `arc-swap` | 1.12 / 0.5 / 1.9 | 并行与跨线程数据 |
-| `raw-window-handle` | 0.6 | 给 wgpu 建 surface 用（必须与 wgpu 期望的版本一致） |
+| `windows` | 0.62.2 | 官方绑定，feature 并集写在 workspace |
+| `rayon` | 1.12 | **唯一用途**是图标像素处理（ADR-007 / ADR-037） |
+| `pollster` | 1.0 | 启动时同步等 `request_device` / `enumerate_adapters` |
+| `glass-backdrop` | git rev `747457c` | 只用 capture / blur / glass_sdf 三个数据模块（ADR-057） |
+| `winresource` | 0.1.34 | 仅 build-dependency，把 `assets/minidock.ico` 编进 exe |
 
 **没有 eframe、没有 winit**。理由见 [`DECISIONS.md`](DECISIONS.md) ADR-002。
+
+三处历史遗留，别照着旧文档加回来：
+
+- `crossbeam-channel` / `arc-swap` 已在 ADR-037 删除 —— 跨线程传的是值拷贝与
+  `std::sync::mpsc`，队列深度只有个位数，用不上共享快照。
+- `raw-window-handle` 不在依赖里：ADR-008 之后不走 `wgpu::Surface`，
+  没有需要传给后端的窗口句柄。
+- `Win32_Graphics_GdiPlus` feature 已随 GDI+ 老实现一起删掉（ADR-035）。
 
 ## 四、产物
 
 | 目标 | 路径 | 说明 |
 |---|---|---|
-| `minidock-spike` | `target/x86_64-pc-windows-msvc/debug/minidock-spike.exe` | M0 尖刺，Esc 退出 |
-| `MiniDock` | 同目录 `MiniDock.exe` | 遗留 GDI+ 版，M2 后替换 |
+| `minidock-dock` | `target/x86_64-pc-windows-msvc/{debug,release}/minidock-dock.exe` | Dock 主程序。ADR-035 删除 GDI+ 老实现后**唯一**的 Dock 可执行文件 |
+| `probe` | 同目录 `probe.exe` | 显存/后端探针，只建设备不建窗口（`scripts/probe-mem.sh`） |
+| `settings_shot` | `cargo run -p minidock-gpu --example settings_shot -- <出图.bmp>` | 离屏渲染任意一页设置界面，走真实 `FrameRenderer` |
+
+`Cargo.toml` 里 `[[bin]]` 是显式声明的；`src/bin/` 下没有其它自动发现的可执行文件。
+README 里早期提过的 `minidock-spike`、`MiniDock.exe` 都已在 ADR-035 / ADR-036 删除。
 
 首次 `cargo build` 要编译 wgpu（naga、wgpu-hal、DX12 后端），**冷启动 3–6 分钟**属正常；
 之后增量在 10–30 秒。release 首次更久（fat LTO）。

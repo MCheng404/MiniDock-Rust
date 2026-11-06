@@ -37,23 +37,16 @@ const LOGICAL_SIZE: (f32, f32) = (340.0, 210.0);
 pub struct ResMonWindow {
     hwnd: HWND,
     renderer: FrameRenderer,
-    /// 输入。面板是只读的，但**仍然需要它**：`Input::take` 会带上
-    /// `screen_rect`，没有它 egui 的绘制区只有一小块，
-    /// 背景被裁、右侧文字落在裁剪区外（实测过一次）。
+    /// Needed by `Input::take` for `screen_rect`; without it egui clips the panel.
     input: crate::input::Input,
-    /// 屏幕左上角的物理坐标。
+    /// Screen-space top-left, in physical pixels.
     pos: (i32, i32),
-    /// 每逻辑点对应多少物理像素。留着是为了后续按 DPI 调整面板尺寸。
-    #[allow(dead_code)]
+    /// Physical pixels per logical point.
     ppp: f32,
-    /// CPU 采样器（占用率要靠两次采样的差值）。
     cpu: CpuSampler,
-    /// 最近一次采样。
     info: SysInfo,
-    /// 下一次刷新的时刻。
     next_refresh: Instant,
     visible: bool,
-    /// 深色主题。
     dark: bool,
 }
 

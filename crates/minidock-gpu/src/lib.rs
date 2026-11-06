@@ -22,15 +22,14 @@
 #![deny(missing_debug_implementations)]
 
 pub mod accent;
+pub mod shaders;
 
-/// 从本 exe 的资源表加载应用图标（资源 ID 1，由 `build.rs` 嵌入）。
-///
-/// 资源没编进去（没装 Windows SDK / rc.exe）时返回 `None`，窗口类退化成
-/// 系统默认图标 —— 图标是外观，不能让程序起不来。
+/// Load the icon embedded by `build.rs` (resource id 1).
+/// Returns `None` when rc.exe was unavailable; a missing icon must not block startup.
 #[must_use]
 #[expect(
     clippy::manual_dangling_ptr,
-    reason = "Win32 MAKEINTRESOURCE 用整数 1 当资源 ID 传入，从不解引用，不是悬垂指针"
+    reason = "MAKEINTRESOURCE passes integer 1 as a resource id; never dereferenced"
 )]
 pub fn app_icon() -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::core::PCWSTR;
@@ -62,6 +61,7 @@ pub mod launchpad_win;
 pub mod mem;
 pub mod menu;
 pub mod offscreen;
+pub mod perf;
 pub mod popup;
 pub mod present;
 pub mod resmon_win;

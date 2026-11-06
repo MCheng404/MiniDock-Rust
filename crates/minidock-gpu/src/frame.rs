@@ -39,6 +39,21 @@ pub struct FrameOutcome {
     pub repaint_delay: Duration,
 }
 
+/// Frost may come from the GPU compute target or the CPU fallback image.
+enum FrostLayer {
+    Gpu { id: egui::TextureId },
+    Cpu(egui::TextureHandle),
+}
+
+impl FrostLayer {
+    fn id(&self) -> egui::TextureId {
+        match self {
+            Self::Gpu { id } => *id,
+            Self::Cpu(handle) => handle.id(),
+        }
+    }
+}
+
 /// 渲染目标 + 呈现器的组合。一个窗口一份。
 pub struct FrameRenderer {
     ctx: egui::Context,
@@ -46,11 +61,19 @@ pub struct FrameRenderer {
     offscreen: Offscreen,
     presenter: LayeredPresenter,
     pixels_per_point: f32,
+    device: egui_wgpu::wgpu::Device,
+    queue: egui_wgpu::wgpu::Queue,
+    /// Shared compute runtime; also registers native textures with egui.
+    shaders: crate::shaders::ShaderRuntime,
+    /// Lazily created: only windows that enable frost pay for the pipeline.
+    blur: Option<crate::shaders::frost::GpuBlur>,
+    /// Smoke compute output, registered after `run_ui` produces it.
+    smoke: Option<crate::shaders::smoke::SharedLayer>,
     /// 毛玻璃背景层，画在 UI 最底层（见 `crate::frost`）。
-    frost: Option<egui::TextureHandle>,
+    frost: Option<FrostLayer>,
     /// 面板可见期间的实时抓取线程。`None` = 只在开窗时抓过一次。
     live: Option<crate::frost::Live>,
-    /// 上一个 [`crate::frost::Spec`]，`rescale` 重建渲染器后据此重启实时抓取。
+    /// 上一个 [`crate::frost::Spec`]，实时帧来了才知道模糊半径与圆角。
     frost_spec: Option<crate::frost::Spec>,
 }
 
@@ -74,16 +97,16 @@ impl FrameRenderer {
         height: u32,
         pixels_per_point: f32,
     ) -> Result<Self, GpuError> {
-        // MSAA 4x：圆角弧段与斜线的几何边缘做 4 重覆盖采样，叠在 egui 的
-        // 1px 羽化之上。格式不支持时回落 1（理论上 renderable 格式都支持
-        // 4x，这里只是兜底硬件怪癖）。
-        let samples = if gpu
+        // Large windows use 2x: at high pixel density the extra samples cost
+        // tens of MB without visible gain. Config can force 1/2/4.
+        let flags = gpu
             .adapter
             .get_texture_format_features(Gpu::COLOR_FORMAT)
-            .flags
-            .sample_count_supported(4)
-        {
-            4
+            .flags;
+        let area = u64::from(width) * u64::from(height);
+        let wanted = crate::perf::auto_msaa_samples(area, crate::gpu::msaa_preference());
+        let samples = if wanted > 1 && flags.sample_count_supported(wanted) {
+            wanted
         } else {
             1
         };
@@ -114,6 +137,11 @@ impl FrameRenderer {
             offscreen,
             presenter,
             pixels_per_point,
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            shaders: crate::shaders::ShaderRuntime::new(&gpu.device, &gpu.queue),
+            blur: None,
+            smoke: None,
             frost: None,
             live: None,
             frost_spec: None,
@@ -143,15 +171,59 @@ impl FrameRenderer {
         Ok(())
     }
 
-    /// 换上一张毛玻璃背景层。
-    ///
-    /// `LINEAR` 而不是 `NEAREST`：捕获图只有窗口的 1/4 分辨率，靠线性
-    /// 采样放大才不会看到马赛克。
-    ///
-    /// 尺寸没变时走 `TextureHandle::set` 原地改写：实时背景每 100 ms 来一帧，
-    /// 每帧都 `load_texture` 建一张新纹理再释放旧的就是每秒十次显存分配。
+    /// Connect a smoke compute output to this renderer. Called once at startup.
+    pub fn set_smoke_layer(&mut self, layer: crate::shaders::smoke::SharedLayer) {
+        self.smoke = Some(layer);
+    }
+
+    /// Blur captured bytes on the GPU and register the output with egui.
+    /// Returns false so the caller can fall back to CPU blur.
+    pub fn set_frost_gpu(
+        &mut self,
+        bits: &[u8],
+        w: u32,
+        h: u32,
+        spec: crate::frost::Spec,
+        ppp: f32,
+    ) -> bool {
+        if self.blur.is_none() {
+            self.blur = crate::shaders::frost::GpuBlur::new(&self.device, &self.queue);
+        }
+        let Some(blur) = self.blur.as_mut() else {
+            return false;
+        };
+        let scale = f32::from(crate::frost::CAPTURE_PCT) / 100.0;
+        if blur
+            .blur(bits, w, h, spec.radius, spec.corner_pt * ppp * scale)
+            .is_none()
+        {
+            return false;
+        }
+        let Some(view) = blur.view() else {
+            return false;
+        };
+        let filter = egui_wgpu::wgpu::FilterMode::Linear;
+        let id = match &self.frost {
+            Some(FrostLayer::Gpu { id }) => {
+                self.renderer.update_egui_texture_from_wgpu_texture(
+                    &self.device,
+                    view,
+                    filter,
+                    *id,
+                );
+                *id
+            }
+            _ => self
+                .renderer
+                .register_native_texture(&self.device, view, filter),
+        };
+        self.frost = Some(FrostLayer::Gpu { id });
+        true
+    }
+
+    /// CPU fallback: reuse the texture handle when the size is unchanged.
     pub fn set_frost(&mut self, image: egui::ColorImage) {
-        if let Some(tex) = &mut self.frost {
+        if let Some(FrostLayer::Cpu(tex)) = &mut self.frost {
             if tex.size() == image.size {
                 tex.set(image, egui::TextureOptions::LINEAR);
                 return;
@@ -160,7 +232,7 @@ impl FrameRenderer {
         let tex = self
             .ctx
             .load_texture("minidock-frost", image, egui::TextureOptions::LINEAR);
-        self.frost = Some(tex);
+        self.frost = Some(FrostLayer::Cpu(tex));
     }
 
     /// 撤掉背景层（毛玻璃关掉、或捕获失败时调用）。
@@ -169,12 +241,9 @@ impl FrameRenderer {
     }
 
     /// 开始实时抓取背景。
-    ///
-    /// 调用方必须**先**把窗口排除出屏幕捕获（`frost::exclude_from_capture`），
-    /// 否则线程抓到的是面板自己。
-    pub fn start_live_frost(&mut self, hwnd: HWND, spec: crate::frost::Spec, ppp: f32) {
+    pub fn start_live_frost(&mut self, hwnd: HWND, spec: crate::frost::Spec, _ppp: f32) {
         self.frost_spec = Some(spec);
-        self.live = crate::frost::Live::start(hwnd, spec, ppp);
+        self.live = crate::frost::Live::start(hwnd);
     }
 
     /// 停掉实时抓取。背景层留在原地，面板照常显示上一帧。
@@ -183,19 +252,21 @@ impl FrameRenderer {
         self.frost_spec = None;
     }
 
-    /// 当前毛玻璃参数。缩放重建渲染器时用它把背景层与实时抓取接回来。
+    /// 当前毛玻璃参数。
     #[must_use]
     pub const fn frost_spec(&self) -> Option<crate::frost::Spec> {
         self.frost_spec
     }
 
-    /// 取走实时背景的新帧（有就换上）。返回是否换过。
+    /// Consume the newest captured frame and blur it on the GPU.
     fn poll_frost(&mut self) -> bool {
-        let Some(image) = self.live.as_ref().and_then(crate::frost::Live::latest) else {
+        let Some(frame) = self.live.as_ref().and_then(crate::frost::Live::latest) else {
             return false;
         };
-        self.set_frost(image);
-        true
+        let Some(spec) = self.frost_spec else {
+            return false;
+        };
+        self.set_frost_gpu(&frame.bits, frame.w, frame.h, spec, self.pixels_per_point)
     }
 
     /// 当前有没有背景层。面板据此决定底色用不透明还是半透明 tint。
@@ -226,9 +297,7 @@ impl FrameRenderer {
         self.offscreen.samples()
     }
 
-    /// 画一帧并呈现到 `hwnd`。`pos` 是窗口左上角的屏幕坐标。
-    ///
-    /// `build` 里只负责往 `ui` 上画；副作用（改配置、发命令）在闭包外处理。
+    /// Draw a frame and present it. `pos` is the window's screen origin.
     pub fn render(
         &mut self,
         gpu: &Gpu,
@@ -237,30 +306,48 @@ impl FrameRenderer {
         pos: (i32, i32),
         build: impl FnMut(&mut egui::Ui),
     ) -> Result<FrameOutcome, GpuError> {
-        let (pixels, outcome) = self.render_rgba(gpu, raw, build)?;
-        self.presenter.upload_rgba(&pixels);
+        let outcome = self.draw_frame(gpu, raw, build);
+        {
+            let presenter = &mut self.presenter;
+            // Write the mapped pixels straight into the DIB: no full-frame
+            // Vec allocation and no extra copy.
+            self.offscreen
+                .with_mapped_pixels(&gpu.device, |data, stride| {
+                    presenter.upload_rgba_strided(data, stride as usize);
+                    Ok(())
+                })
+                .map_err(GpuError::Wgpu)?;
+        }
         self.presenter.present(hwnd, pos.0, pos.1)?;
         Ok(outcome)
     }
 
-    /// 画一帧并返回预乘 BGRA 像素，**不呈现**。
-    ///
-    /// 与 [`Self::render`] 共用同一段绘制，区别只在最后一步：这里把像素
-    /// 交出去，而不是推给 `UpdateLayeredWindow`。用途是离屏截图
-    /// （`examples/settings_shot.rs`）与将来的像素级回归 —— 有显示器才能
-    /// 看到的界面，至少能先被渲染成文件看一眼。
+    /// Draw a frame and return premultiplied RGBA pixels without presenting.
+    /// Used by offscreen screenshots and pixel regression.
     pub fn render_rgba(
         &mut self,
         gpu: &Gpu,
         raw: egui::RawInput,
-        mut build: impl FnMut(&mut egui::Ui),
+        build: impl FnMut(&mut egui::Ui),
     ) -> Result<(Vec<u8>, FrameOutcome), GpuError> {
-        // 实时背景的新帧必须在 `run` 之前换上：纹理增量是在 `run` 里认领
-        // 并上传的，晚一步就得再等一帧。
+        let outcome = self.draw_frame(gpu, raw, build);
+        let pixels = self
+            .offscreen
+            .read_pixels(&gpu.device)
+            .map_err(GpuError::Wgpu)?;
+        Ok((pixels, outcome))
+    }
+
+    /// Submit one frame. Both output paths share this draw code.
+    fn draw_frame(
+        &mut self,
+        gpu: &Gpu,
+        raw: egui::RawInput,
+        mut build: impl FnMut(&mut egui::Ui),
+    ) -> FrameOutcome {
+        // A live frost frame must land before `run_ui` claims texture deltas.
         self.poll_frost();
-        // 只把 TextureId 拷进闭包：TextureHandle 借的是 `self`，而 `run_ui`
-        // 之后还要动 `self.renderer`。
-        let frost = self.frost.as_ref().map(|t| t.id());
+        let frost = self.frost.as_ref().map(FrostLayer::id);
         let full = self.ctx.run_ui(raw, |ui| {
             if let Some(id) = frost {
                 let rect = ui.max_rect();
@@ -273,6 +360,18 @@ impl FrameRenderer {
             }
             build(ui);
         });
+
+        // `SmokeFx::paint` produced a view inside `run_ui`; register it now,
+        // before the render pass samples the texture. First frame has no id yet
+        // and is skipped; from then on the same texture object is refreshed.
+        if let Some(layer) = &self.smoke {
+            if let Ok(mut l) = layer.lock() {
+                if let Some(view) = &l.view {
+                    let id = self.shaders.register(&mut self.renderer, view, l.id);
+                    l.id = Some(id);
+                }
+            }
+        }
 
         let delay = full
             .viewport_output
@@ -339,26 +438,15 @@ impl FrameRenderer {
         gpu.queue
             .submit(buffers.into_iter().chain([encoder.finish()]));
 
-        // 读回。**错误不能在这里直接 `?` 掉**：下面的 `textures_delta.clear()`
-        // 必须执行，否则这个 delta 在函数退出时被 Drop 检查抓住，报成
-        // "纹理增量没人处理"，把真正的错误盖掉。（起动台在全屏尺寸下 present
-        // 失败时就是这么被误导过一次。）
-        let pixels = self
-            .offscreen
-            .read_pixels(&gpu.device)
-            .map_err(GpuError::Wgpu);
-
+        // Official egui-wgpu order: free after submit, then clear the delta.
         for id in &textures_delta.free {
             self.renderer.free_texture(id);
         }
         textures_delta.clear();
 
-        Ok((
-            pixels?,
-            FrameOutcome {
-                cursor,
-                repaint_delay: delay,
-            },
-        ))
+        FrameOutcome {
+            cursor,
+            repaint_delay: delay,
+        }
     }
 }

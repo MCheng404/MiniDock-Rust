@@ -1,0 +1,87 @@
+//! Frame pacing helpers.
+
+use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+
+/// Frame pacing interval. 0 cap = unlimited (1 ms pump); VSync wins.
+#[must_use]
+pub fn pacing_ms(cap: i32, vsync: bool, vsync_ms: u32) -> u32 {
+    if vsync {
+        return vsync_ms.clamp(1, 100);
+    }
+    if cap > 0 {
+        return (1000u32 / cap as u32).max(1);
+    }
+    1
+}
+
+/// Auto MSAA by window area; config can force 1/2/4.
+#[must_use]
+pub const fn auto_msaa_samples(area: u64, pref: u32) -> u32 {
+    match pref {
+        1 => 1,
+        2 => 2,
+        4 => 4,
+        _ => {
+            if area > 2_000_000 {
+                2
+            } else {
+                4
+            }
+        }
+    }
+}
+
+/// DWM composition interval in milliseconds. Falls back to 60 Hz on error.
+#[must_use]
+pub fn vsync_interval_ms(hwnd: HWND) -> u32 {
+    let mut timing = DWM_TIMING_INFO {
+        cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `timing` is a valid DWM_TIMING_INFO with cbSize set.
+    if unsafe { DwmGetCompositionTimingInfo(hwnd, &mut timing) }.is_err() {
+        return 16;
+    }
+    let (num, den) = (
+        timing.rateRefresh.uiNumerator,
+        timing.rateRefresh.uiDenominator,
+    );
+    if num == 0 || den == 0 {
+        return 16;
+    }
+    (1000u64 * u64::from(den) / u64::from(num)).clamp(1, 100) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+    #[test]
+    fn pacing_respects_cap_and_vsync() {
+        assert_eq!(pacing_ms(0, false, 16), 1, "unlimited");
+        assert_eq!(pacing_ms(60, false, 16), 16);
+        assert_eq!(pacing_ms(144, false, 16), 6);
+        assert_eq!(pacing_ms(240, false, 16), 4);
+        assert_eq!(pacing_ms(30, true, 8), 8, "vsync overrides cap");
+    }
+
+    #[test]
+    fn auto_msaa_drops_for_large_windows() {
+        assert_eq!(auto_msaa_samples(1320 * 1080, 0), 4);
+        assert_eq!(auto_msaa_samples(2560 * 1600, 0), 2);
+        assert_eq!(auto_msaa_samples(2560 * 1600, 4), 4, "forced 4x");
+        assert_eq!(auto_msaa_samples(1320 * 1080, 1), 1, "forced off");
+    }
+
+    #[test]
+    #[ignore = "requires a desktop session; run with --ignored"]
+    fn dwm_interval_is_plausible() {
+        // SAFETY: no arguments.
+        let hwnd = unsafe { GetDesktopWindow() };
+        let ms = vsync_interval_ms(hwnd);
+        assert!((1..=100).contains(&ms), "unexpected interval {ms} ms");
+        eprintln!("DWM refresh interval: {ms} ms");
+    }
+}

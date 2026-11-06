@@ -346,6 +346,12 @@ impl Noise {
         self.n
     }
 
+    /// Three tiled noise layers, used by the GPU raster shader.
+    #[must_use]
+    pub fn layers(&self) -> &[Vec<f32>; 3] {
+        &self.alpha
+    }
+
     /// 采样第 `k` 层。`x` / `y` 是**网格单元坐标**，`t` 是已按速度缩放的
     /// 秒数：内部再乘 0.55/0.7 与 1.2/2.0 让纹理缓慢斜向漂移。
     ///
@@ -882,10 +888,28 @@ impl Fluid {
         (max(&self.d), mean, speed, max(&self.al))
     }
 
-    /// 预乘 RGBA 位图（`pw * ph * 4` 字节）。
+    /// Pre-multiplied RGBA bitmap (`pw * ph * 4` bytes). CPU reference path.
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
         &self.px
+    }
+
+    #[must_use]
+    pub fn bitmap_size(&self) -> (usize, usize) {
+        let pw = (self.w as f32 * CELL / RES as f32).ceil() as usize;
+        let ph = (self.h as f32 * CELL / RES as f32).ceil() as usize;
+        (pw, ph)
+    }
+
+    /// Compute per-cell alpha and expose `al | ox | oy` for the GPU shader.
+    /// This is the only O(grid) CPU work left before rasterization.
+    #[must_use]
+    pub fn gpu_fields(&mut self) -> (&[f32], &[f32], &[f32]) {
+        for i in 0..self.al.len() {
+            let a = self.d[i].min(1.0);
+            self.al[i] = (a * 2.2).min(1.0) * self.edge[i];
+        }
+        (&self.al, &self.ox, &self.oy)
     }
 }
 

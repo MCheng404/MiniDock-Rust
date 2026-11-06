@@ -215,8 +215,6 @@ struct App {
     accent: [f32; 3],
     /// 已处理到的外观变更计数（见 [`Dock::look_epoch`]）。
     look_epoch: u32,
-    /// 下一帧烟雾最早可以在什么时候画。
-    next_smoke: Instant,
     /// 写 ini（串行，天然保序）。
     disk: DiskWriter,
     /// 启动 / 激活应用（`ShellExecuteW`）。
@@ -413,6 +411,7 @@ impl App {
         }
 
         let gpu = Gpu::new("")?;
+        minidock_gpu::gpu::set_msaa_preference(dock.cfg.get_i32(Key::MSAA));
         let frame = FrameRenderer::new(&gpu, win_w as u32, win_h as u32, ppp)?;
         let start = Instant::now();
 
@@ -429,7 +428,7 @@ impl App {
         // 每个工作线程都拿到唤醒句柄：有结果时 `PostMessage` 一下，
         // 主循环的等待立刻返回，不用靠轮询。
         let waker = Waker::new(hwnd);
-        let icons = IconLoader::spawn(waker)?;
+        let icons = IconLoader::spawn(waker, Some(&gpu))?;
         let scanner = Scanner::spawn(hwnd.0 as isize, waker)?;
         let last_sysinfo = std::time::Instant::now();
         let resmon_slot: Option<Pin<Box<ResMonWindow>>> = None;
@@ -462,6 +461,7 @@ impl App {
             }
         }
 
+        let smoke = SmokeFx::with_gpu(&gpu);
         let mut app = Self {
             hwnd,
             gpu,
@@ -494,10 +494,9 @@ impl App {
             widgets_dump,
             fps_frames: 0,
             fps_at: Instant::now(),
-            smoke: SmokeFx::new(),
+            smoke,
             accent: theme::accent().unwrap_or(PALETTE[0]),
             look_epoch: 0,
-            next_smoke: Instant::now(),
             disk,
             opener,
             dirty_at: None,
@@ -515,6 +514,12 @@ impl App {
             start,
             _guard: guard,
         };
+
+        // Smoke compute output is produced inside `run_ui`; FrameRenderer
+        // registers it with egui after the pass.
+        if let Some(layer) = app.smoke.layer() {
+            app.frame.set_smoke_layer(layer);
+        }
 
         // Dock 指针挂到窗口上，供 wndproc 回传鼠标位置。
         // 取的是 `Box` 里那块堆内存的地址，与 `App` 自身是否再移动无关。
@@ -1835,24 +1840,13 @@ impl App {
         Ok(())
     }
 
-    /// 烟雾是否需要本帧出图。返回 `true` 时顺带把下一帧的时刻推后。
-    ///
-    /// 三重闸门：开关关掉、看不见（全屏 / 已收起）、还没到下一帧的时刻。
-    /// 最后一关是**故意的限速**：每次出帧都要把整块画面从 GPU 读回 CPU
-    /// （`FrameRenderer` 的同步回读），30 fps 已经看不出烟的停顿，
-    /// 60 fps 只是把回读次数翻倍。
+    /// Smoke needs a frame whenever visible. Pacing comes from the global
+    /// frame cap / VSync setting, not a per-effect timer.
     fn step_smoke(&mut self) -> bool {
         let tune = Tuning::from_config(&self.dock.cfg, self.accent);
-        // 收起后连粒子都不推进：位置是纯时间函数，隐藏期间算出来的东西
-        // 一帧也不会被看到，只是白烧 CPU。
         if !tune.enabled || self.fs_hidden || self.dock.fully_hidden() {
             return false;
         }
-        let now = Instant::now();
-        if now < self.next_smoke {
-            return false;
-        }
-        self.next_smoke = now + SMOKE_FRAME;
         true
     }
 
@@ -1884,36 +1878,45 @@ impl App {
     /// 后台线程的结果**不用轮询**：它们各自 `PostMessage(WM_APP_WAKE)`
     /// 打断这次等待，所以这里可以真的睡到 `FS_CHECK_MS`（全屏检测周期）。
     fn wait(&self) {
-        let mut timeout = if self.dock.anim {
-            16
+        let smoke_on = Tuning::from_config(&self.dock.cfg, self.accent).enabled
+            && !self.fs_hidden
+            && !self.dock.fully_hidden();
+        // Active = continuous repaint. Idle keeps the "zero frames" promise.
+        let mut timeout = if self.dock.anim || smoke_on {
+            self.frame_interval_ms()
         } else if self.dock.needs_hide_tick() {
             100
         } else {
             FS_CHECK_MS
         };
-        // 面板开着时按轮询节拍醒：`step_panel_dismiss` 要看全局按键状态，
-        // 睡满 1 秒才醒的话，点外面得等一秒才收。
+        // Panel dismissal polls global key state.
         if self.panel_open() && self.dock.cfg.get_i32(Key::PANEL_DISMISS) != 0 {
             timeout = timeout.min(minidock_gpu::popup::POLL_MS);
         }
-        // 烟雾按自己的节奏睡：睡满 16 ms 再发现"还差 17 ms"是每秒白醒
-        // 30 次，而每次醒来都要过一遍消息队列与全部 step。
-        // 收起后烟雾不推进（见 `step_smoke`），这里也不能再按它的节拍醒 ——
-        // 否则 `next_smoke` 永远停在过去，等待被压到 1 ms，主循环变成空转。
-        let smoke_on = Tuning::from_config(&self.dock.cfg, self.accent).enabled
-            && !self.fs_hidden
-            && !self.dock.fully_hidden();
-        if smoke_on {
-            let left = self
-                .next_smoke
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(u128::from(u32::MAX)) as u32;
-            timeout = timeout.min(left.max(1));
+        // The settings window owns an egui repaint deadline. Without this the
+        // main loop could sleep a full second and stall its UI.
+        if let Some(sw) = &self.settings_slot {
+            if let Some(left) = sw.repaint_in() {
+                if left != Duration::MAX {
+                    timeout = timeout.min(left.as_millis().clamp(1, u128::from(u32::MAX)) as u32);
+                }
+            }
         }
         unsafe {
             MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
+    }
+
+    /// Frame pacing. 0 = unlimited (1 ms pump); VSync overrides the cap.
+    fn frame_interval_ms(&self) -> u32 {
+        let cfg = &self.dock.cfg;
+        let vsync = cfg.get_i32(Key::VSYNC) != 0;
+        let vsync_ms = if vsync {
+            minidock_gpu::perf::vsync_interval_ms(self.hwnd)
+        } else {
+            16
+        };
+        minidock_gpu::perf::pacing_ms(cfg.get_i32(Key::FRAME_CAP), vsync, vsync_ms)
     }
 }
 
@@ -2271,14 +2274,6 @@ fn temp_name(exe: &str) -> String {
         .to_owned()
 }
 
-/// 烟雾的出帧间隔。30 fps。
-///
-/// 不只是省 CPU：`FrameRenderer` 每帧都要把整块画面从 GPU 同步读回
-/// （分层窗口只能经 `UpdateLayeredWindow` 提交），60 fps 下这条回读是
-/// 几百 KB × 每秒 60 次。烟这种"本来就很慢"的效果用 30 fps 完全看不出
-/// 停顿 —— 模拟本身也只有每秒 60 步、每步 5 px 一格。
-const SMOKE_FRAME: Duration = Duration::from_millis(33);
-
 /// 设置面板改动到写盘的防抖窗口（毫秒）。
 ///
 /// 拖一下滑块会产生几十次 `changed`；ini 是 UTF-16 全量回写，逐次写盘
@@ -2536,16 +2531,8 @@ fn register_menu_class() -> Result<(), Box<dyn std::error::Error>> {
 /// egui 上下文与 wgpu 管线（最贵的两步）都保留。
 type MenuSlot = Option<(HWND, FrameRenderer)>;
 
-/// 弹出菜单并阻塞到用户选择或取消。返回被选中的命令。
-///
-/// **模态**：期间不处理 Dock 的其他输入。
-/// 用 `SetCapture` 而不是激活窗口来实现"点外面关闭" —— 菜单不抢焦点，
-/// 关闭后用户原来在用的窗口仍是前台。
-#[allow(clippy::too_many_arguments)]
-/// 按配置键决定这一处要不要毛玻璃，以及模糊半径 / 圆角。
-///
-/// `Blur` 的取值范围是 1..14，`frost::blur_rgba` 会再夹到 1..12。
-/// 圆角由各面板自己的几何给出：起动台方角 0，设置 20，菜单 `RADIUS`。
+/// Return the frost config for one panel, if enabled.
+/// `frost::blur_rgba` clamps the radius again (1..12).
 fn frost_spec(cfg: &Config, key: Key, corner_pt: f32) -> Option<FrostSpec> {
     if cfg.get_i32(key) == 0 {
         return None;
@@ -2556,10 +2543,13 @@ fn frost_spec(cfg: &Config, key: Key, corner_pt: f32) -> Option<FrostSpec> {
     })
 }
 
-// 参数多是这条路径的固有形状（GPU / 窗口槽 / 菜单 / 位置 / 主题 / 缩放 /
-// 起始时间 / 毛玻璃）；与 `launchpad_win::draw` 一样，拆成 struct 只会把
-// 同一个参数列表换个地方放。
-#[allow(clippy::too_many_arguments)]
+/// Show a menu and block until the user picks or dismisses it.
+/// Modal: Dock input is ignored. `SetCapture` closes on outside click
+/// without stealing focus.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "argument group is the API boundary"
+)]
 fn show_menu(
     gpu: &Gpu,
     slot: &mut MenuSlot,

@@ -1,51 +1,38 @@
-//! 解析快捷方式，得到它真正指向的可执行文件。
+//! Resolve a `.lnk` to its target executable.
 //!
-//! 对应 `ReadLnk` 的"取 target"部分（它还有取图标的部分，
-//! 我们不解析图标，图标走 `platform::icon` 的 shell 图像列表）。
-//!
-//! # 为什么需要它
-//!
-//! Dock 条目多数是 `.lnk`。要判断"这个应用是否在运行"、以及"点击时该切过去
-//! 还是新开"，都得把这个 `.lnk` 还原成 `EXCEL.EXE` 这样的真实路径。
-//!
-//! # 为什么直接调 vtable
-//!
-//! `windows` 0.62 给 `IShellLinkW::GetPath` / `GetArguments` 生成的 wrapper
-//! 签名与 COM vtable 不符（vtable 要 `(PWSTR, cch, WIN32_FIND_DATAW*, flags)`，
-//! wrapper 只传了两个参数）。照 wrapper 调用是未定义行为，因此这里绕过
-//! wrapper，直接用 `Interface::vtable` 按 COM ABI 调用。
-//!
-//! 代价是这段代码依赖 vtable 布局。升级 `windows` 大版本时要重新核对 ——
-//! 有一个 `#[ignore]` 的真实解析测试可以立刻发现回归。
+//! Needed to match a Dock item against a running process.
+//! Uses the generated `windows` 0.62.2 wrappers; their signatures match the
+//! COM ABI (ADR-063 supersedes ADR-029).
 
-use windows::core::{Interface, PCWSTR, PWSTR};
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::System::Com::{
     CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
-/// 快捷方式解析结果。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Shortcut {
-    /// 目标可执行文件的完整路径（空 = 解析不出来，比如指向 URL 或 UWP 应用）。
+    /// Empty when the link points to a URL or UWP app.
     pub target: String,
-    /// 启动参数。直接启动 exe 时为空（参数由条目自己带）。
     pub args: String,
 }
 
-/// 保证 COM 初始化。
-///
-/// 实现在 [`crate::win::ensure_com`] —— 那里说明了为什么必须**按线程**
-/// 而不是按进程初始化（原先是 `static Once`，一引入工作线程就出问题）。
+// COM is per-thread; see crate::win::ensure_com.
 fn ensure_com() {
     crate::win::ensure_com();
 }
 
-/// 解析 `.lnk`，取它指向的 exe。
+// Decode up to the first NUL. No NUL means a truncated path.
+fn wide_to_string(buf: &[u16]) -> String {
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..n])
+}
+
 fn resolve_lnk(path: &str) -> Option<Shortcut> {
     ensure_com();
 
-    // SAFETY: 全部是 COM 标准调用；接口指针由 COM 所有权管理（RAII 释放）。
+    // SAFETY: COM calls with RAII-owned interface pointers. Output buffers
+    // live on this stack frame; the wrapper passes their length as `cch`.
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let persist: IPersistFile = link.cast().ok()?;
@@ -53,38 +40,17 @@ fn resolve_lnk(path: &str) -> Option<Shortcut> {
         persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
 
         let mut buf = [0u16; 1024];
-        let vt = Interface::vtable(&link);
-        // vtable 的真实签名：`(this, PWSTR, cch, WIN32_FIND_DATAW*, flags)`。
-        // flags = 0 表示要标准长路径（`SLGP_RAWPATH` 会给带环境变量的形式）。
-        let hr = (vt.GetPath)(
-            Interface::as_raw(&link),
-            PWSTR(buf.as_mut_ptr()),
-            buf.len() as i32,
-            std::ptr::null_mut(),
-            0,
-        );
-        if hr.is_err() {
+        // flags = 0: standard long path. pfd = NULL is allowed by the API.
+        link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+        let target = wide_to_string(&buf);
+        if target.is_empty() {
             return None;
         }
 
-        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        if n == 0 {
-            // 指向 URL / UWP 应用的快捷方式没有文件路径，属于正常情况。
-            return None;
-        }
-        let target = String::from_utf16_lossy(&buf[..n]);
-
-        // 参数解析失败不影响主功能（target 才是关键），忽略。
+        // Arguments are optional; only the target matters for matching.
         let mut abuf = [0u16; 1024];
-        let has_args = (vt.GetArguments)(
-            Interface::as_raw(&link),
-            PWSTR(abuf.as_mut_ptr()),
-            abuf.len() as i32,
-        )
-        .is_ok();
-        let args = if has_args {
-            let m = abuf.iter().position(|&c| c == 0).unwrap_or(abuf.len());
-            String::from_utf16_lossy(&abuf[..m])
+        let args = if link.GetArguments(&mut abuf).is_ok() {
+            wide_to_string(&abuf)
         } else {
             String::new()
         };
@@ -93,14 +59,7 @@ fn resolve_lnk(path: &str) -> Option<Shortcut> {
     }
 }
 
-/// 把一个条目路径解析成"可执行文件路径"。
-///
-/// - `.exe` → 原样返回（参数为空）
-/// - `.lnk` → 解析出 target；target 不是 exe（指向文档/URL）时返回 `None`
-/// - 其它 → `None`
-///
-/// 返回 `None` 表示"这个条目没有可匹配的 exe"，调用方应直接走启动流程，
-/// 不要尝试按 exe 匹配已运行实例。
+/// Return `None` when the item has no exe to match against a running process.
 #[must_use]
 pub fn resolve(path: &str) -> Option<Shortcut> {
     let lower = path.to_lowercase();
@@ -114,7 +73,6 @@ pub fn resolve(path: &str) -> Option<Shortcut> {
         return None;
     }
     let sc = resolve_lnk(path)?;
-    // 快捷方式可以指向文档或 URL，那种情况没有 exe 可匹配。
     if !sc.target.to_lowercase().ends_with(".exe") {
         return None;
     }
@@ -125,7 +83,6 @@ pub fn resolve(path: &str) -> Option<Shortcut> {
 mod tests {
     use super::*;
 
-    /// 非快捷方式、非 exe 的路径不该被解析。
     #[test]
     fn non_lnk_non_exe_has_no_target() {
         assert!(resolve("C:\\Users\\Public\\Documents").is_none());
@@ -133,31 +90,44 @@ mod tests {
         assert!(resolve("C:\\a\\readme.txt").is_none());
     }
 
-    /// exe 直接返回自身，参数为空。
     #[test]
     fn exe_resolves_to_itself() {
         let s = resolve("C:\\Windows\\System32\\notepad.exe").expect("应当解析出自身");
         assert_eq!(s.target, "C:\\Windows\\System32\\notepad.exe");
         assert!(s.args.is_empty());
-        // 大小写不同的扩展名同样要识别。
         let s = resolve("C:\\X\\NOTEPAD.EXE").expect("扩展名比较要忽略大小写");
         assert!(s.target.ends_with("NOTEPAD.EXE"));
     }
 
-    /// 不存在的 .lnk 返回 None，不能 panic 也不能编造路径。
     #[test]
     fn missing_lnk_returns_none() {
         assert!(resolve("C:\\definitely\\missing\\thing.lnk").is_none());
     }
 
-    /// 真实解析：对着系统里必然存在的快捷方式验证。
-    ///
-    /// 标 `ignore` 是因为它依赖具体机器上装了什么。要验证 COM 通路
-    /// （尤其是绕过 wrapper 直接调 vtable 那段）时显式跑：
-    ///
-    /// ```text
-    /// cargo test -p minidock-platform --lib shortcut -- --ignored
-    /// ```
+    #[test]
+    fn wide_buffer_stops_at_first_nul() {
+        // Trailing bytes may be residue from a previous call.
+        let buf = [
+            'C' as u16,
+            ':' as u16,
+            '\\' as u16,
+            'a' as u16,
+            0,
+            'X' as u16,
+            'Y' as u16,
+        ];
+        assert_eq!(wide_to_string(&buf), "C:\\a");
+    }
+
+    #[test]
+    fn wide_buffer_empty_and_unterminated() {
+        assert_eq!(wide_to_string(&[0, 0, 0]), "");
+        assert_eq!(wide_to_string(&[]), "");
+        assert_eq!(wide_to_string(&[65, 66, 67]), "ABC");
+    }
+
+    /// Real COM round-trip. Needs a desktop session and installed apps:
+    /// `cargo test -p minidock-platform --lib shortcut -- --ignored`
     #[test]
     #[ignore = "依赖本机已安装的应用，需显式 --ignored"]
     fn resolves_a_real_start_menu_shortcut() {
@@ -186,7 +156,6 @@ mod tests {
             println!("{} -> {}", p.display(), sc.target);
             return;
         }
-        // 一个 .lnk 都没找到时不判失败（可能装在别处），但要说明。
         println!("开始菜单里只有 {tried} 个 .lnk，跳过");
     }
 }

@@ -160,37 +160,111 @@ impl Offscreen {
         );
     }
 
-    /// 同步回读，返回**紧密排列**的 RGBA（预乘 alpha）。
-    ///
-    /// 同步（`PollType::Wait`）而不是异步流水线：Dock 大部分时间是静止的，
-    /// 用 1–2 ms 的阻塞换"代码简单、不会积压帧"更划算。真正 60fps 连续
-    /// 动画时再改双缓冲 + 延迟一帧，这一点已记在 PORTING.md。
+    /// Synchronous readback into tightly packed premultiplied RGBA.
+    /// Blocking 1-2 ms keeps the pipeline simple; revisit for continuous 60 fps.
     pub fn read_pixels(&self, device: &wgpu::Device) -> Result<Vec<u8>, String> {
+        self.with_mapped_pixels(device, |data, stride| {
+            unpad_rows(data, self.width, self.height, stride)
+        })
+    }
+
+    /// Map the readback buffer and run `f` with the padded bytes and row stride.
+    /// Unmaps on every path, including `f` returning an error. The present path
+    /// uses this to write straight into the DIB without a full-frame copy.
+    pub fn with_mapped_pixels<T>(
+        &self,
+        device: &wgpu::Device,
+        f: impl FnOnce(&[u8], u32) -> Result<T, String>,
+    ) -> Result<T, String> {
         let slice = self.buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
+        // `PollType::Wait` returns only after callbacks ran, so the channel
+        // already holds a result. `try_recv` cannot hang the UI thread.
         device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| format!("poll 失败: {e}"))?;
-        match rx.recv() {
+        match rx.try_recv() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(format!("map_async 失败: {e}")),
-            Err(e) => return Err(format!("回读通道断开: {e}")),
+            Err(e) => return Err(format!("回读回调未投递: {e}")),
         }
 
-        let data = slice
-            .get_mapped_range()
-            .map_err(|e| format!("映射回读缓冲失败: {e}"))?;
-        let row_bytes = (self.width * 4) as usize;
-        let mut out = Vec::with_capacity(row_bytes * self.height as usize);
-        for row in 0..self.height as usize {
-            let start = row * self.padded_row as usize;
-            out.extend_from_slice(&data[start..start + row_bytes]);
-        }
-        drop(data);
+        // The buffer is mapped from here on. Every path must `unmap`, or the
+        // next frame's `map_async` fails.
+        let result = (|| {
+            let data = slice
+                .get_mapped_range()
+                .map_err(|e| format!("映射回读缓冲失败: {e}"))?;
+            f(&data[..], self.padded_row)
+        })();
         self.buffer.unmap();
-        Ok(out)
+        result
+    }
+}
+
+/// Remove the 256-byte row padding added by `copy_texture_to_buffer`.
+/// Kept as a pure function so the copy can be tested without a GPU.
+fn unpad_rows(data: &[u8], width: u32, height: u32, padded_row: u32) -> Result<Vec<u8>, String> {
+    let row_bytes = width as usize * 4;
+    let stride = padded_row as usize;
+    if stride < row_bytes {
+        return Err(format!("行距 {stride} 小于行宽 {row_bytes}"));
+    }
+    let rows = height as usize;
+    if rows == 0 {
+        return Ok(Vec::new());
+    }
+    let needed = stride
+        .checked_mul(rows - 1)
+        .and_then(|n| n.checked_add(row_bytes))
+        .ok_or_else(|| "回读尺寸溢出".to_owned())?;
+    if data.len() < needed {
+        return Err(format!("回读缓冲过短：{} < {needed}", data.len()));
+    }
+
+    let mut out = Vec::with_capacity(row_bytes * rows);
+    for row in 0..rows {
+        let start = row * stride;
+        out.extend_from_slice(&data[start..start + row_bytes]);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unpad_rows;
+
+    #[test]
+    fn unpad_rows_removes_alignment_padding() {
+        // 1 px wide = 4 valid bytes, stride padded to 8.
+        let data = [1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0];
+        assert_eq!(
+            unpad_rows(&data, 1, 2, 8).unwrap(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn unpad_rows_handles_already_aligned_rows() {
+        // 64 px = 256 bytes, already aligned; no byte may be dropped.
+        let data = vec![0xABu8; 256 * 2];
+        let out = unpad_rows(&data, 64, 2, 256).unwrap();
+        assert_eq!(out.len(), 256 * 2);
+        assert!(out.iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn unpad_rows_rejects_bad_geometry() {
+        assert!(unpad_rows(&[0; 8], 4, 2, 4).is_err(), "行距小于行宽");
+        assert!(unpad_rows(&[0; 8], 1, 3, 8).is_err(), "缓冲比声明的高度短");
+    }
+
+    #[test]
+    fn unpad_rows_zero_height_is_empty() {
+        assert!(unpad_rows(&[], 0, 0, 256).unwrap().is_empty());
+        assert!(unpad_rows(&[], 10, 0, 256).unwrap().is_empty());
     }
 }

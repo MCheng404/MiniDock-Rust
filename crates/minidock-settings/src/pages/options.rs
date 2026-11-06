@@ -118,3 +118,11 @@ pub(crate) const SMOKE_THICK_OPTS: &[(i32, &str)] =
 
 /// 鼠标作用半径。
 pub(crate) const SMOKE_REACH_OPTS: &[(i32, &str)] = &[(0, "小"), (1, "正常"), (2, "大")];
+
+/// MSAA 档位。0 = 按窗口面积自动，大窗口降采样省显存。
+pub(crate) const MSAA_OPTS: &[(i32, &str)] = &[
+    (0, "自动（大窗口 2x）"),
+    (1, "关闭"),
+    (2, "2x"),
+    (4, "4x（最清晰）"),
+];

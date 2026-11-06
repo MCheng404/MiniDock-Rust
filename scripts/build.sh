@@ -92,6 +92,7 @@ case "$ACTION" in
         exit "$status"
         ;;
     exe)
-        echo "$ROOT/target/$TARGET/$(profile_dir)/MiniDock.exe"
+        # ADR-035 之后唯一的 Dock 可执行文件；早期这里写的是已删除的 MiniDock.exe。
+        echo "$ROOT/target/$TARGET/$(profile_dir)/minidock-dock.exe"
         ;;
 esac

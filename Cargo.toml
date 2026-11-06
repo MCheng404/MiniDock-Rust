@@ -10,8 +10,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
-license = "LicenseRef-Proprietary-Upstream"   # 见 README「许可证与版权」
+# egui 0.37 / egui-wgpu 0.37 require 1.95.
+rust-version = "1.95"
+license = "LicenseRef-Proprietary-Upstream"
 authors = ["MiniDock Rust port contributors"]
 repository = ""
 
@@ -21,39 +22,26 @@ minidock-platform = { path = "crates/minidock-platform" }
 minidock-settings = { path = "crates/minidock-settings" }
 minidock-gpu = { path = "crates/minidock-gpu" }
 
-# egui 0.37：当前最新。**只依赖 egui + egui-wgpu**，不引 eframe——
-# eframe 会接管消息循环，而 Dock 需要自己持有 Win32 循环（托盘/热键/AppBar/
-# 逐像素命中）。wgpu 版本不单独声明：用 `egui_wgpu::wgpu` 重导出，
-# 保证 device/surface 类型与 egui 侧完全同一份，避免版本漂移。
+# eframe owns the message loop. This app needs Win32 trampolines, hotkeys,
+# AppBar and per-pixel hit testing, so only egui + egui-wgpu are used.
+# wgpu is not declared separately: egui_wgpu::wgpu re-exports the exact
+# version egui uses, which prevents device/surface type drift.
 egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 egui_kittest = "0.37"
 
-# 数据并行（ADR-007）。**只有一个用途**：图标像素处理（缩放判定 + 圆角
-# 遮罩）按批并行。其余"看起来该并行"的活（窗口枚举、shell 取图标、写盘）
-# 全是 IO 等待，并行只会增加线程数、不缩短墙钟时间 —— 那些走
-# `minidock-gpu::worker` 的专用线程。
-#
-# 不用 tokio：这里没有并发连接，只有几条长驻线程 + 一个线程池。
+# Only for icon pixel processing. The other jobs are IO-bound and run on
+# dedicated threads in minidock-gpu::worker.
 rayon = "1.12"
 
 pollster = "1.0"
 
-# glass-backdrop：毛玻璃的桌面捕获 + 高斯模糊模型 + WGSL/SPIR-V。
-# 固定 rev，避免上游改了 uniform 布局却没同步到我们这边。
-# 只用到 capture（GDI BitBlt）、blur 的 CPU 权重、glass 的 SDF 数学；
-# 我们自己的渲染链路是「egui → 离屏纹理 → DIB → UpdateLayeredWindow」，
-# 没有 swapchain，所以不用它的 SPIR-V / GPU 管线（见 ADR-057）。
+# Pinned rev: upstream can change the uniform layout without notice.
+# Only capture (GDI BitBlt), blur CPU weights and SDF math are used (ADR-057).
+# No swapchain in our pipeline: egui -> offscreen texture -> DIB -> ULW.
 glass-backdrop = { git = "https://github.com/MCheng404/glass-backdrop-rs", rev = "747457c8290cc4c38e8ee4ac1b3cfaeb3cbd59ac" }
 
-# windows crate：只用官方绑定，不引入第三方 Win32 封装。
-#
-# 为什么是 0.62：本机 cargo 缓存里已有 0.62.2，可离线构建；且该版本
-# 的 `Win32::Graphics::GdiPlus` 已暴露 GDI+ 平面 API（GdipXxx），
-# 与原始 C 版的调用方式一一对应，便于逐函数迁移比对。
-#
-# features 是**并集**语义：各 crate 内声明的 feature 会在 workspace
-# 内合并，所以统一写在这里，避免各 crate 版本/feature 漂移。
+# Features are additive across the workspace, so they are declared once here.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -86,11 +74,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# release 取向与 C 版一致：先求体积。
-#
-# 注意：`opt-level = "z"` 会牺牲内联，动画帧（15 ms）里热点若变成
-# 瓶颈，优先把 `minidock-gfx::frame` 相关函数标 `#[inline]`，而不是
-# 整体换 `opt-level = 3` —— 后者让 exe 从 ~700 KB 涨到 1.4 MB 量级。
+# Size first, matching the C version. If animation frames become CPU-bound,
+# add #[inline] to hot paths instead of switching to opt-level = 3.
 [profile.release]
 opt-level = "z"
 lto = "fat"
@@ -98,7 +83,6 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-# dev profile 保留符号，方便用 WinDbg / VS 附加到 Rust 进程复查
-# 崩溃点（v2.0.0 的 GdipDrawLine 事故就是这么定位的）。
+# Keep symbols so WinDbg / VS can attach to a crashing Rust process.
 [profile.dev]
 incremental = true

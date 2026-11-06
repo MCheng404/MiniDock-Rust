@@ -217,9 +217,8 @@ mod wgpu_device {
 
     pub struct Device {
         pub device: wgpu::Device,
-        /// 队列不参与绘制，但要留着：丢队列会让设备进入空闲态，
-        /// 驱动可能顺手回收一部分显存，测出来的数字就偏小。
-        #[allow(dead_code)]
+        /// Keep the queue alive; dropping it lets the driver reclaim memory.
+        #[expect(dead_code, reason = "queue must outlive the measurement")]
         pub queue: wgpu::Queue,
     }
 
@@ -380,9 +379,8 @@ mod d3d11_device {
 
     pub struct Device {
         pub device: ID3D11Device,
-        /// 立即上下文必须留着：D3D11 的设备与上下文是一对，
-        /// 只留设备会让驱动认为上下文已废弃。
-        #[allow(dead_code)]
+        /// D3D11 device and immediate context are a pair; keep both.
+        #[expect(dead_code, reason = "context must outlive the measurement")]
         pub context: ID3D11DeviceContext,
     }
 

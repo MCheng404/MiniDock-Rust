@@ -28,18 +28,21 @@
 所以"呈现"是每帧一次同步回读 + `UpdateLayeredWindow`。这条回读是 UI 线程
 上唯一剩下的阻塞点，也是将来要提帧率时的第一个目标。
 
-线程里**绝对不做**的事：不碰 `wgpu::Device` / `egui::Context`（纹理必须由
-UI 线程上传）、不创建窗口、不改窗口状态。
+线程里**绝对不做**的事：不碰 `egui::Context`（纹理注册与图集上传必须由
+UI 线程做）、不创建窗口、不改窗口状态。`wgpu` compute 是例外：
+`Device` / `Queue` 是 `Send + Sync`，图标圆角遮罩在工作线程提交并回读。
 
-多核只用在图标像素处理上 —— 那是全项目唯一的 CPU 密集型工作。其余三条
-都是 IO 等待，并行只会增加线程数而不缩短墙钟时间，所以没有上 rayon。
+rayon 只用来并行派发图标批；像素处理本身已移到 GPU compute，
+毛玻璃卷积也不再占 CPU 核。其余线程都是 IO 等待。
 
 | 工作 | 线程 | 代价 |
 |---|---|---|
-| 图标取用 | `IconLoader` | 启动时窗口先出来，图标陆续补上 |
+| 图标取用 | `IconLoader` | 启动时窗口先出来，图标陆续补上；遮罩走 GPU compute |
 | 窗口枚举 | `Scanner` | 1.2 s / 100 ms 一轮，都在后台 |
 | 写 ini | `DiskWriter` | 停手 400 ms 后才写 |
-| 磨砂 | **未实现**（M3），`Frost` 退化为渐变 | —— |
+| 毛玻璃抓屏 | `frost::Live` | 100 ms 起步，桌面静止退避到 800 ms |
+| 毛玻璃模糊 | **UI 线程**（`shaders::frost` compute） | 每帧提交约 1.8 ms，零回读 |
+| 烟雾光栅 | **UI 线程**（`shaders::smoke` compute） | 每帧上传流场，输出直接注册为 egui 纹理 |
 
 ## 二、crate 依赖
 
@@ -59,9 +62,9 @@ minidock-core        （无 Win32 依赖，纯逻辑）
 
 ## 三、渲染管线
 
-一帧的完整路径在 **`frame.rs::FrameRenderer::render`** 里，设置窗口
-（`overlay.rs`）与 Dock 窗口（`bin/dock.rs`）共用同一份实现 —— 这条链路
-原先两边各写一遍，逐行相同，任何 API 变动都要改两处。
+一帧的完整路径在 **`frame.rs::FrameRenderer::draw_frame`** 里，`render` 与
+`render_rgba` 共用同一份实现 —— 这条链路原先两边各写一遍，逐行相同，任何
+API 变动都要改两处。
 
 1. 调用方组装 `egui::RawInput`（含 `screen_rect`、`time`、`viewports`），
    传给 `render(raw, hwnd, pos, |ui| ...)`。
@@ -70,14 +73,55 @@ minidock-core        （无 Win32 依赖，纯逻辑）
 4. `textures_delta.set` 逐项 `renderer.update_texture`（字形图集、图标纹理）。
 5. `renderer.update_buffers` 写顶点/索引缓冲。
 6. `begin_render_pass`，`LoadOp::Clear(Color::TRANSPARENT)` —— **透明清屏是窗口能透出桌面的关键**。
-7. `renderer.render(&mut pass, ...)`，`queue.submit`。
-8. `copy_texture_to_buffer` → 同步回读 → 预乘 BGRA。
-9. 之后分两路：`render` 把像素交给 DIB 并 `UpdateLayeredWindow`；
-   `render_rgba` 直接把像素返回，不呈现 —— 离屏截图（
-   `examples/settings_shot.rs`）与将来的像素级回归走这条路。
-10. `textures_delta.free` 回收，然后 `clear()`（不 clear 会在 Drop 时断言 panic）。
+7. `renderer.render(&mut pass, ...)`。
+8. `copy_texture_to_buffer` → `queue.submit` → `textures_delta.free` + `clear()`
+   （不 clear 会在 Drop 时断言 panic）。
+9. 之后分两路：
+   - `render`：`with_mapped_pixels` 把带 256 字节行对齐的回读缓冲**直接**
+     写进 DIB（同时去对齐 + RGBA→BGRA），再 `UpdateLayeredWindow`。
+     没有整帧中间缓冲，也没有每帧 1–6 MB 的堆分配。
+   - `render_rgba`：`read_pixels` 返回紧密 RGBA，不呈现 —— 离屏截图
+     （`examples/settings_shot.rs`）与像素级回归走这条路。
 
 返回 `FrameOutcome { cursor, repaint_delay }` —— 调用方只需要这两个值。
+
+毛玻璃背景不走上屏纹理上传：`frost::Live` 线程只抓屏并把字节用 `Arc`
+交给 UI 线程；`FrameRenderer` 在 `draw_frame` 前调用 `blur_gpu` 的 WGSL
+compute（两趟可分离高斯 + 圆角 coverage），输出 `Rgba8Unorm` 纹理直接
+注册给 egui，**零回读**。CPU `blur_rgba` / `compose` 保留为回退路径与
+像素级对照基准。
+
+### GPU shader 框架：`gpu/shaders/`
+
+所有逐像素着色器集中在这里。`ShaderRuntime` 缓存 compute pipeline、管理
+输出 `Rgba8Unorm` 纹理、统一注册为 egui native texture；WGSL 分文件存放，
+每条 GPU 路径都有 CPU 参考实现和 `#[ignore]` 真机逐通道对照（差 ≤1）。
+
+| 模块 | GPU 做什么 | CPU 参考 |
+|---|---|---|
+| `frost.wgsl` | 两趟可分离高斯 + 圆角 + 预乘 | `frost::blur_rgba` |
+| `smoke.wgsl` | 双线性放大 + 三层噪声 + 调色 + pre/post | `Fluid::raster` / `post` |
+| `icon.wgsl` | 图标圆角 alpha 遮罩 | `core::icon::apply_round_mask` |
+| `puff.wgsl` | 64×64 软边烟团贴图 | `SmokeFx::puff_rgba_cpu` |
+
+CPU 版本只作回退与测试基准。**保留在 CPU 的不是着色器**：
+`Fluid::step`（流体物理模拟）、`Noise` 表（共享数据源，启动上传一次）、
+`fit_icon` / bbox（标量几何）、`platform::icon::bgra_to_rgba`（GDI 格式
+重排，platform 层按架构不依赖 wgpu）、`present::swap_rb`（GPU→CPU 呈现
+桥接，`UpdateLayeredWindow` 要求 CPU DIB，M3 换 DirectComposition 才能消除）。
+
+### 帧节拍与常驻内存
+
+活跃态由 `App::wait()` 按 `perf::pacing_ms` 唤醒：默认不限（1 ms 泵），
+`[performance] FrameCap` 可设上限，`VSync=1` 时按
+`DwmGetCompositionTimingInfo` 的实际刷新率对齐（本机 16 ms）。空闲态
+仍睡满 `FS_CHECK_MS`，保持「空闲 0 帧」。设置窗口用 `repaint_in()` 把
+egui 的重绘期限并入等待，不再靠 1 秒兜底。
+
+MSAA 默认按面积自适应：> 2 M 物理像素用 2x（2560×1600 省约 31 MiB
+常驻显存），小窗口仍 4x；`Msaa` 可强制 1/2/4（下次启动生效）。
+CJK 字体（`msyh.ttc`，8.04 MiB）由 `OnceLock<Arc<FontData>>` 全进程
+共享，不再每个 `FrameRenderer` 各读一份。
 
 ### 槽位布局：`core::layout`
 
@@ -161,11 +205,16 @@ CPU 占用为 0。这条性质是产品承诺（"空闲无定时器"），**不�
 | 线程 | 职责 | 禁止事项 |
 |---|---|---|
 | UI | 消息泵、egui、GPU 提交、命中 | 不做磁盘 IO、不枚举窗口 |
-| rayon 池 | 图标解码/缩放/预乘、模糊 fallback | 不碰窗口/device |
-| IO 线程 | 窗口扫描、favicon 下载、缩略图抓取 | 不产生 `wgpu` 对象 |
-| GPU | 桌面复制、compute 模糊 | 不阻塞等待 CPU 结果 |
+| rayon 池 | 图标像素处理（缩放判定 + 圆角遮罩） | 不碰窗口/device |
+| `IconLoader` | shell/COM 取图标，**串行** | 不碰 UI 状态 |
+| `Scanner` | 运行状态 + 遮挡检测 | 不产生 `wgpu` 对象 |
+| `DiskWriter` | 写 ini（400 ms 防抖、串行保序） | 不碰窗口 |
+| `Opener` | `ShellExecuteW` / 激活已有窗口 | 不碰窗口 |
+| `minidock-frost` | GDI 抓屏 + CPU 可分离高斯（面板可见时） | 不碰窗口/device |
 
-跨线程数据用 `ArcSwap`（快照，读多写少）+ `crossbeam-channel`（任务与结果）。
+跨线程数据用 `std::sync::mpsc`（任务与结果各一条通道）+ `PostMessage` 唤醒。
+**没有 `ArcSwap` / `crossbeam-channel`**：本项目跨线程传的是值拷贝，不存在
+读多写少的共享快照，队列深度也只有个位数（ADR-037）。
 不用 tokio：这里没有大量并发连接，只有几条长驻线程 + 一个线程池，
 async 运行时带来的调度开销与栈占用都不划算。
 

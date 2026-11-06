@@ -1,17 +1,17 @@
-//! 栏体外的环境烟雾：把 `minidock_core::smoke` 的模拟接到 egui 上。
+//! Smoke effect: CPU fluid simulation, GPU raster shader, egui drawing.
 //!
-//! 这一层做三件事：
-//! 1. 驱动：按真实帧间隔推进模拟（`dt` 取单调时钟的差值，不用固定 16 ms）；
-//! 2. 上传：把预乘 RGBA 位图写进一张 egui 纹理；
-//! 3. 绘制：图像加上升的小烟团，画在栏体**之前**。
+//! `SmokeFx::with_gpu` uses `shaders::smoke` (WGSL) and registers the output
+//! as a native egui texture, so no per-frame bitmap upload happens. `new()`
+//! keeps the CPU reference path for tests and as a fallback.
 //!
-//! 烟画在栏体下面：画在上面会把图标染紫。栏体四周溢出的那圈已经够了。
-//!
-//! 纹理尺寸按**物理像素**算，绘制时除以 `pixels_per_point`：分层窗口用
-//! 物理像素，egui 用逻辑点，混用会在 150% 缩放下缩一半。
+//! Drawn before the bar; the glow must stay behind the icons.
 
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 use minidock_core::smoke::{Fluid, Frame, Noise, Rgb, Tuning, CELL, RES};
+
+use crate::gpu::Gpu;
+use crate::shaders::puff::PuffShader;
+use crate::shaders::smoke::{SharedLayer, SmokeShader};
 
 /// 网格尺寸的分档粒度（格）。
 ///
@@ -83,13 +83,23 @@ pub struct View {
     pub now_s: f64,
 }
 
+/// GPU side of the effect. `SmokeLayer` bridges the texture to FrameRenderer.
+struct SmokeGpu {
+    shader: SmokeShader,
+    puff: PuffShader,
+    layer: SharedLayer,
+    fields: Vec<f32>,
+    noise_ready: bool,
+}
+
 /// 烟雾的运行时状态。一个 Dock 窗口一份。
 pub struct SmokeFx {
     /// 噪声表：40 ms 生成，第一次真正出烟时才做（关掉烟雾的用户不必付这个钱）。
     noise: Option<Noise>,
     fluid: Fluid,
-    /// 合成后的纹理。
+    /// CPU reference path only; the GPU path registers a native texture.
     tex: Option<TextureHandle>,
+    gpu: Option<SmokeGpu>,
     /// 上一层用的时间（秒，单调）。`None` = 第一帧，不推进模拟。
     last_s: Option<f64>,
     /// 上一帧光标位置（**窗口物理坐标**），用来算推力方向。
@@ -135,6 +145,7 @@ impl SmokeFx {
             noise: None,
             fluid: Fluid::new(),
             tex: None,
+            gpu: None,
             last_s: None,
             last_mouse: None,
             puff_tex: None,
@@ -144,6 +155,27 @@ impl SmokeFx {
             was_on: false,
             trace_n: 0,
         }
+    }
+
+    /// Enable the GPU raster path. Called once at startup with the shared device.
+    #[must_use]
+    pub fn with_gpu(gpu: &Gpu) -> Self {
+        let mut fx = Self::new();
+        let shader = SmokeShader::new(&gpu.device, &gpu.queue);
+        fx.gpu = Some(SmokeGpu {
+            layer: shader.layer(),
+            shader,
+            puff: PuffShader::new(&gpu.device, &gpu.queue),
+            fields: Vec::new(),
+            noise_ready: false,
+        });
+        fx
+    }
+
+    /// Shared layer handle, passed to `FrameRenderer::set_smoke_layer`.
+    #[must_use]
+    pub fn layer(&self) -> Option<SharedLayer> {
+        self.gpu.as_ref().map(|g| g.layer.clone())
     }
 
     /// 是否还需要继续出帧（主循环据此决定等待超时）。
@@ -227,68 +259,104 @@ impl SmokeFx {
             },
         );
 
-        // ④ 光栅化 + 上色。第二色沿栏体从左到右过渡，需要知道栏体在
-        //    位图里的横向位置。
+        // Shade one frame. GPU path writes a native texture (zero bitmap
+        // upload); CPU path stays as the reference/fallback.
         let (base, second) = tune.colors((now_s % 86400.0) as f32);
-        let (pw, ph) = self.fluid.raster(noise, base, t);
+        let (gw, gh) = self.fluid.grid();
+        let (pw, ph) = self.fluid.bitmap_size();
         if pw == 0 || ph == 0 {
             return;
         }
-        self.fluid.post(
-            base,
-            second,
-            ((bx - gx0) / RES as f32, bw / RES as f32),
-            tune.opacity,
-        );
-
-        // 诊断：网格 / 位图 / 最大 alpha / 栏体矩形 / 光标。
-        // 只在 `MINIDOCK_SMOKE_TRACE=1` 时出声，且约每 30 帧一次 ——
-        // 这个功能"看不见"的原因只可能是三层之一（没启用 / 全透明 /
-        // 画在窗口外），这三项覆盖了前两项，矩形覆盖第三项。
-        if trace_on() {
-            self.trace_n = self.trace_n.wrapping_add(1);
-            if self.trace_n % 30 == 1 {
-                let max_a = self
-                    .fluid
-                    .pixels()
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|p| p[3])
-                    .max()
-                    .unwrap_or(0);
-                eprintln!(
-                    "[smoke] grid={w}x{h} bmp={pw}x{ph} maxA={max_a} bar=({bx},{by},{bw},{bh}) off={offset:?} op={:.2} base=[{:.0},{:.0},{:.0}] cursor={cursor:?}",
-                    tune.opacity, base[0], base[1], base[2]
-                );
-            }
-        }
-
-        let image = ColorImage::from_rgba_premultiplied([pw, ph], self.fluid.pixels());
-        let tex = match &mut self.tex {
-            Some(t) => {
-                t.set(image, TextureOptions::LINEAR);
-                t.clone()
-            }
-            None => ui
-                .ctx()
-                .load_texture("minidock-smoke", image, TextureOptions::LINEAR),
-        };
-        self.tex = Some(tex.clone());
-
         let k = 1.0 / ppp;
         let rect = egui::Rect::from_min_size(
             egui::pos2((gx0 + offset.0) * k, (gy0 + offset.1) * k),
             egui::vec2((pw * RES) as f32 * k, (ph * RES) as f32 * k),
         );
-        // 不透明度 <= 100% 走 tint alpha；>100% 已经在 `post` 里提过 alpha。
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         let alpha = (tune.opacity.min(1.0) * 255.0).round() as u8;
-        ui.painter().image(
-            tex.id(),
-            rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
-        );
+        let tint = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+
+        if trace_on() {
+            self.trace_n = self.trace_n.wrapping_add(1);
+            if self.trace_n % 30 == 1 {
+                eprintln!(
+                    "[smoke] grid={gw}x{gh} bmp={pw}x{ph} bar=({bx},{by},{bw},{bh}) off={offset:?} op={:.2} gpu={} cursor={cursor:?}",
+                    tune.opacity,
+                    self.gpu.is_some()
+                );
+            }
+        }
+
+        if let Some(g) = self.gpu.as_mut() {
+            if !g.noise_ready {
+                let table: Vec<f32> = noise.layers().iter().flatten().copied().collect();
+                g.shader.set_noise(&table);
+                g.noise_ready = true;
+            }
+            let (al, ox, oy) = self.fluid.gpu_fields();
+            let cells = gw * gh;
+            g.fields.clear();
+            g.fields.reserve(cells * 3);
+            g.fields.extend_from_slice(al);
+            g.fields.extend_from_slice(ox);
+            g.fields.extend_from_slice(oy);
+
+            let c2 = second.unwrap_or([0.0; 3]);
+            let mut p = [0.0f32; 20];
+            p[0] = gw as f32;
+            p[1] = gh as f32;
+            p[2] = pw as f32;
+            p[3] = ph as f32;
+            p[4] = noise.size() as f32;
+            p[5] = CELL;
+            p[6] = RES as f32;
+            p[7] = t;
+            p[8] = base[0];
+            p[9] = base[1];
+            p[10] = base[2];
+            p[11] = c2[0];
+            p[12] = c2[1];
+            p[13] = c2[2];
+            p[14] = if second.is_some() { 1.0 } else { 0.0 };
+            p[15] = (bx - gx0) / RES as f32;
+            p[16] = bw / RES as f32;
+            p[17] = tune.opacity;
+
+            let SmokeGpu {
+                shader,
+                fields,
+                layer,
+                ..
+            } = g;
+            let _ = shader.raster(fields.as_slice(), &p);
+            let id = layer.lock().ok().and_then(|l| l.id);
+            if let Some(id) = id {
+                ui.painter().image(id, rect, uv, tint);
+            }
+        } else {
+            let (cpw, cph) = self.fluid.raster(noise, base, t);
+            if cpw == 0 || cph == 0 {
+                return;
+            }
+            self.fluid.post(
+                base,
+                second,
+                ((bx - gx0) / RES as f32, bw / RES as f32),
+                tune.opacity,
+            );
+            let image = ColorImage::from_rgba_premultiplied([cpw, cph], self.fluid.pixels());
+            let tex = match &mut self.tex {
+                Some(t) => {
+                    t.set(image, TextureOptions::LINEAR);
+                    t.clone()
+                }
+                None => ui
+                    .ctx()
+                    .load_texture("minidock-smoke", image, TextureOptions::LINEAR),
+            };
+            self.tex = Some(tex.clone());
+            ui.painter().image(tex.id(), rect, uv, tint);
+        }
 
         // ⑤ 上升的小烟团。
         if tune.clouds {
@@ -382,59 +450,102 @@ impl SmokeFx {
         }
     }
 
-    /// 烟团贴图：若干圆取并集形成的软边团块。
-    ///
-    /// 只做一张：形状的重复感靠每次绘制的非等比缩放与透明度差异打散。
+    /// Soft puff sprite. GPU compute when available, CPU as reference/fallback.
     fn puff_texture(&mut self, ctx: &egui::Context) -> TextureHandle {
         if let Some(t) = &self.puff_tex {
             return t.clone();
         }
-        const S: usize = 64;
-        let mut rgba = vec![0u8; S * S * 4];
-        // 中心一团 + 一圈小团。
-        let mut circles = vec![(0.0_f32, 0.0_f32, 0.62_f32, 0.60_f32)];
-        let n = 6;
-        for k in 0..n {
-            let ang = std::f32::consts::TAU * k as f32 / n as f32;
-            let d = 0.62 + 0.08 * ((k * 5) % 4) as f32;
-            let r = 0.36 + 0.07 * ((k * 3) % 4) as f32;
-            circles.push((ang.cos() * d, ang.sin() * d * 0.86, r, r));
-        }
-        for y in 0..S {
-            for x in 0..S {
-                // 贴图坐标 → 形状坐标（形状大致落在 ±1.1）。
-                let u = (x as f32 + 0.5) / S as f32 * 2.2 - 1.1;
-                let v = (y as f32 + 0.5) / S as f32 * 2.2 - 1.1;
-                let mut best = 0.0_f32;
-                for &(cx, cy, rx, ry) in &circles {
-                    let dx = (u - cx) / rx;
-                    let dy = (v - cy) / ry;
-                    let d = (dx * dx + dy * dy).sqrt();
-                    best = best.max((1.0 - d).clamp(0.0, 1.0));
-                }
-                // 软边：线性距离场再 smoothstep 一次，边缘不会出现一圈硬边。
-                let a = best * best * (3.0 - 2.0 * best);
-                let b = (a * 255.0) as u8;
-                let o = (y * S + x) * 4;
-                rgba[o] = b;
-                rgba[o + 1] = b;
-                rgba[o + 2] = b;
-                rgba[o + 3] = b;
-            }
-        }
+        let rgba = match &self.gpu {
+            Some(g) => g.puff.build().unwrap_or_else(Self::puff_rgba_cpu),
+            None => Self::puff_rgba_cpu(),
+        };
+        let size = crate::shaders::puff::SIZE as usize;
         let tex = ctx.load_texture(
             "minidock-smoke-puff",
-            ColorImage::from_rgba_premultiplied([S, S], &rgba),
+            ColorImage::from_rgba_premultiplied([size, size], &rgba),
             TextureOptions::LINEAR,
         );
         self.puff_tex = Some(tex.clone());
         tex
+    }
+
+    /// CPU reference for the sprite; also the no-GPU fallback.
+    fn puff_rgba_cpu() -> Vec<u8> {
+        let s = crate::shaders::puff::SIZE as usize;
+        let mut rgba = vec![0u8; s * s * 4];
+        let mut circles = vec![(0.0_f32, 0.0_f32, 0.62_f32, 0.60_f32)];
+        for k in 0..6 {
+            let ang = std::f32::consts::TAU * k as f32 / 6.0;
+            let d = 0.62 + 0.08 * ((k * 5) % 4) as f32;
+            let r = 0.36 + 0.07 * ((k * 3) % 4) as f32;
+            circles.push((ang.cos() * d, ang.sin() * d * 0.86, r, r));
+        }
+        for y in 0..s {
+            for x in 0..s {
+                let u = (x as f32 + 0.5) / s as f32 * 2.2 - 1.1;
+                let v = (y as f32 + 0.5) / s as f32 * 2.2 - 1.1;
+                let mut best = 0.0_f32;
+                for &(cx, cy, rx, ry) in &circles {
+                    let dx = (u - cx) / rx;
+                    let dy = (v - cy) / ry;
+                    best = best.max((1.0 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0));
+                }
+                let a = best * best * (3.0 - 2.0 * best);
+                let b = (a * 255.0) as u8;
+                let o = (y * s + x) * 4;
+                rgba[o..o + 4].copy_from_slice(&[b, b, b, b]);
+            }
+        }
+        rgba
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end GPU path: compute output -> native texture -> rendered frame.
+    #[test]
+    #[ignore = "requires a GPU and a desktop session; run with --ignored"]
+    fn gpu_smoke_reaches_the_frame() {
+        let gpu = Gpu::new("").expect("D3D12 adapter");
+        let (w, h) = (256u32, 128u32);
+        let mut frame = crate::frame::FrameRenderer::new(&gpu, w, h, 1.0).expect("renderer");
+        let mut fx = SmokeFx::with_gpu(&gpu);
+        frame.set_smoke_layer(fx.layer().expect("layer"));
+        let tune = Tuning {
+            enabled: true,
+            clouds: false,
+            ..Tuning::default()
+        };
+        let bar = (40.0, 60.0, 176.0, 30.0);
+        let mut lit = 0usize;
+        for i in 0..6 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(w as f32, h as f32),
+                )),
+                ..Default::default()
+            };
+            let view = View {
+                bar,
+                offset: (0.0, 0.0),
+                cursor: None,
+                now_s: f64::from(i) * 0.033,
+            };
+            let (pixels, _) = frame
+                .render_rgba(&gpu, raw, |ui| fx.paint(ui, 1.0, &tune, view))
+                .expect("frame");
+            lit = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] > 8)
+                .count();
+        }
+        assert!(lit > 100, "smoke never appeared, lit={lit}");
+    }
 
     /// 端到端跑几帧：模拟 → 光栅化 → 上传成 egui 纹理。
     ///
