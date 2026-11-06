@@ -45,6 +45,14 @@ impl Json {
     }
 
     #[must_use]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Num(n) => Some(*n),

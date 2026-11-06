@@ -45,6 +45,8 @@ pub enum UpdateError {
     Http(String),
     /// The release has no `.exe` asset — packaging changed under us.
     NoAsset,
+    /// GitHub 上一个已发布的版本都没有。
+    NoRelease,
     Io(std::io::Error),
     /// Downloaded bytes do not match the published checksum.
     Checksum {
@@ -56,10 +58,19 @@ pub enum UpdateError {
 impl fmt::Display for UpdateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // GitHub 匿名接口每小时只有 60 次；撞上限时给一句能懂的话，
+            // 免得用户把 403 当成仓库没了。
+            Self::Net(net::NetError::Status(code @ (403 | 429))) => {
+                write!(
+                    f,
+                    "GitHub 接口限流（每小时 60 次，当前 HTTP {code}），请稍后再试"
+                )
+            }
             Self::Net(e) => write!(f, "网络错误：{e}"),
             Self::Json => write!(f, "GitHub 返回的内容无法解析"),
             Self::Http(what) => write!(f, "{what}"),
             Self::NoAsset => write!(f, "该版本没有可用的 exe 资产"),
+            Self::NoRelease => write!(f, "GitHub 上还没有发布任何版本"),
             Self::Io(e) => write!(f, "文件读写失败：{e}"),
             Self::Checksum { expected, actual } => {
                 write!(f, "校验失败：期望 {expected}，实际 {actual}")
@@ -146,6 +157,8 @@ pub struct Release {
     pub notes: String,
     pub exe: Asset,
     pub sha256: Asset,
+    /// 预发布（`dev` 通道）。界面据此把"新版本"说成"新的预发布"。
+    pub prerelease: bool,
 }
 
 /// `https://github.com/x` → `https://<mirror>/https://github.com/x`.
@@ -158,17 +171,73 @@ pub fn mirror_url(mirror: &str, original: &str) -> String {
     }
 }
 
-/// Ask GitHub for the newest published release.
+/// Ask GitHub for the newest release we can offer.
+///
+/// `/releases/latest` answers **404** whenever there is no *stable* release —
+/// after a release cleanup, or while the project only has pre-releases. That
+/// is a normal state, not an error: fall back to the list endpoint so "check
+/// for updates" keeps working in that window.
 pub fn latest_release() -> Result<Release, UpdateError> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let headers = format!(
+    match fetch_release(&format!(
+        "https://api.github.com/repos/{REPO}/releases/latest"
+    )) {
+        Ok(release) => Ok(release),
+        Err(UpdateError::Net(net::NetError::Status(404))) => newest_published(),
+        Err(e) => Err(e),
+    }
+}
+
+fn api_headers() -> String {
+    format!(
         "Accept: application/vnd.github+json\r\nUser-Agent: {UA}\r\n\
          X-GitHub-Api-Version: 2022-11-28\r\n"
-    );
-    let res = net::get(&url, &headers, TIMEOUT_MS)?;
+    )
+}
+
+fn fetch_release(url: &str) -> Result<Release, UpdateError> {
+    let res = net::get(url, &api_headers(), TIMEOUT_MS)?;
     let text = String::from_utf8_lossy(&res.body);
     let doc = json::parse(&text).map_err(|_| UpdateError::Json)?;
+    parse_release(&doc)
+}
 
+/// Newest non-draft entry from `/releases` — pre-releases included.
+fn newest_published() -> Result<Release, UpdateError> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=15");
+    let res = net::get(&url, &api_headers(), TIMEOUT_MS)?;
+    let text = String::from_utf8_lossy(&res.body);
+    let doc = json::parse(&text).map_err(|_| UpdateError::Json)?;
+    let list = doc.as_arr().ok_or(UpdateError::Json)?;
+
+    pick_newest(list).ok_or(UpdateError::NoRelease)
+}
+
+/// 从 `/releases` 的数组里挑出最该推荐的那一个。
+///
+/// 草稿跳过；缺 `.exe`/`.sha256` 的半成品跳过（否则"检查更新"会卡在一个
+/// 永远下不动的版本上）；其余按版本号取最大，不按发布时间 —— 补发的旧版本
+/// 不该盖住新的。
+fn pick_newest(list: &[Json]) -> Option<Release> {
+    let mut best: Option<Release> = None;
+    for item in list {
+        if item.get("draft").and_then(Json::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let Ok(release) = parse_release(item) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|b| release.version.is_newer_than(&b.version))
+        {
+            best = Some(release);
+        }
+    }
+    best
+}
+
+/// Both endpoints return the same object shape.
+fn parse_release(doc: &Json) -> Result<Release, UpdateError> {
     let tag = doc
         .get("tag_name")
         .and_then(Json::as_str)
@@ -180,6 +249,10 @@ pub fn latest_release() -> Result<Release, UpdateError> {
         .and_then(Json::as_str)
         .unwrap_or_default()
         .to_owned();
+    let prerelease = doc
+        .get("prerelease")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
 
     let assets = doc
         .get("assets")
@@ -210,6 +283,7 @@ pub fn latest_release() -> Result<Release, UpdateError> {
         notes,
         exe: exe.ok_or(UpdateError::NoAsset)?,
         sha256: sha256.ok_or(UpdateError::NoAsset)?,
+        prerelease,
     })
 }
 
@@ -228,13 +302,7 @@ pub fn probe(url: &str) -> Option<u128> {
 /// DoH (Cloudflare) A-record lookup. `None` when DoH itself is unreachable.
 pub fn resolve_doh(host: &str) -> Option<Vec<String>> {
     let url = format!("https://cloudflare-dns.com/dns-query?name={host}&type=A");
-    let res = net::get(
-        &url,
-        "Accept: application/dns-json
-",
-        PROBE_TIMEOUT_MS,
-    )
-    .ok()?;
+    let res = net::get(&url, "Accept: application/dns-json\r\n", PROBE_TIMEOUT_MS).ok()?;
     let text = String::from_utf8_lossy(&res.body);
     let doc = json::parse(&text).ok()?;
     let answers = doc.get("Answer")?.as_arr()?;
@@ -405,6 +473,37 @@ mod tests {
         assert!(!rel("1.0.0-65-abc1234").is_newer_than(&rel("1.0.0")));
         assert_eq!(rel("1.0.0-65-abc1234").build, Some(65));
         assert_eq!(rel("v1.0.0").build, None);
+    }
+
+    /// `/releases` 的回退路径：草稿、缺资产、旧版本都要被正确跳过。
+    #[test]
+    fn newest_published_skips_drafts_and_broken_entries() {
+        let list = json::parse(
+            r#"[
+              {"tag_name":"v9.9.9","draft":true,"prerelease":false,
+               "assets":[{"name":"a.exe","browser_download_url":"u"},{"name":"a.exe.sha256","browser_download_url":"v"}]},
+              {"tag_name":"v2.0.0","draft":false,"prerelease":true,
+               "assets":[{"name":"b.exe","browser_download_url":"u"},{"name":"b.exe.sha256","browser_download_url":"v"}]},
+              {"tag_name":"v1.0.0","draft":false,"prerelease":false,
+               "assets":[{"name":"c.exe","browser_download_url":"u"},{"name":"c.exe.sha256","browser_download_url":"v"}]},
+              {"tag_name":"v3.0.0","draft":false,"prerelease":false,"assets":[]}
+            ]"#,
+        )
+        .expect("parses");
+        let picked = pick_newest(list.as_arr().expect("array")).expect("one winner");
+        assert_eq!(picked.version.text, "2.0.0", "草稿与缺资产的都要跳过");
+        assert!(picked.prerelease, "选中的是预发布，界面要说清楚");
+    }
+
+    #[test]
+    fn empty_release_list_reports_no_release() {
+        assert!(pick_newest(&[]).is_none());
+    }
+
+    #[test]
+    fn rate_limit_error_is_readable() {
+        let e = UpdateError::Net(net::NetError::Status(403));
+        assert!(e.to_string().contains("限流"), "{e}");
     }
 
     #[test]

@@ -3107,7 +3107,12 @@ impl App {
                     view.busy = true;
                 }
                 UpdateMsg::Available(release) => {
-                    view.status = format!("发现新版本 {}", release.version.text);
+                    let kind = if release.prerelease {
+                        "新预发布"
+                    } else {
+                        "新版本"
+                    };
+                    view.status = format!("发现{kind} {}", release.version.text);
                     view.available = true;
                     view.busy = false;
                     self.update_release = Some(*release);

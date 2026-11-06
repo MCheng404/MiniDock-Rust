@@ -16,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let release = nooksill_platform::update::latest_release()?;
     println!(
-        "latest:    {}  exe={}  sha={}",
-        release.version.text, release.exe.name, release.sha256.name
+        "latest:    {}  exe={}  sha={}  prerelease={}",
+        release.version.text, release.exe.name, release.sha256.name, release.prerelease
     );
     println!(
         "newer:     {}",
