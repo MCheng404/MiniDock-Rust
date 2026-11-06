@@ -169,6 +169,13 @@ clippy -D warnings / fmt --check / 门禁全绿。
   没有控制台之后，早期失败与主线程 panic 改成弹窗（工作线程 panic 仍只打
   日志），否则用户看到的就是"双击没反应"。
 
+- **图形后端可选**（`NOOKSILL_BACKEND=auto|dx12|vulkan|gl|metal`）：早先实例
+  创建处写死 `DX12`，Vulkan 一律拿不到适配器。现在 Windows 默认仍是 DX12
+  （与 DWM 合成路径调过），其它平台默认 `PRIMARY`（Linux 即 Vulkan）。
+  实测同一页面在 DX12 与 Vulkan 下出的图**逐像素完全一致**（642,960 像素，
+  最大通道差 0），`probe` 在 Vulkan 下正常建设备。移植边界与四阶段计划见
+  ADR-072。
+
 **破坏性**：这是一次身份变更，不复用旧路径 —— 配置目录、ini 名、互斥体、
 URI scheme 全换，旧版本配置不会被继承，两个版本也不会抢同一个单实例。
 GitHub 上旧的 Release 与标签一并清空，从 2.0.0 重新开始。

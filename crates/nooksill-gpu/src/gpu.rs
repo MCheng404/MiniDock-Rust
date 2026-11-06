@@ -150,12 +150,9 @@ impl Gpu {
     ///
     /// `wanted` 是适配器名字，空串表示自动。
     pub fn new(wanted: &str) -> Result<Self, GpuError> {
-        // **强制 DX12**：默认实例在装了 Vulkan 驱动的机器上会选 Vulkan。
-        // 虽然两条路都不支持 alpha 交换链，但 DX12 的驱动行为更可控、
-        // 且与 DWM 合成路径一致（M0 首跑实测差异）。
-        // 另外 Vulkan 与 DX12 报出来的适配器名字格式不同，按名字匹配会失效。
+        let backends = requested_backends();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             backend_options: wgpu::BackendOptions::default(),
@@ -170,7 +167,7 @@ impl Gpu {
                 Some(adapter) => (adapter, Selection::Pinned),
                 None => {
                     let available: Vec<String> =
-                        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12))
+                        pollster::block_on(instance.enumerate_adapters(backends))
                             .into_iter()
                             .map(|a| a.get_info().name)
                             .collect();
@@ -218,6 +215,41 @@ impl Gpu {
     }
 }
 
+/// 这次进程要用哪些后端。
+///
+/// wgpu 本身已经抽象掉图形 API，锁死的是**实例创建时传的 `Backends`**：
+/// 早先三处都写死 `DX12`，Vulkan/Metal 一律拿不到适配器。而 Windows 的
+/// 默认值也不能是 `PRIMARY` —— 装了 Vulkan 驱动的机器上 wgpu 会优先挑它，
+/// 而 DX12 与 DWM 的合成路径才是我们调过的（M0 实测过差异）。
+///
+/// `NOOKSILL_BACKEND` 只给移植验证用，不是用户设置：它决定的是"这个进程
+/// 能不能起来"，放设置里没有意义（起不来就没界面改它）。
+fn requested_backends() -> wgpu::Backends {
+    use wgpu::Backends;
+    let raw = std::env::var("NOOKSILL_BACKEND").unwrap_or_default();
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => default_backends(),
+        "dx12" => Backends::DX12,
+        "vulkan" | "vk" => Backends::VULKAN,
+        "gl" | "opengl" => Backends::GL,
+        "metal" => Backends::METAL,
+        other => {
+            eprintln!("[gpu] 未知后端 `{other}`（可选 auto/dx12/vulkan/gl/metal），按 auto 处理");
+            default_backends()
+        }
+    }
+}
+
+/// 平台默认后端：Windows 走 DX12，其它平台交给 wgpu 的 `PRIMARY`
+/// （Linux/Android 上是 Vulkan，macOS 上是 Metal）。
+const fn default_backends() -> wgpu::Backends {
+    if cfg!(windows) {
+        wgpu::Backends::DX12
+    } else {
+        wgpu::Backends::PRIMARY
+    }
+}
+
 /// 自动：交给后端按功耗偏好挑。Dock 常驻，别唤醒独显。
 fn pick_auto(instance: &wgpu::Instance) -> Result<wgpu::Adapter, GpuError> {
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -235,7 +267,7 @@ fn pick_auto(instance: &wgpu::Instance) -> Result<wgpu::Adapter, GpuError> {
 /// 厂商后缀，而用户在列表里选的是 DXGI 的原名。
 fn pick_by_name(instance: &wgpu::Instance, wanted: &str) -> Option<wgpu::Adapter> {
     let needle = wanted.to_lowercase();
-    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12));
+    let adapters = pollster::block_on(instance.enumerate_adapters(requested_backends()));
 
     let exact = adapters
         .iter()

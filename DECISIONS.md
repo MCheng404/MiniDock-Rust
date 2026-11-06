@@ -3453,3 +3453,60 @@ DoH 依赖 Cloudflare 可达；不可达时判定为"未污染"，退化成只�
 **验证**：`cargo run -p nooksill-platform --example update_check` 实测
 （2026-11-06）：读到最新版 `1.0.0`、比当前 `1.0.0-65-fe678af` 新、
 选中 `ghfast.top`、下载 7,782,912 字节、SHA-256 与发布页 `.sha256` 一致。
+
+---
+
+## ADR-072 · 为 Vulkan / Linux / ARM64 留的抽象边界
+
+**背景**：目标是把 Dock 移植到 Linux（Vulkan）与 ARM64。动手前先分清
+"哪一层真的需要抽象"——否则很容易去包一层没用的 HAL。
+
+**事实（2026-11-06 实测）**：
+
+1. wgpu 已经抽象掉图形 API。锁死的只有三处 `wgpu::Backends::DX12`
+   （实例创建 + 两次 `enumerate_adapters`）。改成 `NOOKSILL_BACKEND`
+   可控之后，同一个 `settings_shot` 在 DX12 与 Vulkan 下出的图
+   **逐像素完全一致**（642,960 像素，最大通道差 0）。WGSL、compute、
+   离屏渲染、回读这四段本来就是后端无关的。
+2. 顺带测到的量：同一台机器（AMD 610M）设备开销 DX12 464 MB vs
+   Vulkan 114 MB。**不因此切默认后端** —— Windows 上的呈现路径是
+   `UpdateLayeredWindow + DIB`，与 DWM 合成的一致性才是不换的理由，
+   省 350 MB 是代价不是目标。
+3. 真正的移植成本不在着色器，在平台层：`nooksill-platform` 5081 行全是
+   Win32；`nooksill-gpu` 31 个文件里 18 个直接 `use windows::Win32`，
+   其中 6 个 `*_win.rs` 把"egui 内容"与"窗口壳"写在同一文件里。
+
+**决定**：
+
+1. **不再给 wgpu 包 HAL**。它已经是 HAL；再包一层只会把 backend 差异
+   藏起来，出问题时更难查。
+2. **不为着色器做 trait 抽象**。WGSL 本身可移植；要改的是参数载体
+   （`array<f32>` 下标约定 → `#[repr(C)]` 结构体），那是可读性问题，
+   与移植无关。
+3. **切口放在"呈现"这一层**，按最小改动排：
+   - Phase 2（下一步）：`present.rs` / `frame.rs` 里的 `HWND` 收进
+     `trait Presenter { fn present(&mut self, frame: &Frame) }`。
+     Win32 实现 = 现在的 DIB + ULW；Linux 实现 = swapchain + layer-shell。
+     `FrameRenderer::render(hwnd, pos)` 拆成 `render()` + `present()`。
+     这是唯一同时碰到两个 crate 的地方，先做它。
+   - Phase 3：`*_win.rs` 一分为二 —— `ui/calendar.rs`（纯 egui，可移植）
+     + `platform/win32/window.rs`（消息循环、DPI、置前）。六个窗口同理。
+   - Phase 4：Linux 平台实现。AppBar 在 Wayland 里没有对应物，用
+     layer-shell 的 `exclusive_zone` 表达"让出屏幕边"。
+4. **倒影必须在 Phase 2 一起改**。它现在做在 DIB 上（`present::mirror_rows`
+   直接改 BGRA 行），那是 Windows 专有的呈现细节；换成 swapchain 之后
+   这段代码不存在了。正确形态是一次 GPU blit（或者绘制时多画一遍镜像
+   的 layer），否则 Linux 上"倒影"这个功能直接没有。
+
+**代价与风险**：
+
+- Phase 2 会让 `FrameRenderer` 的调用点全部改一遍（dock、settings、menu、
+  四个弹层窗）。改动机械但面广。
+- Phase 3 是六个文件、每个 200–400 行的搬家，过程中很容易把"窗口行为"
+  和"egui 行为"混回去 —— 判据是：**新文件里不该出现 `HWND` 以外的
+  Win32 类型**（`GetCursorPos` 这类只在壳里）。
+- ARM64 不额外收费：`windows` crate 与 wgpu 都有 arm64 目标，MSVC 工具链
+  换 target 即可；前提是不在代码里写 x86 假设（目前没有）。
+
+**验证**：`NOOKSILL_BACKEND=vulkan` + `settings_shot` 逐像素比对（0 差异）；
+`probe` 在 Vulkan 下正常建设备并跑完采样窗口。
