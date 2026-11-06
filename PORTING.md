@@ -501,3 +501,65 @@ GitHub Release 页的「bug修复 / 新增功能」两栏是空的。
 - **`WindowShownRect`**：上游把 `WPF_RESTORETOMAXIMIZED` 的窗口按
   `rcMonitor` 处理（无边框浏览器最大化会盖满整屏）。我们的最小化动画用的是
   自己的矩形来源，要对着核一遍才不会在最大化窗口上留一条边。
+
+---
+
+## 九、上游 v1.7.3–v1.7.6 增量（2026-11-06 比对）
+
+比对方式：`MiniDock-1.7.3.zip` → `MiniDock-source-1.7.3.zip` 里实际是
+**1.7.6** 的源码（`更新说明-1.7.3/4/5/6.md` 四份都在），与 `v1.6.0` 基线
+全文 diff，再逐个读新函数。发行说明只写了 UI，代码里的增量比它多。
+
+### 9.1 事实
+
+| 项 | v1.6.5 | v1.7.6 |
+|---|---|---|
+| `minidock.c` 行数 | 10413 | **12821** |
+| 配置键（`g_tab[]`） | 118 | **153** |
+
+### 9.2 键表 diff：35 个键我们没建模
+
+按 §8.2 的教训，发版第一件事就是做键名 diff。结果是 153 − 118 = 35：
+
+```
+SbBattery SbBorder GrpFloat HkMods HkVk GameGuard GameAuto
+CmMerge CmSep CmIcon CmRename CmCopy CmDock
+LpTabs LpOpacity ReflMode ReflGrad IconDarkMode IconDarkFrom IconDarkTo
+MnTaskMgr PowerW TaskHide TaskTrans TaskAlpha EcoMode BatEco BatLow
+SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
+```
+
+**结论：不急着加。** `Config::write_ini` 是往**已加载的** `Ini` 上按键写值，
+`[Settings]` 里不认识的键原样保留（`unknown_sections_survive_roundtrip` 思路
+相同），`upgrade_legacy` 也因为上游 ini 没有 `[Dock]` 段而不会触发。也就是说
+这 35 个键在升级往返里**不会丢**，只是我们读不出来。等实现对应功能时再逐个
+进表，进表必须追加到 `NUMERIC_KEYS` 末尾（下标即 `Key::Numeric` 的值）。
+
+### 9.3 已同步的行为修正
+
+| # | 上游出处 | 我们做了什么 |
+|---|---|---|
+| 1 | 1.7.6#6 `PowerGetActiveScheme` | 节能磁贴不再"初始按关显示、点一下才切"。构造与每次打开面板都回读系统真实方案；`PowerSaver` 记住进节能前的方案，退出时还原它（不是一律切回平衡）；切换用 `PowerSetActiveScheme` 而不是 spawn `powercfg`，省掉一次进程启动与控制台闪烁（ADR-069） |
+| 2 | 1.7.6#4 有线网络识别 | 有线时点网络磁贴打开 `ncpa.cpl`（网卡列表：禁用/启用/诊断），不再落到 Wi‑Fi 状态页 |
+| 3 | 1.7.3#4 自动隐藏任务栏时 Dock 贴底 | 新增 `appbar::taskbar()`（`ABM_GETTASKBARPOS` + `ABM_GETSTATE`）；任务栏在**同一侧且自动隐藏**时既不登记 AppBar 预留，也按显示器物理边界定位 —— 否则工作区仍少一条任务栏高度，Dock 会离屏幕边缘空一段。判定是纯函数 `should_reserve` / `taskbar_steals_edge`，三条单测覆盖 |
+
+### 9.4 明确不跟进的三块
+
+1. **窗口动画重做（1.7.3#3 / 1.7.4#1–3 / 1.7.5 全部）**。上游从"DWM 缩略图
+   覆盖层"改成"逐帧改真实 HWND 的位置与大小"，并在说明里自己写了风险：
+   *真实 HWND 逐帧改变大小可能触发部分应用自身的窗口布局刷新*。
+   我们的 `app_window::activate` 是 `ShowWindow(SW_MINIMIZE / SW_RESTORE)`，
+   本来就没有覆盖层动画，也就不存在"动画结束才真正最小化"的时序 bug。
+   为一个装饰性动画去逐帧改别人的窗口，换来的兼容性风险大于收益。
+2. **任务栏控制（1.7.4 的自动隐藏/永久隐藏/恢复原状态）**。要写
+   `ABM_SETSTATE` + 隐藏主副任务栏窗口 + Explorer 重启后重放，
+   等于接管系统任务栏。我们没有这个需求，也不该替用户改全局状态。
+3. **顶部状态栏（`Sb*` 一整块）**。独立窗口 + 第二个 AppBar + 九个子开关，
+   是组件不是补丁。等小组件条带需要第二条展示面时再说。
+
+### 9.5 一条仍然成立的纪律
+
+`write_ini` 保留未知键这件事**只对 `[Settings]` 成立**。如果哪天上游把配置
+挪到新段（例如 1.6.0 的 `[Tool]` / `[M]`），我们的 `Ini` 会原样留着整段不解析
+—— 那是安全的。真正危险的是 `upgrade_legacy` 里的 `remove_section`：
+它只删 `[Dock]`，所以别往那段里加任何我们需要保留的东西。

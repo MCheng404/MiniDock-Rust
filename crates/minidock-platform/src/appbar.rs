@@ -26,8 +26,8 @@ use minidock_core::config::Edge;
 use minidock_core::layout::Rect;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::Shell::{
-    SHAppBarMessage, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE,
-    ABM_SETPOS, APPBARDATA,
+    SHAppBarMessage, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETSTATE, ABM_GETTASKBARPOS,
+    ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABS_AUTOHIDE, APPBARDATA,
 };
 
 /// AppBar 回调消息。收到的是 `ABN_*` 通知。
@@ -36,6 +36,60 @@ use windows::Win32::UI::Shell::{
 /// `ABM_NEW` 要靠它区分不同 AppBar。取 `WM_APP` 之后一个不常用的偏移，
 /// 避免和 Dock 自己的消息撞车。
 pub const WM_APP_AB: u32 = 0x8000 + 0x4142;
+
+/// 任务栏当前状态：占据哪条边、是否自动隐藏。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Taskbar {
+    pub edge: Edge,
+    pub autohide: bool,
+}
+
+/// 读任务栏的边与自动隐藏状态。读不到返回 `None`（explorer 没跑 / 被替换）。
+#[must_use]
+pub fn taskbar() -> Option<Taskbar> {
+    let mut pos = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `pos` 是设了 cbSize 的 APPBARDATA。
+    if unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &raw mut pos) } == 0 {
+        return None;
+    }
+    let edge = match pos.uEdge {
+        ABE_LEFT => Edge::Left,
+        ABE_TOP => Edge::Top,
+        ABE_RIGHT => Edge::Right,
+        _ => Edge::Bottom,
+    };
+    let mut state = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    // `ABM_GETSTATE` 把标志放在 lParam 里，返回值只表示成功与否。
+    let ok = unsafe { SHAppBarMessage(ABM_GETSTATE, &raw mut state) } != 0;
+    let autohide = ok && (state.lParam.0 as u32 & ABS_AUTOHIDE) != 0;
+    Some(Taskbar { edge, autohide })
+}
+
+/// 任务栏是否在同一侧、且自动隐藏。
+///
+/// 这时 Shell 仍会为**隐藏的**任务栏留出一条带子：工作区少一条，我们
+/// 再登记 AppBar 就把 Dock 顶离屏幕边缘，露出一段空隙。
+#[must_use]
+pub fn taskbar_steals_edge(edge: Edge, taskbar: Option<Taskbar>) -> bool {
+    matches!(taskbar, Some(t) if t.autohide && t.edge == edge)
+}
+
+/// 是否该登记 AppBar 预留。
+#[must_use]
+pub fn should_reserve(
+    cfg_reserve: bool,
+    always: bool,
+    edge: Edge,
+    taskbar: Option<Taskbar>,
+) -> bool {
+    cfg_reserve && always && !taskbar_steals_edge(edge, taskbar)
+}
 
 /// 一个已登记的 AppBar。
 #[derive(Debug)]
@@ -164,6 +218,41 @@ fn from_win_rect(r: RECT) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autohide_taskbar_on_the_same_edge_blocks_reservation() {
+        let tb = Taskbar {
+            edge: Edge::Bottom,
+            autohide: true,
+        };
+        assert!(!should_reserve(true, true, Edge::Bottom, Some(tb)));
+        // 换了边就不冲突，照常预留。
+        assert!(should_reserve(true, true, Edge::Left, Some(tb)));
+    }
+
+    #[test]
+    fn visible_taskbar_does_not_block_reservation() {
+        let tb = Taskbar {
+            edge: Edge::Bottom,
+            autohide: false,
+        };
+        assert!(should_reserve(true, true, Edge::Bottom, Some(tb)));
+    }
+
+    #[test]
+    fn unreadable_taskbar_keeps_the_old_behaviour() {
+        assert!(should_reserve(true, true, Edge::Bottom, None));
+        assert!(!should_reserve(false, true, Edge::Bottom, None));
+        assert!(!should_reserve(true, false, Edge::Bottom, None));
+    }
+
+    /// 只读验证：打印任务栏的边与自动隐藏状态。
+    #[test]
+    #[ignore = "queries the live taskbar; run with --ignored"]
+    fn taskbar_state_is_readable() {
+        let t = taskbar().expect("ABM_GETTASKBARPOS failed");
+        eprintln!("taskbar: edge={:?} autohide={}", t.edge, t.autohide);
+    }
 
     #[test]
     fn rect_roundtrips_through_win_rect() {

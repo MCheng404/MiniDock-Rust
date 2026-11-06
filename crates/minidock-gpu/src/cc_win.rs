@@ -83,8 +83,10 @@ pub struct CcWindow {
     /// 本地音量缓存（拖动时先改这个，再写系统）。
     volume: u32,
     mute: bool,
-    /// 节能模式的开/关（只用来画底色；系统状态改完不回头查）。
+    /// 节能模式的开/关。构造与每次打开面板时都从系统回读。
     energy: bool,
+    /// 切换时记住进节能前的方案，退出时还原它。
+    power: sysact::PowerSaver,
 
     hover: Option<Hit>,
     hits: Vec<EguiRect>,
@@ -177,9 +179,9 @@ impl CcWindow {
             volume,
             mute,
             // **不能**拿 `CcEnergy` 当"节能模式开着"：那个键的语义是
-            // "要不要显示这一格"。系统当前是不是节能模式，`powercfg`
-            // 没有便宜的查询方式，所以初始按"关"显示，点一下才切。
-            energy: false,
+            // "要不要显示这一格"。真实状态查 `PowerGetActiveScheme`。
+            energy: sysact::is_power_saver(),
+            power: sysact::PowerSaver::default(),
             hover: None,
             hits: Vec::new(),
             slider: EguiRect::NOTHING,
@@ -218,11 +220,12 @@ impl CcWindow {
 
     /// 打开面板，摆在控制中心卡片旁边。
     pub fn show_at(&mut self, anchor: (f32, f32, f32, f32), edge: minidock_core::config::Edge) {
-        // 每次打开都重读一次系统音量：用户可能在别处调过。
+        // 每次打开都重读一次系统音量与电源方案：用户可能在别处改过。
         if let Some(a) = &self.audio {
             self.volume = a.volume().unwrap_or(self.volume);
             self.mute = a.muted();
         }
+        self.energy = sysact::is_power_saver();
         let (pw, ph) = physical_size(self.ppp, self.tiles.len());
         let (x, y) = place(pw, ph, anchor, edge, self.ppp);
         self.pos = (x, y);
@@ -310,7 +313,9 @@ impl CcWindow {
                 self.hide();
             }
             Tile::Ethernet => {
-                sysact::open_uri("ms-settings:network-status");
+                // 有线时不拉 Wi-Fi 面板：用户要的是网卡状态（禁用/启用/诊断），
+                // 那是「网络连接」而不是「网络和 Internet 状态」。
+                sysact::open_uri("ncpa.cpl");
                 self.hide();
             }
             Tile::DarkMode => {
@@ -335,8 +340,7 @@ impl CcWindow {
                 self.next_repaint = Instant::now();
             }
             Tile::Energy => {
-                self.energy = !self.energy;
-                sysact::set_power_saver(self.energy);
+                self.energy = self.power.toggle();
                 self.next_repaint = Instant::now();
             }
         }

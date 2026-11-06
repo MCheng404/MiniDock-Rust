@@ -5,6 +5,19 @@
 
 ---
 
+## 0.9.22 — 同步上游 1.7.x 的三处行为（2026-11-06）
+
+- 节能磁贴读**真实**电源方案（`PowerGetActiveScheme`），打开面板时回读；
+  记住进节能前的方案，退出时还原而不是一律切回「平衡」；切换改用
+  `PowerSetActiveScheme`，不再 spawn `powercfg`（ADR-069）。
+- 有线网络磁贴改开 `ncpa.cpl`（网卡列表），不再落到 Wi‑Fi 状态页。
+- 任务栏在同一侧且自动隐藏时，既不登记 AppBar 预留也按显示器物理边界
+  定位，避免 Dock 离屏幕边缘空出一条任务栏高度（上游 1.7.3 同源问题）。
+  新增 `appbar::taskbar()` / `should_reserve()` / `taskbar_steals_edge()`。
+- 台账新增 [第九节](PORTING.md)：上游 1.7.3–1.7.6 的键表 diff（118 → 153，
+  缺 35 个键，已确认升级往返不丢），以及明确不跟进的三块（窗口动画重做、
+  任务栏接管、顶部状态栏）。
+
 ## 0.9.21 — 呈现换序 SIMD 化（ADR-068 后续，2026-11-06）
 
 - `present::swap_rb_strided` 加 AVX2 路径：一条 `vpshufb` 处理 8 个像素，

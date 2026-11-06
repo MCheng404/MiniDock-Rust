@@ -47,7 +47,7 @@ use minidock_gpu::worker::{
     WM_APP_WAKE,
 };
 use minidock_platform::app_window;
-use minidock_platform::appbar::AppBar;
+use minidock_platform::appbar::{self, AppBar};
 use minidock_platform::display;
 use minidock_platform::launch;
 use minidock_platform::occlusion;
@@ -324,7 +324,15 @@ impl App {
         let mut raw: Vec<Item> = store::load_items(&ini);
         let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
 
-        let work: LRect = display::work_area(0);
+        // 任务栏在同一侧且自动隐藏时，工作区仍少一条任务栏的高度，而那条
+        // 带子上什么都不显示 —— 按显示器物理边界定位，否则 Dock 会离屏幕
+        // 边缘空出一段（上游 1.7.3 同源问题）。
+        let taskbar = appbar::taskbar();
+        let work: LRect = if appbar::taskbar_steals_edge(cfg.edge, taskbar) {
+            display::monitor_rect(0)
+        } else {
+            display::work_area(0)
+        };
         let mut dock = Box::new(Dock::new(cfg, items, work));
         dock.mode = dock.cfg.mode;
         dock.update(dpi);
@@ -374,7 +382,12 @@ impl App {
         // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
         // 留着那块空白反而更怪，所以只在预留 + 常显时避让。
         let mut appbar = AppBar::new(hwnd);
-        let reserved = if dock.cfg.reserve && dock.mode == DockMode::Always {
+        let reserved = if appbar::should_reserve(
+            dock.cfg.reserve,
+            dock.mode == DockMode::Always,
+            dock.cfg.edge,
+            taskbar,
+        ) {
             appbar.apply(
                 dock.cfg.edge,
                 dock.reserve_thickness(),
@@ -853,7 +866,12 @@ impl App {
             // 得跟着新边算。尺寸若也变了（左右停靠要转置 lw/lh），下一轮
             // `step_relayout` 会 resize —— 这里先按旧尺寸摆到新位置，差的是一帧。
             self.dock.mode = self.dock.cfg.mode;
-            self.reserved = if self.dock.cfg.reserve && self.dock.mode == DockMode::Always {
+            self.reserved = if appbar::should_reserve(
+                self.dock.cfg.reserve,
+                self.dock.mode == DockMode::Always,
+                self.dock.cfg.edge,
+                appbar::taskbar(),
+            ) {
                 self.appbar.apply(
                     self.dock.cfg.edge,
                     self.dock.reserve_thickness(),

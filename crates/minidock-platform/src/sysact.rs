@@ -3,13 +3,15 @@
 //! 都放在 platform 层，`cc_win` 只管画和判命中。按动作拆成函数，
 //! 比塞进一个 `switch` 更好测也更安全。
 
-use windows::core::HSTRING;
+use windows::core::{GUID, HSTRING};
+use windows::Win32::Foundation::{LocalFree, HLOCAL};
+use windows::Win32::System::Power::{PowerGetActiveScheme, PowerSetActiveScheme};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOWNORMAL, WM_SETTINGCHANGE,
+    SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, WM_SETTINGCHANGE,
 };
 
 /// 用默认程序打开一个 URI 或路径（`ms-settings:` / `https://` / 文件）。
@@ -20,16 +22,6 @@ pub fn open_uri(target: &str) {
     let file = HSTRING::from(target);
     unsafe {
         let _ = ShellExecuteW(None, &verb, &file, None, None, SW_SHOWNORMAL);
-    }
-}
-
-/// 静默执行一个命令（不带控制台窗口）。用于 `powercfg /setactive`。
-pub fn run_hidden(exe: &str, args: &str) {
-    let verb = HSTRING::from("open");
-    let file = HSTRING::from(exe);
-    let params = HSTRING::from(args);
-    unsafe {
-        let _ = ShellExecuteW(None, &verb, &file, &params, None, SW_HIDE);
     }
 }
 
@@ -139,17 +131,69 @@ pub fn set_dark_mode(dark: bool) -> bool {
     }
 }
 
-/// 节能模式 / 平衡模式。`true` = 节能。
+/// Windows 内置电源方案。GUID 与 `powercfg /list` 里那几行逐字节相同。
+const SCHEME_SAVER: GUID = GUID::from_u128(0xa1841308_3541_4fab_bc81_f71556f20b4a);
+const SCHEME_BALANCED: GUID = GUID::from_u128(0x381b4222_f694_41f0_9685_ff5bb260df2e);
+
+/// 当前活动的电源方案。`None` = 读不到（精简系统、策略禁用）。
 ///
-/// `powercfg` 的这两个 GUID 是系统内置方案，不要自己发挥。
-pub fn set_power_saver(on: bool) {
-    const SAVER: &str = "/setactive a1841308-3541-4fab-bc81-f71556f20b4a";
-    const BALANCED: &str = "/setactive 381b4222-f694-41f0-9685-ff5bb260df2e";
-    run_hidden("powercfg.exe", if on { SAVER } else { BALANCED });
+/// `PowerGetActiveScheme` 返回的是 `LocalAlloc` 出来的 GUID，调用方负责
+/// `LocalFree`，所以这里拷一份再释放。
+pub fn active_power_scheme() -> Option<GUID> {
+    let mut raw: *mut GUID = std::ptr::null_mut();
+    // SAFETY: powrprof 成功时把一块 LocalAlloc 的 GUID 写进 raw。
+    let err = unsafe { PowerGetActiveScheme(None, &raw mut raw) };
+    if err.0 != 0 || raw.is_null() {
+        return None;
+    }
+    let guid = unsafe { *raw };
+    unsafe { LocalFree(Some(HLOCAL(raw.cast()))) };
+    Some(guid)
+}
+
+/// 当前是否节能模式。
+pub fn is_power_saver() -> bool {
+    active_power_scheme() == Some(SCHEME_SAVER)
+}
+
+/// 切到指定方案，返回系统是否接受。
+pub fn set_active_power_scheme(scheme: &GUID) -> bool {
+    // SAFETY: 指针指向调用方栈上的 GUID。
+    unsafe { PowerSetActiveScheme(None, Some(scheme)) }.0 == 0
+}
+
+/// 切换决策（纯函数）：返回要设置的方案与切换后应记住的"原方案"。
+///
+/// 退出节能时优先回到**进入节能前**的那个方案 —— 用户可能在用高性能方案，
+/// 一律切回"平衡"等于替他改设置。
+fn plan_toggle(current: Option<GUID>, saved: Option<GUID>) -> (GUID, Option<GUID>) {
+    if current == Some(SCHEME_SAVER) {
+        (saved.unwrap_or(SCHEME_BALANCED), None)
+    } else {
+        (SCHEME_SAVER, current)
+    }
+}
+
+/// 节能模式开关。记住进节能前的方案，退出时还原。
+#[derive(Debug, Default)]
+pub struct PowerSaver {
+    before: Option<GUID>,
+}
+
+impl PowerSaver {
+    /// 切换并返回**真实**的新状态（以系统回读为准，失败时状态不变）。
+    pub fn toggle(&mut self) -> bool {
+        let (target, next) = plan_toggle(active_power_scheme(), self.before);
+        self.before = next;
+        let _ = set_active_power_scheme(&target);
+        is_power_saver()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// 只验证纯字符串部分；真正的系统调用要靠手动验收。
     #[test]
     fn settings_uris_are_the_documented_ones() {
@@ -161,5 +205,47 @@ mod tests {
         ] {
             assert!(uri.starts_with("ms-settings:"), "{uri}");
         }
+    }
+
+    #[test]
+    fn toggling_into_saver_remembers_the_previous_scheme() {
+        let high = GUID::from_u128(0x8c5e7fda_e8bf_4a96_9a85_a6e23a8c635c);
+        let (target, saved) = plan_toggle(Some(high), None);
+        assert_eq!(target, SCHEME_SAVER);
+        assert_eq!(saved, Some(high), "must remember, not assume balanced");
+    }
+
+    #[test]
+    fn toggling_out_of_saver_restores_what_was_saved() {
+        let high = GUID::from_u128(0x8c5e7fda_e8bf_4a96_9a85_a6e23a8c635c);
+        let (target, saved) = plan_toggle(Some(SCHEME_SAVER), Some(high));
+        assert_eq!(target, high);
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn toggling_out_without_a_memory_falls_back_to_balanced() {
+        let (target, saved) = plan_toggle(Some(SCHEME_SAVER), None);
+        assert_eq!(target, SCHEME_BALANCED);
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn unreadable_scheme_still_toggles_into_saver() {
+        let (target, saved) = plan_toggle(None, None);
+        assert_eq!(target, SCHEME_SAVER);
+        assert_eq!(saved, None);
+    }
+
+    /// 只读验证：不切方案，只确认能读到一个合理的 GUID。
+    #[test]
+    #[ignore = "queries the live power scheme; run with --ignored"]
+    fn active_power_scheme_is_readable() {
+        let g = active_power_scheme().expect("PowerGetActiveScheme failed");
+        assert!(g.data1 != 0, "unexpected zero GUID");
+        eprintln!(
+            "active scheme: {:08x}-{:04x}-{:04x}",
+            g.data1, g.data2, g.data3
+        );
     }
 }
