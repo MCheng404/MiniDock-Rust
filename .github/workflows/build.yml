@@ -6,8 +6,8 @@ name: build
 #            rolling Pre-Release（tag = dev）；可以关掉只留 Actions 产物
 #   release  打 v* 标签时出稳定版，发正式 Release
 #
-# 版本号只有一个来源：`scripts/version.rs`。CI 只通过环境变量影响它
-# （`NOOKSILL_BUILD` = run number），不在这里拼字符串。
+# 版本号只有一个来源：`scripts/version.rs`（构建号 = git 提交数，CI 与本地
+# 同一套）。CI 不在这里拼任何字符串。
 #
 # 关掉 Pre-Release 的两种方式（测试流程用，不想让 Releases 页多一条）：
 #   1. 仓库变量 DEBUG_PUBLISH = artifact（Settings → Variables）
@@ -71,11 +71,12 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-    env:
-      # build.rs 会把它拼成 `X.Y.Z-dev.<run>`；release 档位不读这个变量。
-      NOOKSILL_BUILD: ${{ github.run_number }}
     steps:
+      # 构建号取 `git rev-list --count HEAD`，所以需要完整历史 —— 否则
+      # shallow clone 里永远是 1，本地与 CI 的号会分成两套，没法比大小。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: ilammy/msvc-dev-cmd@v1

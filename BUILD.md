@@ -80,7 +80,8 @@ SDK 版本**自动取最新的**，不写死小版本号——写死是换机后
 
 构建编号取 `NOOKSILL_BUILD`，没有就取 `git rev-list --count HEAD`（随提交单调递增），
 再没有就是 `0`。提交号是 7 位短哈希：CI 用 `GITHUB_SHA`，本地 `git rev-parse --short`。
-CI 用 `NOOKSILL_BUILD=${{ github.run_number }}`。
+CI 不另设构建号：它多带一个 `fetch-depth: 0` 的 checkout，用同一串提交数，
+所以同一个提交在本地和在 CI 得到同一个号。
 
 三处必须一致，所以只在构建期算一次、分发下去：
 
@@ -262,7 +263,7 @@ OpenGL 路径多 ~110 MB），以及一个独立项目把 wgpu-DX12 的空设备
 | job | 触发 | 干什么 |
 |---|---|---|
 | `gate` | 每次 push（任意分支）/ PR | `fmt --check` → `clippy -D warnings` → `--lib --tests`，与本地 `--gate` 同一批命令 |
-| `debug` | 每次 push（任意分支）/ 手动触发 | `NOOKSILL_BUILD=<run_number>` → `package.sh` → 上传 Actions 产物（`NookSill-<ver>-win64-debug.exe` + `.sha256`，保留 14 天）；默认**再发一条 rolling Pre-Release** |
+| `debug` | 每次 push（任意分支）/ 手动触发 | `package.sh`（构建号 = `git rev-list --count HEAD`，与本地同一套）→ 上传 Actions 产物（`NookSill-<ver>-win64-debug.exe` + `.sha256`，保留 14 天）；默认**再发一条 rolling Pre-Release** |
 | `release` | 推 `v*` 标签 | 校验标签与 `Cargo.toml` 一致 → `package.sh --release` → 发**正式 Release**（资产是裸 exe + `.sha256`；非草稿、非预发布、抢 `Latest`） |
 
 ### 8.1 Debug 的两个出口
