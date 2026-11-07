@@ -4,7 +4,8 @@ use egui::Ui;
 use nooksill_core::config::Key;
 
 use super::options::BROWSER_OPTS;
-use super::widgets::{card, combo, slider, toggle, Ctx};
+use super::widgets::{button, card, combo, slider, toggle, Ctx};
+use super::Command;
 
 pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
     card(ctx, ui, "Dock 附件", "", |ctx, ui| {
@@ -88,5 +89,7 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             "速记（点击即可记录文字）",
             "开启后 Dock 上出现「速记」图标",
         );
+        // 开关旁边给一个直接入口：光有图标时用户还得先找到它。
+        button(ctx, ui, "打开速记…", Command::OpenNotes);
     });
 }

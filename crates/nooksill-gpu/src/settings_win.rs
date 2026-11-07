@@ -33,9 +33,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetForegroundWindow, GetWindowLongPtrW, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_CHAR, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
 };
 
 use crate::frame::FrameRenderer;
@@ -101,6 +104,8 @@ pub struct SettingsWindow {
     frame_ms: f32,
     samples: u64,
     last_stats_push: Instant,
+    /// 中文输入法状态。组合中的拼音由系统画候选窗，我们只取上屏的文字。
+    ime: crate::ime::Ime,
 }
 
 impl std::fmt::Debug for SettingsWindow {
@@ -190,9 +195,12 @@ impl SettingsWindow {
             frame_ms: 0.0,
             samples: 0,
             last_stats_push: Instant::now(),
+            ime: crate::ime::Ime::new(),
         });
         // 挂载必须在最终地址上做，`Pin<Box<..>>` 保证了这一点。
         win.attach();
+        // 输入法上下文：没有它，中文输入法的组合窗不会出现在我们的输入框旁。
+        crate::ime::Ime::enable(hwnd);
         Ok(win)
     }
 
@@ -502,6 +510,40 @@ impl SettingsWindow {
                 }
                 self.next_repaint = Some(Instant::now());
                 None
+            }
+            // 文字输入。egui 的输入框只认 `Event::Text`，所以这条消息
+            // 是"能打字"的唯一来源 —— 此前设置窗口没有它，输入框能拿到
+            // 焦点却打不进任何字（kittest 能过，真机不行）。
+            WM_CHAR => {
+                let ch = wparam.0 as u32;
+                if let Some(c) = char::from_u32(ch) {
+                    if !c.is_control() {
+                        self.input.text(&c.to_string());
+                        self.next_repaint = Some(Instant::now());
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            // 中文输入法：组合中的拼音由系统画候选窗，我们只取上屏的文字。
+            WM_IME_COMPOSITION | WM_IME_STARTCOMPOSITION | WM_IME_ENDCOMPOSITION => {
+                let mut committed = String::new();
+                let handled = self
+                    .ime
+                    .handle(self.hwnd, msg, wparam, lparam, &mut committed);
+                if !committed.is_empty() {
+                    self.input.text(&committed);
+                    // 不需要"跳过下一条 WM_CHAR"：`ime.handle` 对
+                    // `WM_IME_COMPOSITION` 返回 true，我们直接吃掉这条
+                    // 消息（`Some(LRESULT(0))`），DefWindowProc 不会再
+                    // 补发 WM_CHAR。设一个跨消息的跳过标志反而会吞掉
+                    // 下一次普通按键的第一个字符。
+                    self.next_repaint = Some(Instant::now());
+                }
+                if handled {
+                    Some(LRESULT(0))
+                } else {
+                    None
+                }
             }
             WM_SETCURSOR => {
                 // 返回 TRUE：告诉系统"光标我自己管"，否则会被类光标覆盖。

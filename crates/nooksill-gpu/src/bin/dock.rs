@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use nooksill_core::clock;
 use nooksill_core::clock::ClockLine;
 use nooksill_core::config::{Config, DockMode, Edge, Key};
+use nooksill_core::group;
 use nooksill_core::ini::Ini;
 use nooksill_core::item::{Item, ItemKind};
 use nooksill_core::layout;
@@ -35,11 +36,14 @@ use nooksill_core::store;
 use nooksill_gpu::calendar_win::CalendarWindow;
 use nooksill_gpu::cc_win::CcWindow;
 use nooksill_gpu::dock::{Dock, DockItem};
+use nooksill_gpu::edit_win::{EditField, EditRequest, EditSlot};
 use nooksill_gpu::frame::FrameRenderer;
 use nooksill_gpu::frost::Spec as FrostSpec;
 use nooksill_gpu::gpu::Gpu;
+use nooksill_gpu::group_win::{GroupAction, GroupKid, GroupWindow};
 use nooksill_gpu::launchpad_win::LaunchpadWindow;
 use nooksill_gpu::menu::{Menu, MenuCmd};
+use nooksill_gpu::note_win::{NoteAction, NoteWindow};
 use nooksill_gpu::resmon_win::ResMonWindow;
 use nooksill_gpu::settings_win::{self, SettingsWindow};
 use nooksill_gpu::smoke::{SmokeFx, View as SmokeView};
@@ -58,7 +62,7 @@ use nooksill_platform::single_instance::SingleInstance;
 use nooksill_platform::sysact;
 use nooksill_platform::theme;
 use nooksill_platform::Paths;
-use nooksill_settings::{Command, SettingsState};
+use nooksill_settings::{Command, ItemEdit, SettingsState};
 use std::pin::Pin;
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -73,16 +77,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent,
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, TME_LEAVE, TRACKMOUSEEVENT, VK_SHIFT,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
     GetWindowRect, MessageBoxW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage,
     RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     TranslateMessage, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, MB_ICONERROR, MB_OK, MSG,
     MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-    SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SW_SHOWNA, WM_CAPTURECHANGED, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 fn main() {
@@ -240,6 +245,16 @@ struct App {
     /// 窗口尺寸（物理像素）。
     size: (i32, i32),
     menu_slot: MenuSlot,
+    /// 编辑弹窗（改名 / 新建）。与菜单一样是模态的，复用同一个槽位类型。
+    edit_slot: EditSlot,
+    /// 分组面板。懒建：大部分会话不会用到分组。
+    group_slot: Option<Pin<Box<GroupWindow>>>,
+    /// 分组面板正在显示的是 `raw` 里的第几个分组。
+    group_index: Option<usize>,
+    /// 速记面板。懒建。
+    note_slot: Option<Pin<Box<NoteWindow>>>,
+    /// 全部速记（事实来源，写盘时整段覆盖 `[Notes]`）。
+    notes: nooksill_core::note::NoteBook,
     settings_slot: Option<Pin<Box<SettingsWindow>>>,
     /// 更新检查/下载的后台线程通道。UI 线程只 `try_recv`。
     update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
@@ -313,6 +328,8 @@ struct App {
     dirty_at: Option<Instant>,
     /// 待写回的条目；`None` = `[Items]` 段没变。
     dirty_items: Option<Vec<Item>>,
+    /// 待写回的速记；`None` = `[Notes]` 段没变。
+    dirty_notes: Option<Box<nooksill_core::note::NoteBook>>,
     /// 待写回的设置；`None` = `[Settings]` 段没变。
     dirty_cfg: Option<Box<Config>>,
 
@@ -346,6 +363,8 @@ struct App {
     /// 单实例互斥体。**必须是字段**：它是 RAII 锁，放成 `boot` 的局部变量
     /// 会在 `boot` 返回时立刻释放，第二个实例就能起来了。
     _guard: Option<SingleInstance>,
+    /// 托盘图标。RAII 注销；创建失败时 `None`，Dock 照常能跑。
+    tray: Option<nooksill_platform::tray::Tray>,
 }
 
 /// 消息泵的结论。
@@ -408,6 +427,16 @@ impl App {
         let cfg = Config::from_ini(&ini, dpi);
         // 可变：拖拽重排要跟着 Dock 一起调整，顺序才与屏幕一致。
         let mut raw: Vec<Item> = store::load_items(&ini);
+        // `Notes` 开关：打开时保证栏体上有一个速记入口。
+        //
+        // 做成"往 `raw` 里补一个普通条目"而不是"虚拟条目"，是为了不打乱
+        // `dock.items` 与 `raw` 的下标对应（临时条目、菜单命中、图标缓存
+        // 全都按下标走）。只在缺失时补一次；用户手动删掉之后不会反复
+        // 塞回来，除非重启且开关仍开着。
+        if cfg.notes && !raw.iter().any(|i| i.kind == ItemKind::Note) {
+            raw.push(Item::new(ItemKind::Note, "速记", "nooksill:notes"));
+        }
+        let notes = nooksill_core::note::NoteBook::load(&ini);
         let items: Vec<DockItem> = raw.iter().map(DockItem::from_item).collect();
 
         // 任务栏在同一侧且自动隐藏时，工作区仍少一条任务栏的高度，而那条
@@ -464,6 +493,15 @@ impl App {
                 None,
             )?
         };
+
+        // 接受从资源管理器拖进来的文件 / 文件夹。
+        //
+        // 空状态文案写着"将应用或文件夹拖到这里"—— 不接
+        // `WM_DROPFILES` 的话那句是**空头支票**：拖了没反应，用户只
+        // 会觉得 Dock 坏了。
+        unsafe {
+            DragAcceptFiles(hwnd, true);
+        }
 
         // 预留桌面空间。**只在常显模式下有意义**：自动隐藏/Dock 会滑走，
         // 留着那块空白反而更怪，所以只在预留 + 常显时避让。
@@ -576,6 +614,11 @@ impl App {
             pos: (x, y),
             size: (win_w, win_h),
             menu_slot: None,
+            edit_slot: None,
+            group_slot: None,
+            group_index: None,
+            note_slot: None,
+            notes,
             settings_slot: None,
             icons,
             scanner,
@@ -606,6 +649,7 @@ impl App {
             opener,
             dirty_at: None,
             dirty_items: None,
+            dirty_notes: None,
             dirty_cfg: None,
             covered: false,
             temps: Vec::new(),
@@ -618,6 +662,7 @@ impl App {
             last_near: None,
             start,
             _guard: guard,
+            tray: None,
         };
 
         // Smoke compute output is produced inside `run_ui`; FrameRenderer
@@ -633,6 +678,15 @@ impl App {
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             let _ = UpdateWindow(hwnd);
+        }
+        // 托盘要等 `GWLP_USERDATA` 挂好再注册：图标一出现就能收到点击。
+        //
+        // Explorer 重启 / 策略拦截时会失败，那只是少了恢复入口，不该让
+        // 整个 Dock 起不来 —— 所以失败只留一行日志。
+        match nooksill_platform::tray::Tray::add(hwnd, nooksill_gpu::app_icon().unwrap_or_default())
+        {
+            Ok(t) => app.tray = Some(t),
+            Err(e) => eprintln!("托盘图标注册失败（Dock 仍可正常使用）：{e}"),
         }
         Ok(Some(app))
     }
@@ -673,6 +727,8 @@ impl App {
             self.step_click();
             // ⑥ 右键菜单（模态）。
             need_frame |= self.step_menu()?;
+            // ⑥.5 托盘图标的点击（菜单同样是模态的）。
+            need_frame |= self.step_tray()?;
             // ⑦ 设置窗口（非模态）。
             need_frame |= self.step_settings()?;
             // ⑧ 后台结果：图标、运行状态、遮挡。全部 `try_recv`，不等。
@@ -691,6 +747,19 @@ impl App {
             need_frame |= self.step_auto_hide();
             // ⑫ 点面板外面收起（轮询全局按键，见 `popup`）。
             need_frame |= self.step_panel_dismiss();
+            // ⑫.5 分组面板：画帧 + 处理动作。
+            need_frame |= self.step_group()?;
+            // ⑫.6 速记面板：画帧 + 处理动作。
+            need_frame |= self.step_notes()?;
+            // ⑫.6 拖进来的文件：变成条目。
+            need_frame |= self.step_drop();
+            // ⑫.7 操作回执：活着就要继续出帧（末尾要淡出），过期就清掉。
+            if self.dock.notice_active() {
+                self.dock.mark_dirty();
+                need_frame = true;
+            } else {
+                self.dock.expire_notice();
+            }
             // ⑬ 环境烟雾：自己控制帧率（见 `step_smoke`）。
             need_frame |= self.step_smoke();
 
@@ -796,6 +865,33 @@ impl App {
                 dropped = true;
             }
         }
+        // 拖到组上松手 = 归组，拖出栏体 = 移除。这一步要**在**重排之后：
+        // 拖动的过程里条目位置可能已经变过，`from` 是**当前**的下标。
+        if let Some(i) = self.dock.take_pending_remove() {
+            if i < self.raw.len() && self.raw.len() > 1 {
+                let name = self.raw[i].name.clone();
+                self.raw.remove(i);
+                // `apply_item_change` 里会重建 `dock.items`：拖出后
+                // 栏体上还留着被拖项的槽位，不重建会点空。
+                self.apply_item_change();
+                self.status(format!("已从 Dock 移除「{name}」"));
+                return;
+            }
+        }
+        if let Some((from, to)) = self.dock.take_pending_merge() {
+            match group::merge_item(&mut self.raw, from, to) {
+                Ok(()) => {
+                    self.apply_item_change();
+                    self.status("已加入分组");
+                    return;
+                }
+                Err(e) => {
+                    self.status(format!("归组失败：{e}"));
+                    // 归组失败：栏体上的顺序已经被拖动改过了，要重建。
+                    dropped = true;
+                }
+            }
+        }
         if dropped {
             self.sync_items();
         }
@@ -847,6 +943,20 @@ impl App {
             return;
         };
 
+        // 分组和速记是"目录 / 面板"，不是要启动的程序。
+        // 少了这两条，点上去会走到 `launch` 的 `Unsupported` 分支，
+        // 表现就是"点了没反应"。
+        if item.kind == ItemKind::Group {
+            self.open_group(i);
+            self.dock.start_bounce(i);
+            return;
+        }
+        if item.kind == ItemKind::Note {
+            self.open_notes(Some(i));
+            self.dock.start_bounce(i);
+            return;
+        }
+
         // 内置条目不是文件：`ShellExecute` 对 `nooksill:` 只会失败（连错误都
         // 不明显 —— 点上去像没反应）。这两条走自己的动作。
         if let Some(kind) = nooksill_gpu::glyph::Builtin::from_path(&item.path) {
@@ -857,6 +967,9 @@ impl App {
                     }
                 }
                 nooksill_gpu::glyph::Builtin::Start => nooksill_platform::sysact::open_start(),
+                // 理论上走不到：`step_click` 上面已经按 `ItemKind::Note`
+                // 特判返回了。留一支兜底，防止将来改了内置路径却忘了这里。
+                nooksill_gpu::glyph::Builtin::Notes => self.open_notes(Some(i)),
             }
             self.dock.start_bounce(i);
             return;
@@ -891,11 +1004,12 @@ impl App {
         // 命令：它们不是配置的一部分，删了下一轮扫描还会回来；更要紧的是
         // 那两个命令按 `raw` 的下标改配置，拿临时条目的下标去打会改错条目。
         let temp = hit.is_some_and(|i| i >= self.raw.len());
-        // `MnAuto` / `MnAdd` 决定菜单里多出哪几项；开机自启的**当前值**要
-        // 现读注册表（用户可能在任务管理器里改过）。
+        // `MnAuto` / `MnAdd` / `MnNotes` 决定菜单里多出哪几项；开机自启的
+        // **当前值**要现读注册表（用户可能在任务管理器里改过）。
         let opts = nooksill_gpu::menu::MenuOpts {
             autostart: (self.dock.cfg.get_i32(Key::MN_AUTO) != 0).then(theme::get_autostart),
             add_items: self.dock.cfg.get_i32(Key::MN_ADD) != 0,
+            notes: self.dock.cfg.get_i32(Key::MN_NOTES) != 0,
         };
         let Some(menu) = Menu::build(target, running, temp, opts) else {
             return Ok(false);
@@ -970,6 +1084,12 @@ impl App {
                     Command::AddFolder
                 };
                 self.run_settings_cmd(add);
+            } else if cmd == MenuCmd::NewGroup {
+                self.new_group();
+            } else if cmd == MenuCmd::NewFolder {
+                self.new_folder();
+            } else if cmd == MenuCmd::Notes {
+                self.open_notes(None);
             } else if cmd == MenuCmd::Settings {
                 // 设置窗口要激活另一个 HWND，不能放进 `run_menu_cmd`：
                 // 那儿没有 `gpu`，也不该有。
@@ -1004,7 +1124,12 @@ impl App {
         // 快照必须在执行命令**之前**取：`ResetDefaults` 会把停靠边也重置。
         let before = self.mount_key();
 
-        let (changed, cmd) = tick_settings(&self.gpu, &mut self.settings_slot, &mut self.dock)?;
+        let (changed, cmd) = tick_settings(
+            &self.gpu,
+            &mut self.settings_slot,
+            &mut self.dock,
+            &self.raw,
+        )?;
         // 后台线程的结果每轮搬一次；它自己会 `wake` 设置窗口。
         self.pump_update();
         let mut need_frame = false;
@@ -1015,6 +1140,14 @@ impl App {
             self.touch_cfg();
             need_frame = true;
             self.dock.mark_dirty();
+            // `Notes` 开关：打开时立刻补一个速记条目，不必等下次启动。
+            // 关掉时不自动删 —— 用户可能自己加过，替他删掉更意外。
+            if self.dock.cfg.notes && !self.raw.iter().any(|i| i.kind == ItemKind::Note) {
+                self.raw
+                    .push(Item::new(ItemKind::Note, "速记", "nooksill:notes"));
+                self.apply_item_change();
+                self.status("已添加速记图标");
+            }
             if trace::geom() {
                 eprintln!("[settings] 配置有改动，排定写盘");
             }
@@ -1135,15 +1268,718 @@ impl App {
                     return;
                 }
                 // 最后一项不允许删：Dock 会变成一个空壳，而用户没有任何
-                // 可点的东西能把它恢复回来（拖放进来的入口还没做）。
+                // 可点的东西能把它恢复回来（现在能拖文件进来了，但把
+                // 唯一一项删掉等于把 Dock 整个清空，没法恢复）。
                 if self.raw.len() <= 1 {
-                    eprintln!("这是最后一项，不能移除。");
+                    self.status("这是最后一项，不能移除。");
                     return;
                 }
                 self.raw.remove(i);
                 self.apply_item_change();
             }
+            MenuCmd::Rename => {
+                let Some(i) = hit else { return };
+                let Some(item) = self.raw.get(i).cloned() else {
+                    return;
+                };
+                self.rename_item(i, &item);
+            }
+            MenuCmd::Duplicate => {
+                let Some(i) = hit else { return };
+                let Some(item) = self.raw.get(i).cloned() else {
+                    return;
+                };
+                let mut copy = item.clone();
+                // 复制出来的那份没有子项：组复制出来还是空组，
+                // 否则会变成"组的组"。
+                copy.kids.clear();
+                self.raw.insert(i + 1, copy);
+                self.apply_item_change();
+                self.status(format!("已复制「{}」", item.name));
+            }
+            MenuCmd::DissolveGroup => {
+                let Some(i) = hit else { return };
+                if i >= self.raw.len() {
+                    return;
+                }
+                match group::dissolve_item(&mut self.raw, i) {
+                    Ok(_) => {
+                        self.apply_item_change();
+                        self.status("已解散分组，子项放回栏体");
+                    }
+                    Err(e) => self.status(format!("解散失败：{e}")),
+                }
+            }
+            MenuCmd::OpenGroup => {
+                let Some(i) = hit else { return };
+                self.open_group(i);
+            }
+            MenuCmd::ChangeIcon => {
+                if let Some(i) = hit {
+                    self.change_icon(i);
+                }
+            }
+            MenuCmd::ResetIcon => {
+                if let Some(i) = hit {
+                    self.reset_icon(i);
+                }
+            }
+            MenuCmd::ToggleDock => {
+                eprintln!("`ToggleDock` 只该由托盘菜单走 `step_tray` 处理");
+            }
+            MenuCmd::Notes => {
+                eprintln!("`Notes` 走错了路径：它应当在主循环里被处理");
+            }
+            MenuCmd::NewGroup | MenuCmd::NewFolder => {
+                eprintln!("`{cmd:?}` 走错了路径：它应当在主循环里被处理");
+            }
         }
+    }
+
+    /// 重命名 / 改目标与参数。弹窗是模态的，阻塞到用户确定或取消。
+    fn rename_item(&mut self, index: usize, item: &Item) {
+        // 分组只有名字，没有目标与启动参数 —— 多摆两个空输入框只会
+        // 让用户以为自己填漏了什么。
+        let is_group = item.kind == ItemKind::Group;
+        let mut fields = vec![EditField {
+            label: "名称".into(),
+            value: item.name.clone(),
+            hint: "显示在气泡与分组面板里的名字".into(),
+            multiline: false,
+        }];
+        if !is_group {
+            fields.push(EditField {
+                label: "目标".into(),
+                value: item.path.clone(),
+                hint: match item.kind {
+                    ItemKind::Url => "https://example.com".into(),
+                    ItemKind::Trash => "回收站不需要目标".into(),
+                    _ => "程序路径、文件夹路径".into(),
+                },
+                multiline: false,
+            });
+            fields.push(EditField {
+                label: "参数".into(),
+                value: item.args.clone(),
+                hint: "启动时附加的命令行参数（可留空）".into(),
+                multiline: false,
+            });
+        }
+        let Some(out) = self.edit_dialog("编辑条目", fields, "保存") else {
+            return;
+        };
+        if !out.accepted {
+            return;
+        }
+        let name = out.value(0).trim().to_owned();
+        let path = if is_group {
+            item.path.clone()
+        } else {
+            out.value(1).trim().to_owned()
+        };
+        let args = if is_group {
+            item.args.clone()
+        } else {
+            out.value(2).trim().to_owned()
+        };
+        let Some(target) = self.raw.get_mut(index) else {
+            return;
+        };
+        // 只改这三个字段。`kids` 必须原样留着 —— 重命名一个分组
+        // 不该把它装的东西清空。
+        target.name = name;
+        target.path = path;
+        target.args = args;
+        self.apply_item_change();
+        self.status("已保存");
+    }
+
+    /// 打开编辑弹窗。返回 `None` 表示用户取消。
+    fn edit_dialog(
+        &mut self,
+        title: &str,
+        fields: Vec<EditField>,
+        ok_label: &str,
+    ) -> Option<nooksill_gpu::edit_win::EditOutcome> {
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&raw mut pt) };
+        let cursor = (pt.x as f32 / self.ppp, pt.y as f32 / self.ppp);
+        let w = self.work;
+        let bounds = (
+            w.left as f32 / self.ppp,
+            w.top as f32 / self.ppp,
+            w.right as f32 / self.ppp,
+            w.bottom as f32 / self.ppp,
+        );
+        let dark = self
+            .dock
+            .cfg
+            .dock_is_dark(nooksill_platform::theme::is_dark());
+        match nooksill_gpu::edit_win::show_edit(
+            &self.gpu,
+            &mut self.edit_slot,
+            EditRequest {
+                title: title.to_owned(),
+                fields,
+                ok_label: ok_label.to_owned(),
+            },
+            cursor,
+            bounds,
+            dark,
+            self.ppp,
+        ) {
+            Ok(out) => Some(out),
+            Err(e) => {
+                eprintln!("编辑弹窗失败：{e}");
+                None
+            }
+        }
+    }
+
+    /// 新建一个分组（目录）。
+    fn new_group(&mut self) {
+        let fields = vec![EditField {
+            label: "分组名称".into(),
+            value: "新建分组".into(),
+            hint: "这个目录的名字".into(),
+            multiline: false,
+        }];
+        let Some(out) = self.edit_dialog("新建分组", fields, "创建") else {
+            return;
+        };
+        if !out.accepted {
+            return;
+        }
+        let name = out.value(0).trim().to_owned();
+        if name.is_empty() {
+            self.status("分组名不能为空");
+            return;
+        }
+        self.raw.push(group::new_group(&name));
+        self.apply_item_change();
+        self.status(format!("已新建分组「{name}」"));
+    }
+
+    /// 在磁盘上新建一个文件夹，并把它加进 Dock。
+    ///
+    /// 流程是两步：先选一个**父目录**（系统对话框），再起名字。
+    /// 单靠一个名字没法决定建在哪 —— 猜一个位置（比如"文档"）会让用户
+    /// 找不到刚建的东西。
+    fn new_folder(&mut self) {
+        let owner = self.settings_hwnd();
+        let Some(parent) =
+            nooksill_platform::filedialog::open_folder("选一个位置放新文件夹", owner)
+        else {
+            return;
+        };
+        let fields = vec![EditField {
+            label: "文件夹名".into(),
+            value: "新建文件夹".into(),
+            hint: "不能包含路径分隔符".into(),
+            multiline: false,
+        }];
+        let Some(out) = self.edit_dialog("新建文件夹", fields, "创建") else {
+            return;
+        };
+        if !out.accepted {
+            return;
+        }
+        let name = out.value(0).trim().to_owned();
+        match nooksill_platform::filedialog::create_dir(&parent, &name) {
+            Ok(path) => {
+                let label = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| name.clone());
+                self.raw
+                    .push(Item::new(ItemKind::Folder, &label, path.to_string_lossy()));
+                self.apply_item_change();
+                self.status(format!("已新建文件夹「{label}」"));
+            }
+            Err(e) => self.status(e),
+        }
+    }
+
+    /// 托盘图标的点击：左键切显隐，右键弹菜单。
+    ///
+    /// 菜单复用 Dock 右键那套自绘模态窗口，不去碰 `TrackPopupMenu`
+    /// 的前台窗口要求（`platform::tray` 的模块文档写了原因）。
+    fn step_tray(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.dock.take_tray_toggle() {
+            let hidden = self.dock.toggle_force_hide();
+            self.status(if hidden {
+                "Dock 已隐藏（点托盘图标恢复）"
+            } else {
+                "Dock 已显示"
+            });
+        }
+        if !self.dock.take_tray_menu() {
+            return Ok(false);
+        }
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&raw mut pt) };
+        let cursor = (pt.x as f32 / self.ppp, pt.y as f32 / self.ppp);
+        let w = self.work;
+        let bounds = (
+            w.left as f32 / self.ppp,
+            w.top as f32 / self.ppp,
+            w.right as f32 / self.ppp,
+            w.bottom as f32 / self.ppp,
+        );
+        let dark = match self.dock.cfg.get_i32(Key::MENU_THEME) {
+            0 => false,
+            1 => true,
+            _ => self.dock.cfg.dock_is_dark(theme::is_dark()),
+        };
+        let menu = Menu::tray(self.dock.force_hide);
+        let cmd = show_menu(
+            &self.gpu,
+            &mut self.menu_slot,
+            menu,
+            cursor,
+            bounds,
+            dark,
+            self.ppp,
+            self.start,
+            frost_spec(&self.dock.cfg, Key::MENU_FROST, nooksill_gpu::menu::RADIUS),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("托盘菜单显示失败：{e}");
+            None
+        });
+        match cmd {
+            Some(MenuCmd::ToggleDock) => {
+                let hidden = self.dock.toggle_force_hide();
+                self.status(if hidden {
+                    "Dock 已隐藏（点托盘图标恢复）"
+                } else {
+                    "Dock 已显示"
+                });
+            }
+            Some(MenuCmd::Settings) => {
+                let sw = ensure_settings(
+                    &self.gpu,
+                    &mut self.settings_slot,
+                    &self.paths,
+                    settings_win::effective_ppp(&self.dock.cfg),
+                )?;
+                sw.state.auto_start = theme::get_autostart();
+                sw.show(frost_spec(&self.dock.cfg, Key::UI_FROST, 20.0));
+            }
+            Some(MenuCmd::Launchpad) => self.open_launchpad()?,
+            Some(MenuCmd::ExitDock) => {
+                // 走正常退出路径：`Drop` 会注销托盘与 AppBar、写盘。
+                unsafe { PostQuitMessage(0) };
+            }
+            _ => {}
+        }
+        self.dock.mark_dirty();
+        Ok(true)
+    }
+
+    /// 打开速记面板。`index` 是 Dock 上速记条目的下标；`None` 表示从托盘 /
+    /// 右键菜单打开，此时锚点退回光标位置。
+    fn open_notes(&mut self, index: Option<usize>) {
+        let anchor = index
+            .and_then(|i| self.dock.slot_screen_rect(i, self.pos.0, self.pos.1))
+            .unwrap_or_else(|| {
+                let mut pt = POINT::default();
+                let _ = unsafe { GetCursorPos(&raw mut pt) };
+                (pt.x, pt.y, pt.x, pt.y)
+            });
+        let dark = self
+            .dock
+            .cfg
+            .dock_is_dark(nooksill_platform::theme::is_dark());
+        if self.note_slot.is_none() {
+            match NoteWindow::new(&self.gpu, self.ppp, dark) {
+                Ok(w) => self.note_slot = Some(w),
+                Err(e) => {
+                    eprintln!("速记面板创建失败：{e}");
+                    return;
+                }
+            }
+        }
+        if let Some(w) = self.note_slot.as_mut() {
+            w.show(&self.notes, anchor);
+        }
+    }
+
+    /// 速记面板：画帧 + 处理动作。
+    fn step_notes(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some(w) = self.note_slot.as_mut() else {
+            return Ok(false);
+        };
+        let mut need_frame = false;
+        if w.due() {
+            w.render(&self.gpu)?;
+            need_frame = true;
+        }
+        match w.take_action() {
+            None | Some(NoteAction::Page(_)) => {}
+            Some(NoteAction::New) => self.edit_note(None),
+            Some(NoteAction::Edit(k)) => self.edit_note(Some(k)),
+            Some(NoteAction::Remove(k)) => self.remove_note(k),
+        }
+        Ok(need_frame)
+    }
+
+    /// 新建 / 编辑一条速记。文本录入走 `edit_win`（多行 + IME）。
+    fn edit_note(&mut self, index: Option<usize>) {
+        let (title, body) = match index {
+            Some(k) => match self.notes.notes.get(k) {
+                Some(n) => (n.title.clone(), n.body.clone()),
+                None => return,
+            },
+            None => (String::new(), String::new()),
+        };
+        let fields = vec![
+            EditField {
+                label: "标题".into(),
+                value: title,
+                hint: "留空则取正文第一行".into(),
+                multiline: false,
+            },
+            EditField {
+                label: "正文".into(),
+                value: body,
+                hint: "想写什么就写什么，回车换行".into(),
+                multiline: true,
+            },
+        ];
+        let Some(out) = self.edit_dialog("速记", fields, "保存") else {
+            return;
+        };
+        if !out.accepted {
+            return;
+        }
+        let title = out.value(0);
+        let body = out.value(1);
+        if title.trim().is_empty() && body.trim().is_empty() {
+            self.status("空白速记没有保存");
+            return;
+        }
+        let ok = match index {
+            Some(k) => self.notes.update(k, title, body),
+            None => self.notes.add(title, body).is_some(),
+        };
+        if !ok {
+            self.status("速记已达上限或下标失效");
+            return;
+        }
+        self.touch_notes();
+        if let Some(w) = self.note_slot.as_mut() {
+            w.set_notes(&self.notes);
+        }
+        self.status("已保存速记");
+    }
+
+    /// 删一条速记。复用编辑弹窗做确认（0 字段 = 纯确认框），避免误删。
+    fn remove_note(&mut self, index: usize) {
+        let Some(n) = self.notes.notes.get(index) else {
+            return;
+        };
+        let label = n.display_title();
+        let out = self.edit_dialog(&format!("删除「{label}」？"), Vec::new(), "删除");
+        if !out.is_some_and(|o| o.accepted) {
+            return;
+        }
+        if !self.notes.remove(index) {
+            return;
+        }
+        self.touch_notes();
+        if let Some(w) = self.note_slot.as_mut() {
+            w.set_notes(&self.notes);
+        }
+        self.status(format!("已删除「{label}」"));
+    }
+
+    /// 标记 `[Notes]` 段需要写回。与配置/条目共用同一个防抖窗口。
+    fn touch_notes(&mut self) {
+        self.dirty_notes = Some(Box::new(self.notes.clone()));
+        self.dirty_at.get_or_insert_with(Instant::now);
+    }
+
+    /// 打开一个分组（目录）：弹出它的内容。
+    fn open_group(&mut self, index: usize) {
+        let Some(item) = self.raw.get(index) else {
+            return;
+        };
+        if item.kind != ItemKind::Group {
+            return;
+        }
+        let kids: Vec<GroupKid> = item
+            .kids
+            .iter()
+            .map(|k| GroupKid {
+                name: if k.name.is_empty() {
+                    k.path.clone()
+                } else {
+                    k.name.clone()
+                },
+                path: k.path.clone(),
+                kind: k.kind,
+                running: k.running,
+            })
+            .collect();
+        let name = if item.name.is_empty() {
+            "分组".to_owned()
+        } else {
+            item.name.clone()
+        };
+        // 锚点：分组图标在屏幕上的位置。面板从它上方弹出来。
+        let anchor = self
+            .dock
+            .slot_screen_rect(index, self.pos.0, self.pos.1)
+            .unwrap_or((self.pos.0, self.pos.1, self.pos.0, self.pos.1));
+        let dark = self
+            .dock
+            .cfg
+            .dock_is_dark(nooksill_platform::theme::is_dark());
+        if self.group_slot.is_none() {
+            match GroupWindow::new(&self.gpu, self.ppp, dark) {
+                Ok(w) => self.group_slot = Some(w),
+                Err(e) => {
+                    eprintln!("分组面板创建失败：{e}");
+                    return;
+                }
+            }
+        }
+        if let Some(w) = self.group_slot.as_mut() {
+            if let Err(e) = w.open(&self.gpu, &name, kids, anchor) {
+                eprintln!("分组面板打开失败：{e}");
+                return;
+            }
+        }
+        self.group_index = Some(index);
+    }
+
+    /// 分组面板：画帧 + 处理它产出的动作。
+    fn step_group(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some(w) = self.group_slot.as_mut() else {
+            return Ok(false);
+        };
+        let mut need_frame = false;
+        if w.due() {
+            w.render(&self.gpu)?;
+            need_frame = true;
+        }
+        let action = w.take_action();
+        match action {
+            GroupAction::None => {}
+            GroupAction::Launch(k) => {
+                // 面板显示的是 `group_index` 指向的那个组里的第 k 个子项。
+                let kid = self
+                    .group_index
+                    .and_then(|gi| self.raw.get(gi))
+                    .and_then(|g| g.kids.get(k))
+                    .cloned();
+                if let Some(kid) = kid {
+                    let toggle = self.dock.cfg.get_i32(Key::CLICK_TOGGLE) != 0;
+                    self.opener.submit(OpenJob {
+                        item: Box::new(kid),
+                        force: false,
+                        toggle,
+                        browser: self.dock.cfg.get_i32(Key::BROWSER),
+                    });
+                    self.last_launch_ms = Some(self.now_ms());
+                }
+            }
+            GroupAction::Remove(k) => {
+                if let Some(gi) = self.group_index {
+                    match group::extract_kid(&mut self.raw, gi, k) {
+                        Ok(_) => {
+                            self.apply_item_change();
+                            self.status("已移出分组");
+                            // 面板里的内容变了，重新开一次让它跟上。
+                            self.open_group(gi);
+                        }
+                        Err(e) => self.status(format!("移出失败：{e}")),
+                    }
+                }
+            }
+            GroupAction::Dissolve => {
+                if let Some(gi) = self.group_index {
+                    match group::dissolve_item(&mut self.raw, gi) {
+                        Ok(_) => {
+                            self.apply_item_change();
+                            self.status("已解散分组");
+                        }
+                        Err(e) => self.status(format!("解散失败：{e}")),
+                    }
+                }
+                if let Some(w) = self.group_slot.as_mut() {
+                    w.hide();
+                }
+                self.group_index = None;
+            }
+            GroupAction::Move(k, delta) => {
+                if let Some(gi) = self.group_index {
+                    // 顺序变了，面板要重新打开才能显示新排列。
+                    if self.move_kid(gi, k, delta) {
+                        self.open_group(gi);
+                    }
+                }
+            }
+        }
+        Ok(need_frame)
+    }
+
+    /// 改一个条目的字段，并处理"归组"的迁移。
+    ///
+    /// 「归组」不是一个字段，而是**条目在列表里的位置**：归到某个组
+    /// 意味着这个条目从栏体上消失、变成组的子项。所以改归属要拆成
+    /// "先从原处摘下来，再放进新位置"，顺序反了会把条目弄丢。
+    fn apply_item_edit(&mut self, index: usize, edit: ItemEdit) {
+        if index >= self.raw.len() {
+            return;
+        }
+        // 1. 先把条目从栏体上摘下来（如果它现在在某个组里）。
+        //
+        // `item` 是 clone，子项原样保留 —— 编辑一个分组的名字不该
+        // 把它装的东西全丢掉。
+        let mut item = self.raw[index].clone();
+        item.name = edit.name;
+        item.path = edit.path;
+        item.args = edit.args;
+        self.raw.remove(index);
+
+        // 2. 放进新的位置：不归组就留在原处，归组就并进去。
+        match edit.group {
+            None => {
+                let at = index.min(self.raw.len());
+                self.raw.insert(at, item);
+            }
+            Some(g) => {
+                // 组的下标可能因为上一步的移除而前移。
+                let g = if index < g { g - 1 } else { g };
+                if g >= self.raw.len() || self.raw[g].kind != ItemKind::Group {
+                    let at = index.min(self.raw.len());
+                    self.raw.insert(at, item);
+                } else if item.kind == ItemKind::Group {
+                    // 组不能进组。
+                    self.status("分组不能放进另一个分组");
+                    let at = index.min(self.raw.len());
+                    self.raw.insert(at, item);
+                } else {
+                    // 先问一遍能不能放 —— `add_kid` 失败时子项已经被移走，
+                    // 调用方拿不回来。
+                    match group::can_add_kid(&self.raw[g], &item) {
+                        Err(e) => {
+                            self.status(format!("归组失败：{e}"));
+                            let at = index.min(self.raw.len());
+                            self.raw.insert(at, item);
+                        }
+                        Ok(()) => {
+                            let _ = group::add_kid(&mut self.raw[g], item);
+                        }
+                    }
+                }
+            }
+        }
+        self.apply_item_change();
+        self.status("已保存");
+    }
+
+    /// 上移 / 下移一个条目。`delta` 为 `-1` / `+1`。
+    fn move_item(&mut self, index: usize, delta: i32) {
+        if index >= self.raw.len() || delta == 0 {
+            return;
+        }
+        let target = index as i32 + delta;
+        if target < 0 || target as usize >= self.raw.len() {
+            return;
+        }
+        let item = self.raw.remove(index);
+        self.raw.insert(target as usize, item);
+        self.apply_item_change();
+    }
+
+    /// 给一个条目挑自定义图标。
+    ///
+    /// `icon_src` 最终走 shell 的图像列表，所以过滤器只列 `.ico` /
+    /// `.exe` / `.dll` —— PNG/JPEG 还没有解码器，让用户挑到用不了的
+    /// 文件比不给这个入口更糟。
+    fn change_icon(&mut self, index: usize) {
+        if index >= self.raw.len() {
+            return;
+        }
+        let owner = self.settings_hwnd();
+        let filters = [
+            ("图标与可执行文件", "*.ico;*.exe;*.dll"),
+            ("所有文件", "*.*"),
+        ];
+        let Some(path) = nooksill_platform::filedialog::open_file("更换图标", owner, &filters)
+        else {
+            return;
+        };
+        self.raw[index].icon_src = path.to_string_lossy().into_owned();
+        // `replace_items` 按 `path` 搬纹理，而这里变的是 `icon_src`。
+        // 不精确清一下就会一直显示旧图标。
+        self.dock.clear_icon(index);
+        self.apply_item_change();
+        self.status(format!("已更换「{}」的图标", self.raw[index].name));
+    }
+
+    /// 恢复条目的默认图标。
+    fn reset_icon(&mut self, index: usize) {
+        let Some(item) = self.raw.get_mut(index) else {
+            return;
+        };
+        if item.icon_src.is_empty() {
+            return;
+        }
+        let name = item.name.clone();
+        item.icon_src.clear();
+        self.dock.clear_icon(index);
+        self.apply_item_change();
+        self.status(format!("已恢复「{name}」的默认图标"));
+    }
+
+    /// 在分组里挪一个子项。返回是否真的挪了。
+    fn move_kid(&mut self, gi: usize, ki: usize, delta: i32) -> bool {
+        let Some(g) = self.raw.get_mut(gi) else {
+            return false;
+        };
+        let name = g.name.clone();
+        if group::move_kid(g, ki, delta).is_err() {
+            return false;
+        }
+        // 组图标是前 4 个子项拼的，顺序变了要重取。
+        self.dock.clear_icon(gi);
+        self.apply_item_change();
+        self.status(format!("已调整「{name}」内的顺序"));
+        true
+    }
+
+    /// 处理从资源管理器拖进来的路径。
+    ///
+    /// 目录落成 `Folder` 条目，其余落成 `File` 条目（`.lnk` 由启动
+    /// 时的快捷方式解析器解开）。名字取文件名（去扩展名）。
+    fn step_drop(&mut self) -> bool {
+        let paths = self.dock.take_dropped_paths();
+        if paths.is_empty() {
+            return false;
+        }
+        let mut added = 0usize;
+        for path in paths {
+            let p = std::path::Path::new(&path);
+            let kind = if p.is_dir() {
+                ItemKind::Folder
+            } else {
+                ItemKind::File
+            };
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| path.clone());
+            self.raw.push(Item::new(kind, &name, &path));
+            added += 1;
+        }
+        self.apply_item_change();
+        self.status(format!("已添加 {added} 个条目"));
+        true
     }
 
     /// 条目列表变了之后的统一收尾：替换显示列表 + 排写盘 + 补图标。
@@ -1195,6 +2031,7 @@ impl App {
                 icon_src: String::new(),
                 path: t.path.clone(),
                 fit: t.fit,
+                kids: Vec::new(),
             });
         }
     }
@@ -1289,13 +2126,15 @@ impl App {
         self.dirty_at = None;
         let items = self.dirty_items.take();
         let config = self.dirty_cfg.take();
-        if items.is_some() || config.is_some() {
+        let notes = self.dirty_notes.take();
+        if items.is_some() || config.is_some() || notes.is_some() {
             self.disk.submit(WriteJob {
                 items,
                 config,
                 // 配置与条目这次不动 `[Tool]` 段：两段由各自的脏标记驱动，
                 // 一起写会让"改个滑块"也把计时器的剩余秒数刷一遍。
                 tool: None,
+                notes,
             });
         }
     }
@@ -1321,6 +2160,7 @@ impl App {
             items: None,
             config: None,
             tool: Some((Box::new(win.state.clone()), now)),
+            notes: None,
         });
     }
 
@@ -1468,16 +2308,21 @@ impl App {
         Ok(true)
     }
 
-    /// 四块面板各自的「可见 / 句柄」。
+    /// 六块面板各自的「可见 / 句柄」。
     ///
     /// 三处判定（有没有面板开着、点是不是落在面板里、全部收起）都按同一份
-    /// 清单走 —— 加第五块面板时只需要在这里补一项。
-    fn panels(&self) -> [Option<(bool, HWND)>; 4] {
+    /// 清单走 —— 加面板时只需要在这里补一项。
+    ///
+    /// 曾经漏掉分组面板：`panel_open()` 为假时 `dock_busy()` 不认为在操作
+    /// Dock，自动隐藏会把栏体收走、把面板单独悬在半空。
+    fn panels(&self) -> [Option<(bool, HWND)>; 6] {
         [
             self.calendar_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
             self.cc_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
             self.resmon_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
             self.tool_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.group_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
+            self.note_slot.as_ref().map(|w| (w.visible(), w.hwnd())),
         ]
     }
 
@@ -1532,6 +2377,19 @@ impl App {
             }
         }
         if let Some(w) = self.tool_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                any = true;
+            }
+        }
+        if let Some(w) = self.group_slot.as_mut() {
+            if w.visible() {
+                w.hide();
+                self.group_index = None;
+                any = true;
+            }
+        }
+        if let Some(w) = self.note_slot.as_mut() {
             if w.visible() {
                 w.hide();
                 any = true;
@@ -2278,6 +3136,19 @@ fn dock_cursor(dock: &Dock, u: f32, v: f32) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        // 托盘图标被点了。窗口过程只有 `Dock` 的指针，所以记下来交给
+        // 主循环执行（弹菜单要开窗口，不能在 WndProc 里阻塞）。
+        nooksill_platform::tray::WM_APP_TRAY => {
+            if let Some(toggle) = nooksill_platform::tray::Tray::parse(lparam.0) {
+                let ptr = dock_ptr(hwnd);
+                if !ptr.is_null() {
+                    unsafe {
+                        (*ptr).push_tray_click(toggle);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let _ = BeginPaint(hwnd, &mut ps);
@@ -2313,6 +3184,33 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     (*ptr).mouse = (-1.0, -1.0);
                     (*ptr).hover = false;
                     (*ptr).mark_dirty();
+                }
+            }
+            LRESULT(0)
+        }
+        // 拖放：把路径记到 `Dock` 里，主循环下一轮取走。
+        // 窗口过程拿不到 `App`（它只有 `Dock` 的指针），所以这里只
+        // 收集路径，不做建条目的活 —— 那要动 `raw`。
+        WM_DROPFILES => {
+            let hdrop = HDROP(wparam.0 as *mut core::ffi::c_void);
+            let n = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+            let mut files = Vec::new();
+            for i in 0..n {
+                let len = unsafe { DragQueryFileW(hdrop, i, None) };
+                let mut buf = vec![0_u16; len as usize + 1];
+                let got = unsafe { DragQueryFileW(hdrop, i, Some(buf.as_mut_slice())) };
+                if got > 0 {
+                    buf.truncate(got as usize);
+                    files.push(String::from_utf16_lossy(&buf));
+                }
+            }
+            unsafe {
+                DragFinish(hdrop);
+            }
+            let ptr = dock_ptr(hwnd);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).push_dropped_paths(files);
                 }
             }
             LRESULT(0)
@@ -2521,6 +3419,16 @@ fn request_missing_icons(loader: &IconLoader, dock: &Dock, raw: &[Item]) {
             path: item.path.clone(),
             icon_src: item.icon_src.clone(),
             fit: item.fit,
+            // 分组本身没有图标，取子项拼四宫格。
+            kids: item
+                .kids
+                .iter()
+                .map(|k| nooksill_gpu::worker::IconKid {
+                    kind: k.kind,
+                    path: k.path.clone(),
+                    icon_src: k.icon_src.clone(),
+                })
+                .collect(),
         });
     }
 }
@@ -2968,6 +3876,7 @@ fn tick_settings(
     gpu: &Gpu,
     slot: &mut Option<Pin<Box<SettingsWindow>>>,
     dock: &mut Dock,
+    items: &[Item],
 ) -> Result<(bool, Option<Command>), Box<dyn std::error::Error>> {
     let Some(sw) = slot.as_mut() else {
         return Ok((false, None));
@@ -2975,6 +3884,9 @@ fn tick_settings(
     let mut changed = false;
     let mut cmd = None;
     if sw.visible() && sw.due() {
+        // 条目列表同步进去：设置界面只持有一份快照，事实来源永远是
+        // 主程序那份 `raw`。没有这一步，「条目」页永远是空列表。
+        sw.state.items = items.to_vec();
         // 关键点：`cfg` 就是 Dock 用的那一份。设置窗口改它等于改 Dock，
         // 没有 IPC、没有复制、也没有"保存后重启"。
         sw.render(gpu, &mut dock.cfg)?;
@@ -3018,6 +3930,65 @@ impl App {
             }
             Command::OpenUrl(url) => {
                 sysact::open_uri(url);
+                false
+            }
+            // ---- 「条目」页的命令 ----
+            Command::EditItem(index, edit) => {
+                self.apply_item_edit(index, edit);
+                false
+            }
+            Command::RemoveItem(index) => {
+                if index < self.raw.len() {
+                    self.raw.remove(index);
+                    self.apply_item_change();
+                }
+                false
+            }
+            Command::MoveItem(index, delta) => {
+                self.move_item(index, delta);
+                false
+            }
+            Command::ExtractKid(group, kid) => {
+                match group::extract_kid(&mut self.raw, group, kid) {
+                    Ok(_) => {
+                        self.apply_item_change();
+                        self.status("已移出分组");
+                    }
+                    Err(e) => self.status(format!("移出失败：{e}")),
+                }
+                false
+            }
+            Command::DissolveGroup(index) => {
+                match group::dissolve_item(&mut self.raw, index) {
+                    Ok(_) => {
+                        self.apply_item_change();
+                        self.status("已解散分组，子项放回栏体");
+                    }
+                    Err(e) => self.status(format!("解散失败：{e}")),
+                }
+                false
+            }
+            Command::PickIcon(index) => {
+                self.change_icon(index);
+                false
+            }
+            Command::ResetIcon(index) => {
+                self.reset_icon(index);
+                false
+            }
+            Command::MoveKid(gi, ki, delta) => {
+                self.move_kid(gi, ki, delta);
+                false
+            }
+            Command::AddNote => {
+                self.raw
+                    .push(Item::new(ItemKind::Note, "速记", "nooksill:notes"));
+                self.apply_item_change();
+                self.status("已添加速记条目");
+                false
+            }
+            Command::OpenNotes => {
+                self.open_notes(None);
                 false
             }
             Command::CheckUpdate => {
@@ -3233,11 +4204,16 @@ impl App {
         self.settings_slot.as_ref().map(|sw| sw.hwnd().0 as isize)
     }
 
-    /// 往设置窗口的底部状态条写一句话（窗口没建过就什么都不做）。
+    /// 往设置窗口的底部状态条写一句话，**并在 Dock 上显示回执**。
+    ///
+    /// 设置窗口没建过（大多数时候）时，状态条那条路是静默 no-op。
+    /// Dock 上的短提示才是用户真正看得见的反馈。
     fn status(&mut self, text: impl Into<String>) {
+        let text = text.into();
         if let Some(sw) = self.settings_slot.as_mut() {
-            sw.state.status = text.into();
+            sw.state.status = text.clone();
         }
+        self.dock.show_notice(text);
     }
 }
 

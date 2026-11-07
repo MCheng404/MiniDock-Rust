@@ -296,6 +296,124 @@ pub fn apply_round_mask(rgba: &mut [u8], w: u32, bbox: BBox, radius: f32) {
     }
 }
 
+/// 一块待合成的图标（RGBA，行优先，每像素 4 字节）。
+#[derive(Copy, Clone, Debug)]
+pub struct QuadSource<'a> {
+    pub rgba: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 把 1..=4 块图标合成一张正方形的四宫格图（组图标）。
+///
+/// 规则与上游 `BuildGroupIcon` 一致：1 个子项占满整格，2 个占上下两格，
+/// 3–4 个占 2×2 四格。每格里的图**等比留白**缩放到格内，四周留一点
+/// 间隙；整张图的四角按 `corner` 圆掉（半径以输出边长计）。
+///
+/// 合成用的是**直通 alpha**（与 [`fit_icon`] 的输入一致），做 alpha-over
+/// 叠加。采样是双线性 —— 组图标是四个小图标挤在一起，最近邻的锯齿
+/// 在 48 px 的 Dock 图标上非常显眼。
+#[must_use]
+pub fn composite_quad(sources: &[QuadSource<'_>], out: u32, corner: f32) -> Vec<u8> {
+    let out = out.max(1);
+    let mut canvas = vec![0u8; (out as usize) * (out as usize) * 4];
+    let n = sources.len().min(4);
+    if n == 0 {
+        return canvas;
+    }
+    let (cols, rows) = match n {
+        1 => (1u32, 1u32),
+        2 => (1, 2),
+        _ => (2, 2),
+    };
+    let cell_w = out / cols;
+    let cell_h = out / rows;
+
+    for (i, src) in sources.iter().take(n).enumerate() {
+        if src.width == 0
+            || src.height == 0
+            || src.rgba.len() < (src.width as usize) * (src.height as usize) * 4
+        {
+            continue;
+        }
+        let col = i as u32 % cols;
+        let row = i as u32 / cols;
+        let cell_x = col * cell_w;
+        let cell_y = row * cell_h;
+        // 格内留白：图标之间要能看出是四张图，不是一张。
+        let pad = (cell_w.min(cell_h) / 12).max(1);
+        let box_w = cell_w.saturating_sub(pad * 2).max(1);
+        let box_h = cell_h.saturating_sub(pad * 2).max(1);
+        // 等比缩放到内容框内。
+        let scale = (box_w as f32 / src.width as f32).min(box_h as f32 / src.height as f32);
+        let dw = ((src.width as f32 * scale).round() as u32).clamp(1, box_w);
+        let dh = ((src.height as f32 * scale).round() as u32).clamp(1, box_h);
+        let ox = cell_x + (cell_w - dw) / 2;
+        let oy = cell_y + (cell_h - dh) / 2;
+
+        for y in 0..dh {
+            // 目标像素中心 → 源图坐标（减 0.5 是因为源像素是"采样点"）。
+            let sy = (y as f32 + 0.5) * (src.height as f32 / dh as f32) - 0.5;
+            for x in 0..dw {
+                let sx = (x as f32 + 0.5) * (src.width as f32 / dw as f32) - 0.5;
+                let px = sample_bilinear(src.rgba, src.width, src.height, sx, sy);
+                over(&mut canvas, out, ox + x, oy + y, px);
+            }
+        }
+    }
+
+    if corner > 0.0 {
+        apply_round_mask(&mut canvas, out, BBox::full(out, out), corner);
+    }
+    canvas
+}
+
+/// 双线性采样一个源像素。越界按边缘夹紧。
+fn sample_bilinear(src: &[u8], sw: u32, sh: u32, x: f32, y: f32) -> [u8; 4] {
+    let x = x.clamp(0.0, sw as f32 - 1.0);
+    let y = y.clamp(0.0, sh as f32 - 1.0);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(sw - 1);
+    let y1 = (y0 + 1).min(sh - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let px = |ix: u32, iy: u32| {
+        let i = (iy as usize * sw as usize + ix as usize) * 4;
+        [src[i], src[i + 1], src[i + 2], src[i + 3]]
+    };
+    let p00 = px(x0, y0);
+    let p10 = px(x1, y0);
+    let p01 = px(x0, y1);
+    let p11 = px(x1, y1);
+    let mut out = [0u8; 4];
+    for c in 0..4 {
+        let top = f32::from(p00[c]) * (1.0 - fx) + f32::from(p10[c]) * fx;
+        let bottom = f32::from(p01[c]) * (1.0 - fx) + f32::from(p11[c]) * fx;
+        out[c] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+    }
+    out
+}
+
+/// 把一个直通 alpha 像素 alpha-over 到画布上。
+fn over(canvas: &mut [u8], out: u32, x: u32, y: u32, px: [u8; 4]) {
+    if x >= out || y >= out {
+        return;
+    }
+    let a = f32::from(px[3]) / 255.0;
+    if a <= 0.0 {
+        return;
+    }
+    let i = (y as usize * out as usize + x as usize) * 4;
+    for c in 0..3 {
+        let dst = f32::from(canvas[i + c]) / 255.0;
+        let src = f32::from(px[c]) / 255.0;
+        canvas[i + c] = ((src * a + dst * (1.0 - a)) * 255.0).round() as u8;
+    }
+    let dst_a = f32::from(canvas[i + 3]) / 255.0;
+    canvas[i + 3] = ((a + dst_a * (1.0 - a)) * 255.0).round() as u8;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +578,101 @@ mod tests {
         let short = vec![0u8; 16];
         let f = fit_icon(&short, 32, 32, FitMode::Auto);
         assert_eq!(f.bbox, BBox::full(32, 32));
+    }
+
+    /// 一张纯红方块合成的组图标：四个象限都该是红的。
+    #[test]
+    fn composite_quad_fills_all_cells() {
+        let red = make(16, 16, |_, _| [255, 0, 0, 255]);
+        let src = QuadSource {
+            rgba: &red,
+            width: 16,
+            height: 16,
+        };
+        let out = composite_quad(&[src, src, src, src], 64, 0.0);
+        assert_eq!(out.len(), 64 * 64 * 4);
+        let at = |x: u32, y: u32| {
+            let i = (y as usize * 64 + x as usize) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        // 四个象限的中心都该命中红色。
+        for (x, y) in [(16, 16), (48, 16), (16, 48), (48, 48)] {
+            let p = at(x, y);
+            assert!(
+                p[0] > 200 && p[1] < 60 && p[3] > 200,
+                "({x},{y}) 应为红色: {p:?}"
+            );
+        }
+        // 象限之间的缝隙是透明的（四张图要能分辨）。
+        let gap = at(32, 32);
+        assert_eq!(gap[3], 0, "象限缝隙应当透明: {gap:?}");
+    }
+
+    /// 一个子项时占满整格。
+    #[test]
+    fn composite_quad_with_one_source_fills_the_canvas() {
+        let blue = make(8, 8, |_, _| [0, 0, 255, 255]);
+        let src = QuadSource {
+            rgba: &blue,
+            width: 8,
+            height: 8,
+        };
+        let out = composite_quad(&[src], 32, 0.0);
+        let i = (16 * 32 + 16) * 4;
+        assert_eq!(&out[i..i + 4], &[0, 0, 255, 255]);
+    }
+
+    /// 两个子项时上下分栏。
+    #[test]
+    fn composite_quad_with_two_sources_stacks_them() {
+        let top = make(8, 8, |_, _| [255, 0, 0, 255]);
+        let bottom = make(8, 8, |_, _| [0, 255, 0, 255]);
+        let out = composite_quad(
+            &[
+                QuadSource {
+                    rgba: &top,
+                    width: 8,
+                    height: 8,
+                },
+                QuadSource {
+                    rgba: &bottom,
+                    width: 8,
+                    height: 8,
+                },
+            ],
+            32,
+            0.0,
+        );
+        let at = |x: u32, y: u32| {
+            let i = (y as usize * 32 + x as usize) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        assert!(at(16, 8)[0] > 200, "上半应是红色");
+        assert!(at(16, 24)[1] > 200, "下半应是绿色");
+    }
+
+    /// 圆角要真的切掉四角。
+    #[test]
+    fn composite_quad_applies_the_corner_mask() {
+        let red = make(16, 16, |_, _| [255, 0, 0, 255]);
+        let src = QuadSource {
+            rgba: &red,
+            width: 16,
+            height: 16,
+        };
+        let out = composite_quad(&[src, src, src, src], 64, 10.0);
+        let i = 0; // 左上角
+        assert_eq!(out[i + 3], 0, "左上角应被圆角切掉");
+        // 取**格内**的点：画布正中心 (32,32) 落在四格的缝隙上，本来就是透明的。
+        let i = (16 * 64 + 16) * 4;
+        assert!(out[i + 3] > 200, "格内不该被切");
+    }
+
+    /// 空的输入不能 panic，出一张全透明的画布。
+    #[test]
+    fn composite_quad_with_no_sources_is_transparent() {
+        let out = composite_quad(&[], 16, 8.0);
+        assert_eq!(out.len(), 16 * 16 * 4);
+        assert!(out.chunks(4).all(|p| p[3] == 0));
     }
 }

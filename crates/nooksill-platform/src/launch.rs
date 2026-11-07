@@ -144,6 +144,9 @@ pub fn launch(item: &Item, browser: i32) -> Result<(), LaunchError> {
             shell_open(&item.path, params, dir.as_deref())
         }
         nooksill_core::item::ItemKind::Folder => shell_open(&item.path, params, None),
+        // 防御性分支：分组与速记现在都在 `bin/dock.rs::step_click` 里
+        // 特判成"打开面板"，走不到这里。保留是防止将来改了类型分发
+        // 却漏掉启动层 —— 那时至少有一句明确的错误，而不是静默成功。
         nooksill_core::item::ItemKind::Group => Err(LaunchError::Unsupported("应用组")),
         nooksill_core::item::ItemKind::Note => Err(LaunchError::Unsupported("速记")),
     }

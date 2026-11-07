@@ -12,6 +12,7 @@ pub(super) fn page(ctx: &mut Ctx<'_>, ui: &mut Ui) {
             button(ctx, ui, "添加应用 / 文件…", Command::AddFile);
             button(ctx, ui, "添加文件夹…", Command::AddFolder);
             button(ctx, ui, "新建应用组", Command::NewGroup);
+            button(ctx, ui, "添加速记", Command::AddNote);
             button(ctx, ui, "添加回收站", Command::AddTrash);
             button(ctx, ui, "添加分割线", Command::AddSeparator);
         });

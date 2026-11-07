@@ -47,8 +47,28 @@ pub enum MenuCmd {
     ToggleAutostart,
     /// 空白处右键的「新建」：加一个应用/文件。
     AddFile,
-    /// 空白处右键的「新建」：加一个文件夹。
+    /// 空白处右键的「新建」：加一个已有的文件夹。
     AddFolder,
+    /// 空白处右键的「新建」：在磁盘上**新建**一个文件夹并加进 Dock。
+    NewFolder,
+    /// 空白处右键的「新建」：建一个分组（目录）。
+    NewGroup,
+    /// 重命名 / 改目标与参数（编辑弹窗）。
+    Rename,
+    /// 复制一份这个条目。
+    Duplicate,
+    /// 打开分组（弹出它的内容）。
+    OpenGroup,
+    /// 解散分组：子项摊平回栏体。
+    DissolveGroup,
+    /// 给这个条目挑一个自定义图标文件。
+    ChangeIcon,
+    /// 清掉这个条目的自定义图标。
+    ResetIcon,
+    /// 切换 Dock 的显示 / 隐藏（托盘菜单用）。
+    ToggleDock,
+    /// 打开速记面板。
+    Notes,
     /// 打开起动台。
     Launchpad,
     /// 退出 Dock 进程。
@@ -103,21 +123,24 @@ const MIN_W: f32 = 190.0;
 /// 菜单背景圆角（逻辑像素）。
 pub const RADIUS: f32 = 10.0;
 
-/// 构建菜单时的开关，来自配置里的 `Mn*` 三个键。
+/// 构建菜单时的开关，来自配置里的 `Mn*` 键。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MenuOpts {
     /// `MnAuto`：显示「开机自启」，值 = 当前是否开启。`None` = 不显示。
     pub autostart: Option<bool>,
-    /// `MnAdd`：空白处右键显示「添加文件 / 文件夹」。
+    /// `MnAdd`：空白处右键显示「添加文件 / 文件夹 / 新建」。
     pub add_items: bool,
+    /// `MnNotes`：空白处右键显示「速记」。
+    pub notes: bool,
 }
 
 impl Default for MenuOpts {
     fn default() -> Self {
-        // 默认值必须与 `MnAdd` 的 ini 默认一致（1 = 显示）。
+        // 默认值必须与 `MnAdd` / `MnNotes` 的 ini 默认一致（1 = 显示）。
         Self {
             autostart: None,
             add_items: true,
+            notes: true,
         }
     }
 }
@@ -154,13 +177,30 @@ impl Menu {
                         "添加文件夹…",
                         MenuCmd::AddFolder,
                         false,
+                        false,
+                    ));
+                    entries.push(MenuEntry::new(
+                        "新建文件夹…",
+                        MenuCmd::NewFolder,
+                        false,
                         true,
+                    ));
+                    entries.push(MenuEntry::new(
+                        "新建应用组…",
+                        MenuCmd::NewGroup,
+                        false,
+                        false,
                     ));
                 }
                 // `MnAuto`：开机自启的勾选项。状态由调用方传进来 —— 菜单层
                 // 不碰注册表。
                 if let Some(on) = opts.autostart {
                     entries.push(MenuEntry::toggle("开机自启", MenuCmd::ToggleAutostart, on));
+                }
+                // `MnNotes`：速记面板。与"Dock 上有没有速记图标"无关，
+                // 这是个随时能打开的入口。
+                if opts.notes {
+                    entries.push(MenuEntry::new("速记", MenuCmd::Notes, false, false));
                 }
                 entries.push(MenuEntry::new("退出 Dock", MenuCmd::ExitDock, true, false));
             }
@@ -171,6 +211,31 @@ impl Menu {
                     true,
                     false,
                 ));
+            }
+            Some(ItemKind::Group) => {
+                // 分组是一个"目录"：点开看内容、可以改名、可以解散。
+                entries.push(MenuEntry::new("打开", MenuCmd::OpenGroup, false, false));
+                entries.push(MenuEntry::new("重命名…", MenuCmd::Rename, false, false));
+                entries.push(MenuEntry::new(
+                    "解散分组",
+                    MenuCmd::DissolveGroup,
+                    true,
+                    true,
+                ));
+                if !temp {
+                    entries.push(MenuEntry::new(
+                        "在右侧添加分割线",
+                        MenuCmd::AddSepAfter,
+                        false,
+                        false,
+                    ));
+                    entries.push(MenuEntry::new(
+                        "从 Dock 移除",
+                        MenuCmd::RemoveItem,
+                        true,
+                        false,
+                    ));
+                }
             }
             Some(kind) => {
                 // 运行中的文件条目给"显示 / 最小化"，其余给"打开"。
@@ -192,6 +257,24 @@ impl Menu {
                     entries.push(MenuEntry::new("退出应用", MenuCmd::QuitApp, false, false));
                 }
                 if !temp {
+                    entries.push(MenuEntry::new("重命名…", MenuCmd::Rename, false, false));
+                    entries.push(MenuEntry::new("复制一份", MenuCmd::Duplicate, false, false));
+                    // 图标只对"能取到 shell 图标"的类型有意义；网址/速记
+                    // 目前走首字占位，给个换图标的入口等于多一个死按钮。
+                    if matches!(kind, ItemKind::File | ItemKind::Folder | ItemKind::Trash) {
+                        entries.push(MenuEntry::new(
+                            "更换图标…",
+                            MenuCmd::ChangeIcon,
+                            false,
+                            false,
+                        ));
+                        entries.push(MenuEntry::new(
+                            "恢复默认图标",
+                            MenuCmd::ResetIcon,
+                            false,
+                            false,
+                        ));
+                    }
                     entries.push(MenuEntry::new(
                         "在右侧添加分割线",
                         MenuCmd::AddSepAfter,
@@ -225,6 +308,25 @@ impl Menu {
             entries,
             hover: None,
         })
+    }
+
+    /// 托盘图标的右键菜单。
+    ///
+    /// 不用 Win32 的 `TrackPopupMenu`：那个 API 要求调用线程拥有前台窗口，
+    /// 而 Dock 是 `WS_EX_NOACTIVATE`，实测菜单会"点不消失"。这里复用
+    /// 已经验证过的自绘模态菜单窗口，行为与 Dock 右键完全一致。
+    #[must_use]
+    pub fn tray(hidden: bool) -> Self {
+        let label = if hidden { "显示 Dock" } else { "隐藏 Dock" };
+        Self {
+            entries: vec![
+                MenuEntry::new(label, MenuCmd::ToggleDock, false, false),
+                MenuEntry::new("起动台", MenuCmd::Launchpad, false, false),
+                MenuEntry::new("Dock 设置", MenuCmd::Settings, false, true),
+                MenuEntry::new("退出 Dock", MenuCmd::ExitDock, true, false),
+            ],
+            hover: None,
+        }
     }
 
     /// 勾选槽宽度：只要有可勾选项就留，保证同菜单内左边距一致。
@@ -444,7 +546,7 @@ mod tests {
         Item::new(kind, name, "")
     }
 
-    /// 普通应用：打开 / 加分割线 / 移除。
+    /// 普通应用：打开 / 重命名 / 复制 / 加分割线 / 移除。
     #[test]
     fn file_menu_has_open_and_remove() {
         let it = item(ItemKind::File, "记事本");
@@ -454,6 +556,10 @@ mod tests {
             cmds,
             vec![
                 MenuCmd::Open,
+                MenuCmd::Rename,
+                MenuCmd::Duplicate,
+                MenuCmd::ChangeIcon,
+                MenuCmd::ResetIcon,
                 MenuCmd::AddSepAfter,
                 MenuCmd::RemoveItem,
                 MenuCmd::Launchpad,
@@ -461,8 +567,83 @@ mod tests {
             ]
         );
         assert!(!m.entries[0].danger);
-        assert!(m.entries[1].sep_after, "加分割线之后要画分隔");
-        assert!(m.entries[2].danger, "移除类必须是警告色");
+        assert!(m.entries[5].sep_after, "加分割线之后要画分隔");
+        assert!(m.entries[6].danger, "移除类必须是警告色");
+    }
+
+    /// `MnNotes`：空白处右键的「速记」入口受开关控制。
+    #[test]
+    fn notes_entry_follows_the_switch() {
+        let opts = MenuOpts {
+            autostart: None,
+            add_items: false,
+            notes: true,
+        };
+        let on = Menu::build(None, false, false, opts).expect("应当有菜单");
+        assert!(on.entries.iter().any(|e| e.cmd == MenuCmd::Notes));
+        let off = Menu::build(
+            None,
+            false,
+            false,
+            MenuOpts {
+                notes: false,
+                ..opts
+            },
+        )
+        .expect("应当有菜单");
+        assert!(
+            !off.entries.iter().any(|e| e.cmd == MenuCmd::Notes),
+            "关掉开关后不该留一个死入口"
+        );
+    }
+
+    /// 托盘菜单：隐藏时给「显示 Dock」，且不带 Dock 条目的那堆新建命令。
+    #[test]
+    fn tray_menu_offers_toggle_settings_and_exit() {
+        let hidden = Menu::tray(true);
+        let cmds: Vec<_> = hidden.entries.iter().map(|e| e.cmd).collect();
+        assert_eq!(
+            cmds,
+            vec![
+                MenuCmd::ToggleDock,
+                MenuCmd::Launchpad,
+                MenuCmd::Settings,
+                MenuCmd::ExitDock,
+            ]
+        );
+        assert_eq!(hidden.entries[0].label, "显示 Dock");
+        assert_eq!(Menu::tray(false).entries[0].label, "隐藏 Dock");
+        assert!(!hidden.entries.iter().any(|e| e.cmd == MenuCmd::AddFile));
+    }
+
+    /// 分组：能打开、能改名、能解散 —— 它是一个"目录"。
+    #[test]
+    fn group_menu_offers_open_rename_and_dissolve() {
+        let g = item(ItemKind::Group, "工具");
+        let m = Menu::build(Some(&g), false, false, MenuOpts::default()).expect("应当有菜单");
+        let cmds: Vec<_> = m.entries.iter().map(|e| e.cmd).collect();
+        assert_eq!(
+            cmds,
+            vec![
+                MenuCmd::OpenGroup,
+                MenuCmd::Rename,
+                MenuCmd::DissolveGroup,
+                MenuCmd::AddSepAfter,
+                MenuCmd::RemoveItem,
+                MenuCmd::Launchpad,
+                MenuCmd::Settings,
+            ]
+        );
+        assert!(
+            m.entries
+                .iter()
+                .any(|e| e.cmd == MenuCmd::DissolveGroup && e.danger),
+            "解散是不可逆操作，要用警告色"
+        );
+        assert!(
+            !m.entries.iter().any(|e| e.cmd == MenuCmd::Open),
+            "组不能走\"打开应用\"那条路"
+        );
     }
 
     /// 运行中的普通应用：首项改为"显示 / 最小化"，并多出"退出应用"。
@@ -510,6 +691,7 @@ mod tests {
         let opts = MenuOpts {
             autostart: None,
             add_items: false,
+            notes: false,
         };
         let m = Menu::build(None, false, false, opts).expect("应当有菜单");
         let cmds: Vec<MenuCmd> = m.entries.iter().map(|e| e.cmd).collect();
@@ -532,14 +714,19 @@ mod tests {
             MenuOpts {
                 autostart: None,
                 add_items: true,
+                notes: false,
             },
         )
         .expect("应当有菜单");
         let labels: Vec<&str> = m.entries.iter().map(|e| e.label.as_str()).collect();
-        assert_eq!(&labels[..2], &["添加文件…", "添加文件夹…"]);
+        assert_eq!(
+            &labels[..4],
+            &["添加文件…", "添加文件夹…", "新建文件夹…", "新建应用组…"]
+        );
         assert!(labels.contains(&"退出 Dock"));
-        // 两条新建与后面的项之间要断开：它们改的是 Dock 内容，不是退出。
-        assert!(m.entries[1].sep_after);
+        // "新建文件夹"与"新建应用组"之间要断开：一个是磁盘上的目录，
+        // 一个是 Dock 内部的目录，混在一起容易点错。
+        assert!(m.entries[2].sep_after);
     }
 
     /// `MnAuto`：勾选项带上"当前是否开启"，并给整张菜单留出勾选槽。
@@ -552,6 +739,7 @@ mod tests {
             MenuOpts {
                 autostart: Some(true),
                 add_items: false,
+                notes: false,
             },
         )
         .expect("应当有菜单");
@@ -569,6 +757,7 @@ mod tests {
             MenuOpts {
                 autostart: Some(false),
                 add_items: false,
+                notes: false,
             },
         )
         .expect("应当有菜单");
@@ -588,6 +777,7 @@ mod tests {
             MenuOpts {
                 autostart: None,
                 add_items: false,
+                notes: false,
             },
         )
         .expect("应当有菜单");
@@ -606,6 +796,7 @@ mod tests {
             MenuOpts {
                 autostart: Some(true),
                 add_items: true,
+                notes: false,
             },
         )
         .expect("应当有菜单");
@@ -759,6 +950,7 @@ mod tests {
         let opts = MenuOpts {
             autostart: None,
             add_items: false,
+            notes: false,
         };
         let m = Menu::build(None, false, false, opts).expect("应当有菜单");
         assert_eq!(m.cmd_at(0), Some(MenuCmd::ExitDock));

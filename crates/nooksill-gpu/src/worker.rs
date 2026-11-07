@@ -102,6 +102,18 @@ pub struct IconRequest {
     pub icon_src: String,
     /// 图标填充方式（0 = 等比留白，见 `FitBitmap`）。
     pub fit: i32,
+    /// 分组的子项。`kind == Group` 时取前 4 个拼成四宫格图标；
+    /// 其余类型恒为空。
+    pub kids: Vec<IconKid>,
+}
+
+/// 取图标时要顺带带上的一个子项。
+#[derive(Clone, Debug)]
+pub struct IconKid {
+    pub kind: ItemKind,
+    pub path: String,
+    /// 自定义图标文件（`.ico`）。空 = 从 `path` 取。
+    pub icon_src: String,
 }
 
 /// 处理完、可以直接上传纹理的图标。
@@ -237,18 +249,30 @@ fn fetch_icon(req: &IconRequest) -> Option<IconBitmap> {
         // 分割线不画图标；网址要联网抓 favicon，还没做。
         ItemKind::Separator | ItemKind::Url => None,
         ItemKind::Trash => icon::shell_icon("shell:RecycleBinFolder"),
+        // 分组本身没有图标，取子项拼四宫格。
+        ItemKind::Group => group_icon(&req.kids),
         _ => icon::shell_icon(&req.path).or_else(|| icon::resource_icon(&req.path, 0)),
     }
 }
 
 /// 纯 CPU 的那一半：判定填充方式、按需做圆角遮罩。
 fn process(req: &IconRequest, bmp: IconBitmap, shader: Option<&IconShader>) -> ReadyIcon {
-    let fit = fit_icon(
-        &bmp.rgba,
-        bmp.width,
-        bmp.height,
-        FitMode::from_code(req.fit),
-    );
+    // 分组的四宫格图标**已经**在合成时圆过角、也填满整格，再走一遍
+    // `fit_icon` 会把圆角裁掉再重圆一遍，白费功夫还可能糊。
+    let fit = if req.kind == ItemKind::Group {
+        IconFit {
+            bbox: nooksill_core::icon::BBox::full(bmp.width, bmp.height),
+            rounded: None,
+            fill: 1.0,
+        }
+    } else {
+        fit_icon(
+            &bmp.rgba,
+            bmp.width,
+            bmp.height,
+            FitMode::from_code(req.fit),
+        )
+    };
     let mut rgba = bmp.rgba;
     if let Some(r) = fit.rounded {
         let bbox = (fit.bbox.x0, fit.bbox.y0, fit.bbox.x1, fit.bbox.y1);
@@ -265,6 +289,48 @@ fn process(req: &IconRequest, bmp: IconBitmap, shader: Option<&IconShader>) -> R
         height: bmp.height,
         rgba,
         fit,
+    }
+}
+
+/// 分组图标：把子项拼成 2×2 四宫格。
+///
+/// 组本身没有路径，`shell_icon` 拿不到任何东西 —— 所以要**逐个取子项**
+/// 再拼。上游的 `BuildGroupIcon` 是同一件事。
+fn group_icon(kids: &[IconKid]) -> Option<IconBitmap> {
+    // 先把位图收齐（要活到合成结束），再借用它们的像素。
+    let bitmaps: Vec<IconBitmap> = kids.iter().take(4).filter_map(fetch_kid).collect();
+    if bitmaps.is_empty() {
+        return None;
+    }
+    let refs: Vec<nooksill_core::icon::QuadSource<'_>> = bitmaps
+        .iter()
+        .map(|b| nooksill_core::icon::QuadSource {
+            rgba: &b.rgba,
+            width: b.width,
+            height: b.height,
+        })
+        .collect();
+    let out = 256u32;
+    let rgba = nooksill_core::icon::composite_quad(&refs, out, out as f32 * 0.18);
+    Some(IconBitmap {
+        width: out,
+        height: out,
+        rgba,
+    })
+}
+
+/// 取一个子项的图标（自定义图标优先，再退回条目自己的）。
+fn fetch_kid(kid: &IconKid) -> Option<IconBitmap> {
+    let custom = (!kid.icon_src.is_empty())
+        .then(|| icon::shell_icon(&kid.icon_src))
+        .flatten();
+    if custom.is_some() {
+        return custom;
+    }
+    match kid.kind {
+        ItemKind::Separator | ItemKind::Url | ItemKind::Group => None,
+        ItemKind::Trash => icon::shell_icon("shell:RecycleBinFolder"),
+        _ => icon::shell_icon(&kid.path).or_else(|| icon::resource_icon(&kid.path, 0)),
     }
 }
 
@@ -412,6 +478,8 @@ pub struct WriteJob {
     /// `Remain` 要按"提交这一刻"的剩余量算，不能在写盘线程里重新取时间
     /// （那时可能已经过去几十毫秒，秒表会有可见跳变）。
     pub tool: Option<(Box<nooksill_core::tool::ToolState>, i64)>,
+    /// 速记（`[Notes]` 段）。`None` = 这次不动这一段。
+    pub notes: Option<Box<nooksill_core::note::NoteBook>>,
 }
 
 /// 写 ini 的工作线程。串行执行，天然保序。
@@ -477,6 +545,9 @@ fn write(ini: &Path, job: &WriteJob) -> Result<(), String> {
     }
     if let Some((tool, now_ms)) = &job.tool {
         tool.save(&mut model, *now_ms);
+    }
+    if let Some(notes) = &job.notes {
+        notes.save(&mut model);
     }
     model
         .save(ini)
@@ -639,6 +710,7 @@ mod tests {
                 items: None,
                 config: Some(Box::new(cfg)),
                 tool: None,
+                notes: None,
             },
         )
         .expect("写设置");
@@ -658,6 +730,7 @@ mod tests {
                 items: Some(vec![Item::new(ItemKind::File, "新", r"C:\new.exe")]),
                 config: None,
                 tool: None,
+                notes: None,
             },
         )
         .expect("写条目");
@@ -694,6 +767,7 @@ mod tests {
             icon_src: String::new(),
             path: r"C:\Windows\System32\notepad.exe".to_owned(),
             fit: 0,
+            kids: Vec::new(),
         });
 
         let mut got = Vec::new();
@@ -744,6 +818,7 @@ mod tests {
             items: Some(vec![Item::new(ItemKind::File, "a", r"C:.exe")]),
             config: None,
             tool: None,
+            notes: None,
         });
 
         // 最多等 2 秒：正常是毫秒级，留足余量给慢机器。
@@ -772,6 +847,7 @@ mod tests {
             path: r"C:\x\a.exe".to_owned(),
             icon_src: String::new(),
             fit: 0,
+            kids: Vec::new(),
         };
         let bmp = IconBitmap {
             width: 2,

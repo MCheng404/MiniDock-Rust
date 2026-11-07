@@ -81,7 +81,7 @@
 - [x] 四种停靠边（左/右会转置窗口尺寸，实测通过）
 - [ ] 悬停标签气泡逐像素比对（字体度量不同，需单独定容差）
 - [x] 拖拽重排 + 跟手残影 + 位移动画（ADR-024）
-- [ ] 拖出栏体删除、拖到图标上合并成组
+- [x] 拖出栏体删除、拖到组上合并成组（`Dock::pending_remove` / `pending_merge`）
 - [x] 中键 / Shift 强制新实例、Ctrl+Alt+D、启动弹跳、全屏隐藏（ADR-031）
 - [x] 右键菜单（独立窗口 + 模态捕获，ADR-032）
 - [x] 条目增删即时生效（窗口尺寸热更新，ADR-033）
@@ -126,8 +126,8 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 - [ ] `platform::icons`：`SHGetFileInfo` / `IShellItemImageFactory` → RGBA
 - [ ] `.lnk` 解析、`shell:` 协议、网址 favicon 缓存
-- [ ] 组图标拼接（原版 `BuildGroupIcon`，2×2 四宫格）
-- [ ] 条目增删改、拖拽重排、合并成组
+- [x] 组图标拼接：`core::icon::composite_quad` + `worker::group_icon`（2×2 四宫格）
+- [x] 条目增删改、拖拽重排、合并成组（设置页「条目」+ 右键菜单 + 拖放）
 - [ ] 图标纹理缓存分档（原版按 `g_cacheSize` 预缩放到 96/128/192/256；
       Rust 版直接从 256 缩到目标尺寸，少一次重采样，清晰度不低于原版）
 - [x] **显示未固定的运行中应用**（`ShowRunning`）：临时条目追加在栏体末尾
@@ -135,9 +135,69 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 验收：128 个条目、全部设置项遍历（含越界值）无崩溃；图标内存峰值 ≤ 原版 1.2×。
 
+> **2026-11-07 补齐「基础操作」**（此前是"能用但不好用"）：
+>
+> - **依据**：条目只有"加 / 拖 / 删"三条路径，名字定死、参数无处改、分组
+>   只有序列化、`WM_DROPFILES` 没接而空状态文案却在承诺"拖到这里"。
+> - **改了什么**：设置页新增「条目」页（改名 / 改目标 / 改参数 / 排序 /
+>   归组 / 删除）；Dock 右键补新建分组、新建文件夹、重命名、复制、打开组、
+>   解散组；点组弹出 `gpu::group_win`；拖到组上归组、拖出栏体移除；
+>   `WM_DROPFILES` 把文件与文件夹变成条目；`gpu::edit_win` 提供带 IME 的
+>   文本输入；设置窗口补 `WM_CHAR` + `WM_IME_*`（此前输入框打不进字）。
+> - **验证**：`core::group` / `core::icon::composite_quad` / `Dock` 拖拽状态机
+>   单测；kittest 用带数据的「条目」页断言控件与命令；`dock_shot` 离屏出帧；
+>   `./scripts/build.sh --gate` 全绿。
+> - **仍未做**（第一轮）：网址拖入（OLE `IDropTarget`）、单项图标选择、
+>   分组子项排序、速记面板。
+> - **第二轮（同日）**：单项图标选择、子项排序、托盘入口三项已落地；
+>   **第三轮**：速记面板。现在只剩网址拖入与 PNG/JPEG 图标解码。
+>
+> - **第二轮（同日）补齐**：
+>   - **单项图标选择**：条目右键「更换图标… / 恢复默认图标」，设置页
+>     编辑表单同款。`Dock::clear_icon(index)` 精确失效纹理（按 `path`
+>     搬缓存时 `icon_src` 变了不会被发现）。过滤器只列 `.ico/.exe/.dll` ——
+>     PNG/JPEG 还没有 WIC 解码器。
+>   - **分组子项排序**：`core::group::move_kid` 纯函数；设置页「上移/下移」
+>     + 分组面板悬停时的 ← → 小箭头；顺序变了重取四宫格组图标。
+>   - **托盘入口**：`platform::tray` 封装 `Shell_NotifyIconW`，左键切显隐、
+>     右键弹自绘菜单（显隐 / 起动台 / 设置 / 退出），RAII 注销。
+>     刻意不用 `TrackPopupMenu`：它要求前台窗口，Dock 是 NOACTIVATE。
+>   - **验证**：`Tray::parse` / 消息 ID 不冲突 / `move_kid` 单测；kittest
+>     补 3 条覆盖编辑表单与子项排序按钮；门禁全绿、离屏出帧正常。
+>   - **抓到两个真机 bug**：编辑表单的 Grid 首帧列宽近 0 时
+>     `available_width() - 60` 变负会让 egui panic；「归组」ComboBox
+>     缺 `labelled_by`，读屏软件与 kittest 都看不到名字。此前 kittest
+>     从没打开过编辑表单，所以两条都没被发现。
+>   - **仍未实机验证**：托盘图标注册（Explorer 会话）、分组面板与编辑
+>     弹窗的键盘焦点/IME。
+> - **第三轮（同日）补齐速记**：
+>   - `core::note`：`NoteBook` + `[Notes]` 段（正文转义成单行，避免真实
+>     换行毁掉整段），纯函数 + 9 条单测；`WriteJob` 加 `notes` 字段，
+>     与配置/条目共用同一个防抖窗口。
+>   - `gpu::note_win`：列表 + 新建 / 编辑 / 删除 / 分页；文本录入复用
+>     `gpu::edit_win` 的多行 `TextEdit`（面板自己不拿键盘焦点）。
+>     `edit_win` 因此新增 `EditField::multiline`：多行时回车插换行、
+>     不再当作"提交"。
+>   - 三个空壳一起接通：`ItemKind::Note`（点图标开面板，`launch` 的
+>     `Unsupported` 分支不再可达）、`Key::Notes`（开关打开时补速记
+>     条目，运行中改也立即生效）、`Key::MN_NOTES`（右键菜单「速记」）。
+>     设置页「添加」加「添加速记」、「附件」加「打开速记…」；
+>     `glyph::Builtin::Notes` 给矢量便签图标，不再退化成首字占位。
+>   - **验证工具**：`examples/panels_shot.rs` 离屏渲染分组/速记/空态
+>     三张 BMP，走的是与真实窗口同一份绘制函数。第一版图里就抓到
+>     「← → 箭头方向画反了」，肉眼一看即知。
+>   - **顺带修两处上轮漏写**：`step_click` 里点分组图标的分支没落地
+>     （此前只有右键「打开」能用，点图标没反应）；`group_slot` / 
+>     `note_slot` 没进 `panels()`，面板开着时自动隐藏会把栏体收走、
+>     把面板单独悬在半空。两条都是 Bash 脚本静默漏写导致的，
+>     已用逐条 grep 复核。
+> - **仍未做**：网址拖入（OLE `IDropTarget`）、PNG/JPEG 图标解码（WIC）、
+>   图标库浏览器、扇形展开、DWM 窗口预览。
+
 ### M3 · 弹窗与磨砂
 
-- [ ] 右键菜单、组展开、弧形堆叠（fan）、图标选择对话框
+- [ ] 右键菜单、弧形堆叠（fan）、图标选择对话框（**单项**换图标已做，这里指完整图标库浏览器）
+- [x] 组展开（`gpu::group_win`）
 - [ ] DWM 窗口预览（`DwmRegisterThumbnail`，必须留在 UI 线程）
 - [ ] 磨砂：DXGI Desktop Duplication + compute 两趟模糊
 - [ ] 磨砂不可用（RDP/虚拟机）时退化为 CPU 模糊
@@ -146,8 +206,8 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 
 ### M4 · 系统集成与收尾
 
-- [ ] 托盘、全局热键、AppBar 预留、单实例唤起
 - [ ] 最小化飞入动画（`SetWinEventHook`）
+- [x] 托盘（`platform::tray`）、全局热键、AppBar 预留、单实例唤起
 - [ ] 自动启动注册表、导出/导入 `.mdock`
 - [x] 删除遗留 `nooksill-gfx` / `nooksill-ui` / `nooksill`（ADR-035）
 
@@ -174,18 +234,20 @@ C 版退出时会把配置以 UTF-16 全量回写，所以每轮对拍都要用�
 | 图标 | `LoadItemIcon` `HiconToGp` `FitBitmap` `AlphaBBox` `LetterTile` | `platform::icon` + `core::icon` + `gpu::worker` | ✅ 含圆角/缩放，工作线程取 |
 | 网址 favicon | `IsUrlStr` `HostOf` `Fnv` `IconFileFor` `FaviconBitmap` | —— | ❌ 未做（网址条目走首字占位） |
 | 快捷方式 | `ReadLnk` `ResolveTarget` `BuildItem` | `platform::shortcut` | ✅ |
-| 拖放 | `DT_*` `AcceptData` `DropPoint` `GetGlobalText` | —— | ❌ 未做（拖进来加条目还没有） |
-| 分组 | `KidAdd` `MergeInto` `ExtractKid` `DissolveGroup` `BuildGroupIcon` | 只有序列化（`core::store`） | ❌ 交互未做，`launch` 明确返回"不支持" |
+| 拖放 | `DT_*` `AcceptData` `DropPoint` `GetGlobalText` | `gpu::dock` + `bin/dock.rs` | ⚠️ `WM_DROPFILES` 已接（文件/文件夹）；OLE `IDropTarget`（网址/文本）未做 |
+| 分组 | `KidAdd` `MergeInto` `ExtractKid` `DissolveGroup` `BuildGroupIcon` | `core::group` + `gpu::group_win` + `gpu::edit_win` | ✅ 建组/改名/点开/归组/移出/解散 + 四宫格图标；`launch` 的 `Unsupported` 分支不再可达 |
 | 菜单 | `ShowMenu` `MenuProc` `MenuDraw` `HandleCmd` | `gpu::menu` | ✅ 独立窗口 + 模态捕获（ADR-032） |
 | 预览 | `ShowPreview` `PvProc` `PvEnum` `ClosePreview` | —— | ❌ 未做（只有配置键） |
 | 磨砂 | `UpdateFrost` `BlurPass` | —— | ❌ 未做，`Frost` 退化为渐变 |
-| 托盘 | `AddTray` `WM_APP_TRAY` | —— | ❌ 未做 |
+| 托盘 | `AddTray` `WM_APP_TRAY` | `platform::tray` + `bin/dock.rs::step_tray` | ✅ 图标 + 左键切显隐 + 右键菜单（显隐/起动台/设置/退出）；RAII 注销 |
+| 单项图标 | `LoadItemIcon`（自定义 `icon_src` 分支） | `bin/dock.rs::change_icon` + `Dock::clear_icon` | ✅ 只列 `.ico/.exe/.dll`；PNG/JPEG 待 WIC |
+| 速记 | `ToolDraw` 之外的便签窗口 | `core::note` + `gpu::note_win` + `gpu::edit_win` | ✅ 列表/新建/编辑/删除/分页，`[Notes]` 段持久化 |
 | 热键 | `RegisterHotKey` `ToggleHide` | `bin/dock.rs` | ✅ `Ctrl+Alt+D` |
 | AppBar | `SetupAppBar` `WM_APP_AB` | `platform::appbar` | ✅ |
 | 最小化动画 | `SetMinHook` `MinProc` `AnimStep` | —— | ❌ 未做 |
 | 动画 | `Kick` `BounceOff` `Remap` | `gpu::dock`（弹跳/隐藏/放大插值） | ✅ |
 | 设置窗口外壳 | `ShowSettings` `DarkTitle` | `gpu::settings_win` | ✅ |
-| 设置内容 | `BuildRows` `PaintSettings` `SetProc` `RowHit` `DoAct` | `settings::pages` | ⚠️ 9 页 / 约 90 项；上游 **10 页**，且项目不全 |
+| 设置内容 | `BuildRows` `PaintSettings` `SetProc` `RowHit` `DoAct` | `settings::pages` | ⚠️ 12 页；新增「条目」页管既有条目，上游 **10 页** 的分页仍未对齐 |
 | 后台任务 | —— | `gpu::worker` | ✅ 本轮新增（ADR-037） |
 | 资源监视器 | `ResCpuPercent` `ResSample` `DrawRes` `ShowResMon` | `platform::sysinfo` + `gpu::resmon_win` | ✅ 卡片 + 详情面板（ADR-039） |
 | 计时器 / 待办 | `ToolLoad` `ToolSave` `ToolDraw` `ToolUp` `ShowTool` | `core::tool` + `gpu::tool_win` | ✅ 卡片 + 面板（ADR-040） |
@@ -608,7 +670,7 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 | ✅ **已接** | `Browser` | 网页应用原来固定 Edge→Chrome；现按键选（0 自动 / 1 Edge / 2 Chrome / 3 Firefox / 4 系统默认），指定的没装就继续往下退，最后回落到系统默认 |
 | ✅ **已接** | `BgColor3` + `GradAngle/A1/A2/A3` | 渐变改成"两端 + 可选中间色"，`at(t)` 在 t=0.5 取中间色；角度换成把点投影到方向向量、按矩形在该方向的跨度归一化（0°/90° 与旧的 `Direction` 完全一致）。每档透明度独立作用（预乘后再插值，半透明端不会串色） |
 | ✅ **已接** | `MnAuto` / `MnAdd` | 空白处右键多出「添加文件… / 添加文件夹…」与带勾选的「开机自启」。勾是画出来的两条线段，不打 `✓` 字符——Dingbats 区不保证有字模，缺字会变豆腐块。`MenuEntry` 因此多一个 `checkable/checked`，整张菜单留 18px 勾选槽保证左对齐 |
-| 待做 | `MnNotes` | 卡在「速记」本身：`ItemKind::Note` 的启动仍是 `Unsupported`，给菜单项等于再生一个死按钮 |
+| ✅ **已接**（第三轮） | `MnNotes` | 速记面板已实现：点速记条目 / 空白处右键「速记」/ 设置页「打开速记…」都能开面板；`Key::Notes` 打开时自动补一个速记图标且立即生效 |
 | 不做 | `MinStyle` | 最小化动画风格，前提是窗口动画——§9.4 已论证不移植 |
 | 不做 | `Guardian` | 守护进程要第二个进程，一个 Dock 不值得再养一个常驻 |
 
@@ -624,8 +686,8 @@ SbPopFrost SbAutoOpaque TaskPeek FrostHold AnimSpeed FanReverse LogCollect
 | 1 | **顶部状态栏** | 大 | `Sb*` 13 个键已建模但全空转；要独立窗口 + 第二个 AppBar + 弹出层 + 九个子开关 | 唯一还没做的"大组件"。做之前先定：它是独立进程内窗口还是复用 Dock 窗口？ |
 | 2 | **扇形展开** | 中 | `Fan*` 8 个键（弧角/间距/切角/四套配色/拖拽）已建模未读；`folder_fan` 开关也在 | 文件夹/组悬停时的弧形弹出。几何是纯数学，可以先写 `layout::fan_slots` 配单测，再接绘制 |
 | 3 | **多窗口列表** | 中 | 现在只有分组预览；上游是"同应用多窗口时悬停列窗口标题" | 数据层要 `EnumWindows` 按 PID 分组（`running_apps` 现在只留第一个窗口）；UI 是新的弹层 |
-| 4 | **速记面板** | 中 | `ItemKind::Note` 的启动仍是 `Unsupported`；`Key::Notes` 已建模 | 做完才能开 `MnNotes`（否则菜单里多一个死按钮） |
-| 5 | **托盘图标** | 中 | 没有 | 没有它时，Dock 被误关就只剩"重新启动 exe"一条路 |
+| 4 | ~~速记面板~~ | — | ✅ 已做（`core::note` + `gpu::note_win` + `gpu::edit_win` 多行；`Notes` / `MnNotes` 两个空壳一起接通） | — |
+| 5 | ~~托盘图标~~ | — | ✅ 已做（`platform::tray`，左键显隐 / 右键菜单 / RAII 注销） | — |
 | 6 | **磨砂玻璃背景** | 大 | `BgMode::Frost` 是默认值，但实现退化成渐变（§9.4 提过） | 要桌面捕获 + compute 模糊；`glass-backdrop` 已经有 blur/SDF，缺的是管线接入 |
 | 7 | 图标解码（PNG/JPEG） | 小 | `icon_src` 目前只认 `.ico`（shell 图像列表） | 加 WIC 解码即可；注意别为此引入 `image` crate |
 | 8 | 更新进度条 | 小 | 更新卡片只有一行文字 | `mirror_rows` 那套回读缓冲里顺手能算进度，但要先把下载改成流式 |

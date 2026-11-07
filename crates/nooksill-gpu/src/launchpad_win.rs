@@ -535,6 +535,7 @@ impl LaunchpadWindow {
                 path: app.path.clone(),
                 icon_src: String::new(),
                 fit: 0,
+                kids: Vec::new(),
             });
         }
     }

@@ -151,6 +151,7 @@ crates/nooksill-settings/src/
     mod.rs         Page 枚举、SettingsState、Command、两列骨架
     widgets.rs     共享控件：card / row / toggle / slider / combo / 侧栏
     options.rs     下拉选项表（纯数据）
+    items.rs       「条目」页：既有条目的改名/排序/归组/删除（数据由主程序同步快照）
     general.rs     常规      appearance.rs  外观     position.rs   位置
     icons.rs       图标      interaction.rs 交互     extras.rs     附件
     effect.rs      效果      performance.rs 性能     library.rs    图标库
@@ -233,6 +234,15 @@ async 运行时带来的调度开销与栈占用都不划算。
    `Gpu`（device + queue）。
 5. **配置写入只有一个出口**。所有值必须经 `Config::apply_i32`（内含夹紧），
    不允许直接改字段。原版崩溃的一半来自"某处忘了夹紧"。
+6. **自定义 `WM_APP` 消息号必须全局查重**。它们都发到 Dock 的同一个
+   hwnd，`pump()` 又按 `WM_APP_WAKE` 区分"要不要出帧"：
+   `WM_APP+1 = worker::WM_APP_WAKE`、`WM_APP+2 = tray::WM_APP_TRAY`、
+   `0x8000+0x4142 = appbar::WM_APP_AB`。撞号会让托盘点击被静默吞掉，
+   而且不会有任何编译错误。加新消息前先 `grep -rn WM_APP crates/`。
+7. **窗口过程只碰 `Dock`**。`GWLP_USERDATA` 挂的是 `Box<Dock>` 的地址，
+   wndproc 拿不到 `App`。托盘点击、拖放路径这类事件先记在 `Dock` 的
+   一次性标志/队列里，由主循环取走执行 —— 不要在 WndProc 里开窗口
+   或跑模态循环。
 
 ## 八、与 C 版的模块映射
 
@@ -244,7 +254,15 @@ async 运行时带来的调度开销与栈占用都不划算。
 | `InitPaths` | `platform::paths` | ✅ |
 | `GetMon` / `GetDeviceCaps` | `platform::display` / `win` | ✅ |
 | `SystemDark` / `GetAutostart` | `platform::theme` | ✅ |
-| `BuildRows` / `PaintSettings` / `SetProc` | `settings::pages`（10 页，一页一文件） | ✅ 布局重做（ADR-049） |
+| `BuildRows` / `PaintSettings` / `SetProc` | `settings::pages`（12 页，一页一文件） | ✅ 布局重做（ADR-049） |
+| `KidAdd` / `MergeInto` / `ExtractKid` / `DissolveGroup` | `core::group`（纯逻辑） | ✅ 归组/出组/解散，单测覆盖 |
+| `BuildGroupIcon` | `core::icon::composite_quad` + `worker::group_icon` | ✅ 2×2 四宫格 |
+| 组展开 | `gpu::group_win`（独立分层窗口 + 自己的 `IconLoader`） | ✅ 网格面板 |
+| 重命名 / 新建对话框 | `gpu::edit_win`（模态弹窗，`WM_CHAR` + IME） | ✅ |
+| 单项图标 | `bin/dock.rs::change_icon` + `Dock::clear_icon` | ✅ 精确失效一张纹理 |
+| 组内排序 | `core::group::move_kid` + `group_win` 悬停箭头 | ✅ |
+| 托盘 | `platform::tray`（`Shell_NotifyIconW`）+ `bin/dock.rs::step_tray` | ✅ 右键菜单复用 `gpu::menu`，不用 `TrackPopupMenu` |
+| 速记 | `core::note` + `gpu::note_win` + `gpu::edit_win`（多行） | ✅ 面板只做列表与动作分发，文本录入交给模态弹窗 |
 | `RenderFrame` / `DrawBar` / `DrawBubbleAt` | `gpu::dock`（待写） | ⏳ M1 |
 | `LoadItemIcon` / `HiconToGp` / `FitBitmap` | `platform::icons`（待写） | ⏳ M2 |
 | `UpdateFrost` / `BlurPass` | `gpu::frost`（DXGI + compute） | ⏳ M3 |

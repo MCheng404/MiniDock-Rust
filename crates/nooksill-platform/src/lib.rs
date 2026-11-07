@@ -24,6 +24,7 @@ pub mod single_instance;
 pub mod sysact;
 pub mod sysinfo;
 pub mod theme;
+pub mod tray;
 pub mod update;
 pub mod win;
 

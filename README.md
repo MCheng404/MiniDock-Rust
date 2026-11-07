@@ -18,7 +18,10 @@ Conclusion: **Three Are Valid, One Is Disproven**.
 | Graphics Card Selection (Default Automatic) | ✅ `[Graphics] Adapter`, Matched by Name, Fallback on Mismatch |
 | Resident Memory | ✅ Settings Window 111 MB (271 MB Before Optimization), See `BUILD.md` |
 The DX12 / Vulkan Surface of wgpu Only Reports `Opaque`. For Transparency, Switch to "Off-screen Rendering + Read-back + `UpdateLayeredWindow"`, with About 1-6 MB Copy per Frame; Zero-copy Scheme (DirectComposition) Left to M3 - See [`DECISIONS.md`](DECISIONS.md) ADR-008.
-The Dock Body (Icon, Zooming, Dragging, Grouping, Preview) **Has Not Been Migrated**; See M1 - M4 in [`PORTING.md`](PORTING.md).
+The Dock body (icons, zoom, dragging, grouping, item management, notes) is
+implemented, including a tray icon for recovery. Remaining gaps (window
+previews, DWM thumbnails, fan/arc stacking, OLE URL drop, PNG icon decoding)
+are tracked in [`PORTING.md`](PORTING.md) M2–M4.
 ## Quick Start
 ```bash
 source scripts/env.sh          # Inject MSVC + Windows SDK

@@ -140,6 +140,195 @@ fn 每一页都能渲染且不崩溃() {
     }
 }
 
+/// 「条目」页要能真的列出条目、列出分组里的子项。
+///
+/// 上面的「每一页都能渲染」用的是**空**条目列表，走的是空状态分支；
+/// 有数据时才有列表、编辑表单和归组下拉框，是另一条代码路径。
+#[test]
+fn 条目页列出条目与分组子项() {
+    use nooksill_core::item::{Item, ItemKind};
+
+    let mut h = new_harness();
+    let mut group = Item::new(ItemKind::Group, "开发工具", "");
+    group
+        .kids
+        .push(Item::new(ItemKind::File, "VS Code", r"C:\Code.exe"));
+    group
+        .kids
+        .push(Item::new(ItemKind::Url, "GitHub", "https://github.com"));
+    h.state_mut().ui.items = vec![
+        Item::new(ItemKind::File, "记事本", r"C:\Windows\notepad.exe"),
+        group,
+        Item::new(ItemKind::Separator, "", ""),
+    ];
+    h.state_mut().ui.page = Page::Items;
+    h.run();
+
+    assert!(
+        h.query_all_by_label("记事本").count() >= 1,
+        "普通条目应当列出来"
+    );
+    assert!(
+        h.query_all_by_label("开发工具").count() >= 1,
+        "分组应当列出来"
+    );
+    assert!(
+        h.query_all_by_label("· VS Code").count() >= 1,
+        "分组里的子项应当列出来"
+    );
+    assert!(h.query_all_by_label("解散").count() >= 1, "组要有解散入口");
+}
+
+/// 条目页的「删除」要产出带下标的命令，UI 不能自己改数据。
+#[test]
+fn 条目页的删除只发命令() {
+    use nooksill_core::item::{Item, ItemKind};
+
+    let mut h = new_harness();
+    // 只放一个条目：`get_by_label` 要求唯一，放两个会有两个「删除」。
+    h.state_mut().ui.items = vec![Item::new(
+        ItemKind::File,
+        "记事本",
+        r"C:\Windows\notepad.exe",
+    )];
+    h.state_mut().ui.page = Page::Items;
+    h.run();
+
+    h.get_by_label("删除").click();
+    h.run();
+
+    let cmds = &h.state().commands;
+    assert!(
+        cmds.iter().any(|c| matches!(c, Command::RemoveItem(0))),
+        "应当产出 RemoveItem(0) 命令：{cmds:?}"
+    );
+    assert_eq!(h.state().ui.items.len(), 1, "UI 层不能自己删条目");
+}
+
+/// 「新建分组」要发命令，不是直接往快照里塞一个组。
+#[test]
+fn 条目页新建分组只发命令() {
+    let mut h = new_harness();
+    h.state_mut().ui.page = Page::Items;
+    h.run();
+
+    h.get_by_label("新建分组…").click();
+    h.run();
+
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::NewGroup)),
+        "应当产出 NewGroup 命令"
+    );
+}
+
+/// 编辑表单里的自定义图标入口：只发命令，UI 不碰文件路径。
+#[test]
+fn 条目页更换与恢复图标只发命令() {
+    use nooksill_core::item::{Item, ItemKind};
+
+    let mut h = new_harness();
+    let mut item = Item::new(ItemKind::File, "记事本", r"C:\Windows\notepad.exe");
+    item.icon_src = r"C:\custom.ico".to_owned();
+    h.state_mut().ui.items = vec![item];
+    h.state_mut().ui.page = Page::Items;
+    h.run();
+
+    h.get_by_label("编辑").click();
+    h.run();
+    h.get_by_label("更换…").click();
+    h.run();
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::PickIcon(0))),
+        "应当产出 PickIcon(0)"
+    );
+
+    h.get_by_label("恢复默认").click();
+    h.run();
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::ResetIcon(0))),
+        "应当产出 ResetIcon(0)"
+    );
+    assert_eq!(
+        h.state().ui.items[0].icon_src,
+        r"C:\custom.ico",
+        "UI 层不能自己改数据"
+    );
+}
+
+/// 速记的两个入口：添加页能加图标，附件页能直接打开面板。
+#[test]
+fn 速记入口产出命令() {
+    let mut h = new_harness();
+    h.state_mut().ui.page = Page::Add;
+    h.run();
+    h.get_by_label("添加速记").click();
+    h.run();
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::AddNote)),
+        "应当产出 AddNote"
+    );
+
+    h.state_mut().ui.page = Page::Extras;
+    h.run();
+    h.get_by_label("打开速记…").click();
+    h.run();
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::OpenNotes)),
+        "应当产出 OpenNotes"
+    );
+}
+
+/// 分组内子项排序：按钮带组下标与子项下标。
+#[test]
+fn 条目页分组子项排序只发命令() {
+    use nooksill_core::item::{Item, ItemKind};
+
+    let mut h = new_harness();
+    let mut group = Item::new(ItemKind::Group, "工具", "");
+    group.kids.push(Item::new(ItemKind::File, "A", r"C:\a.exe"));
+    group.kids.push(Item::new(ItemKind::File, "B", r"C:\b.exe"));
+    h.state_mut().ui.items = vec![group];
+    h.state_mut().ui.page = Page::Items;
+    h.run();
+
+    // 两个子项：只有第一个有「下移」、只有第二个有「上移」，各一个。
+    h.get_by_label("下移").click();
+    h.run();
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::MoveKid(0, 0, 1))),
+        "应当产出 MoveKid(0, 0, 1)"
+    );
+
+    h.get_by_label("上移").click();
+    h.run();
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::MoveKid(0, 1, -1))),
+        "应当产出 MoveKid(0, 1, -1)"
+    );
+    assert_eq!(h.state().ui.items[0].kids[0].name, "A", "UI 层不能自己排序");
+}
+
 #[test]
 fn 显卡默认自动且可切换到具体适配器() {
     let mut h = new_harness();

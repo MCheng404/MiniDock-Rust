@@ -23,6 +23,7 @@ mod extras;
 mod general;
 mod icons;
 mod interaction;
+mod items;
 mod library;
 mod options;
 mod performance;
@@ -31,10 +32,11 @@ mod widgets;
 
 use egui::Ui;
 use nooksill_core::config::Config;
+use nooksill_core::item::Item;
 
 pub(crate) use widgets::Ctx;
 
-/// 十一个页面。顺序 = 侧边导航顺序。
+/// 十二个页面。顺序 = 侧边导航顺序。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -46,13 +48,14 @@ pub enum Page {
     Extras,
     Effect,
     Performance,
+    Items,
     Library,
     Add,
     About,
 }
 
 impl Page {
-    pub const ALL: [Page; 11] = [
+    pub const ALL: [Page; 12] = [
         Page::General,
         Page::Appearance,
         Page::Position,
@@ -61,6 +64,7 @@ impl Page {
         Page::Extras,
         Page::Effect,
         Page::Performance,
+        Page::Items,
         Page::Library,
         Page::Add,
         Page::About,
@@ -77,6 +81,7 @@ impl Page {
             Page::Extras => "附件",
             Page::Effect => "效果",
             Page::Performance => "性能",
+            Page::Items => "条目",
             Page::Library => "图标库",
             Page::Add => "添加",
             Page::About => "关于",
@@ -95,6 +100,7 @@ impl Page {
             Page::Extras => "时钟、倒影、小组件与浏览器。",
             Page::Effect => "栏体周围的环境烟雾。",
             Page::Performance => "显卡选择、实时占用与高耗能功能开关。",
+            Page::Items => "Dock 上的条目：改名、排序、分组。",
             Page::Library => "从文件夹批量设置图标。",
             Page::Add => "往 Dock 里加东西，以及配置的导入导出。",
             Page::About => "版本、项目地址、作者与许可。",
@@ -146,6 +152,20 @@ pub struct SettingsState {
     pub row_bands_prev: Vec<(egui::Pos2, egui::Rect)>,
     /// 本帧各行的矩形，下一帧变成 `row_bands_prev`。
     pub row_bands: Vec<(egui::Pos2, egui::Rect)>,
+
+    // ---- 「条目」页 ----
+    /// Dock 条目的副本。由主程序每次同步进来（它是唯一的事实来源）。
+    pub items: Vec<Item>,
+    /// 正在编辑的条目下标。`None` = 没有条目在编辑。
+    pub editing: Option<usize>,
+    /// 编辑中的名称。
+    pub edit_name: String,
+    /// 编辑中的路径（文件 / 文件夹 / 网址）。
+    pub edit_path: String,
+    /// 编辑中的启动参数。
+    pub edit_args: String,
+    /// 编辑时要并入的分组下标。`None` = 不归组（留在栏体上）。
+    pub edit_group: Option<usize>,
 }
 
 /// 一个展开中的说明气泡。
@@ -184,8 +204,24 @@ impl Default for SettingsState {
             url_input: String::new(),
             icon_dir: String::new(),
             row_bands: Vec::new(),
+            items: Vec::new(),
+            editing: None,
+            edit_name: String::new(),
+            edit_path: String::new(),
+            edit_args: String::new(),
+            edit_group: None,
         }
     }
+}
+
+/// 条目的可编辑字段。改名 / 改路径 / 改参数一次做完。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemEdit {
+    pub name: String,
+    pub path: String,
+    pub args: String,
+    /// 要并入的分组下标。`None` = 留在栏体上。
+    pub group: Option<usize>,
 }
 
 /// 需要主程序执行的动作（打开对话框、写注册表、增删条目……）。
@@ -215,6 +251,26 @@ pub enum Command {
     DownloadUpdate,
     /// 用已下载的文件替换本程序并重启。
     ApplyUpdate,
+    /// 改第 `index` 个条目的名称 / 路径 / 参数 / 归属分组。
+    EditItem(usize, ItemEdit),
+    /// 删除第 `index` 个条目。
+    RemoveItem(usize),
+    /// 第 `index` 个条目上移（`-1`）或下移（`+1`）。
+    MoveItem(usize, i32),
+    /// 把第 `index` 个组里的第 `kid` 个子项搬回栏体。
+    ExtractKid(usize, usize),
+    /// 解散第 `index` 个组，子项摊平回栏体。
+    DissolveGroup(usize),
+    /// 给第 `index` 个条目挑一个自定义图标文件。
+    PickIcon(usize),
+    /// 清掉第 `index` 个条目的自定义图标，恢复默认。
+    ResetIcon(usize),
+    /// 把第 `group` 个组里的第 `kid` 个子项上移（`-1`）或下移（`+1`）。
+    MoveKid(usize, usize, i32),
+    /// 往 Dock 里加一个速记条目。
+    AddNote,
+    /// 打开速记面板。
+    OpenNotes,
 }
 
 /// 更新器给界面看的那一面。
@@ -336,6 +392,7 @@ pub fn settings_ui(ui: &mut Ui, cfg: &mut Config, state: &mut SettingsState) -> 
                 Page::Extras => extras::page(&mut ctx, ui),
                 Page::Effect => effect::page(&mut ctx, ui),
                 Page::Performance => performance::page(&mut ctx, ui),
+                Page::Items => items::page(&mut ctx, ui),
                 Page::Library => library::page(&mut ctx, ui),
                 Page::Add => add::page(&mut ctx, ui),
                 Page::About => about::page(&mut ctx, ui),

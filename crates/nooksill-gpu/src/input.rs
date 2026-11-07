@@ -79,6 +79,18 @@ impl Input {
         });
     }
 
+    /// 插入一段文字（`WM_CHAR`，或输入法上屏的那串）。
+    ///
+    /// egui 的 `TextEdit` **只认 `Event::Text`**：`Event::Key` 只用来移动
+    /// 光标与删除，敲键盘不会插入字符。所以整条文本输入链路必须走这里，
+    /// 否则输入框能拿到焦点却打不进字（设置窗口此前就是这个状态）。
+    pub fn text(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.events.push(Event::Text(s.to_owned()));
+    }
+
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
     }

@@ -307,6 +307,34 @@ pub struct Dock {
     menu_at: Option<(f32, f32)>,
     /// 本次按下是否按着 Shift / 来自中键。抬起时据此决定 `click` 的 force。
     press_force: bool,
+    /// 拖动中光标停在哪个**分组**图标上。
+    ///
+    /// 停在组上时不重排 —— 重排会把组本身挤走，用户根本瞄不准。
+    /// 松手时归组。
+    merge_target: Option<usize>,
+    /// 待处理的归组（`被拖项` → `目标组`），主循环取走后施加。
+    pending_merge: Option<(usize, usize)>,
+    /// 光标拖出了 Dock 窗口（松手即移除）。
+    drop_outside: bool,
+    /// 待处理的移除（被拖项下标）。
+    pending_remove: Option<usize>,
+    /// 从资源管理器拖进来的路径。
+    ///
+    /// 窗口过程拿不到 `App`（它只有 `Dock` 的指针），所以拖放的文件
+    /// 先落在这里，主循环每轮取走。空状态文案写着"将应用 / 文件夹 / 网址
+    /// 拖到这里"—— 此前这句是**空头支票**，拖了没反应。
+    /// 拖进来的路径暂存区。窗口过程只有 `Dock` 的指针，主循环每轮取走。
+    dropped_paths: Vec<String>,
+    /// 托盘图标被左键点了（切换显隐）。
+    tray_toggle: bool,
+    /// 托盘图标被右键点了（弹菜单）。
+    tray_menu: bool,
+    /// Dock 侧操作的短提示（`文字, 出现时刻`）。
+    ///
+    /// 以前所有回执都写进设置窗口的状态条；设置窗口没打开时，用户
+    /// 在 Dock 上新建分组、重命名、归组**看不到任何反馈**，只能靠图标
+    /// 变化猜。这是"能用但不好用"里最扎眼的一条。
+    notice: Option<(String, Instant)>,
     /// 系统外观变更计数（`WM_SETTINGCHANGE` 时 +1）。
     ///
     /// 窗口过程拿不到 `App`（它只有 `Dock` 的指针），而强调色、深浅色这类
@@ -352,7 +380,107 @@ impl Dock {
             press_force: false,
             look_epoch: 0,
             menu_at: None,
+            dropped_paths: Vec::new(),
+            tray_toggle: false,
+            tray_menu: false,
+            merge_target: None,
+            pending_merge: None,
+            drop_outside: false,
+            pending_remove: None,
+            notice: None,
         }
+    }
+
+    /// 记下一批拖进来的路径（窗口过程用）。
+    pub fn push_dropped_paths(&mut self, paths: Vec<String>) {
+        self.dropped_paths.extend(paths);
+    }
+
+    /// 取走拖进来的路径。
+    pub fn take_dropped_paths(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dropped_paths)
+    }
+
+    /// 记一次托盘点击。`toggle = true` 是左键（切显隐），`false` 是右键（弹菜单）。
+    pub fn push_tray_click(&mut self, toggle: bool) {
+        if toggle {
+            self.tray_toggle = true;
+        } else {
+            self.tray_menu = true;
+        }
+        self.mark_dirty();
+    }
+
+    /// 取走"托盘右键要弹菜单"。
+    pub fn take_tray_menu(&mut self) -> bool {
+        std::mem::take(&mut self.tray_menu)
+    }
+
+    /// 取走"托盘左键要切显隐"。
+    pub fn take_tray_toggle(&mut self) -> bool {
+        std::mem::take(&mut self.tray_toggle)
+    }
+
+    /// 一条操作回执能显示多久。
+    const NOTICE_MS: u128 = 2200;
+    /// 末尾淡出的时长。
+    const NOTICE_FADE_MS: u128 = 300;
+
+    /// 在 Dock 上显示一句话。
+    pub fn show_notice(&mut self, text: impl Into<String>) {
+        self.notice = Some((text.into(), Instant::now()));
+        self.mark_dirty();
+        self.anim = true;
+    }
+
+    /// 提示还活着吗。主循环据此决定要不要继续出帧。
+    #[must_use]
+    pub fn notice_active(&self) -> bool {
+        self.notice
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed().as_millis() < Self::NOTICE_MS)
+    }
+
+    /// 提示过期就清掉。
+    pub fn expire_notice(&mut self) {
+        if !self.notice_active() && self.notice.is_some() {
+            self.notice = None;
+            self.mark_dirty();
+        }
+    }
+
+    /// 回执提示在 `elapsed_ms` 时刻的透明度（0..1）。
+    ///
+    /// 抽成纯函数是因为**时间边界必须能测**：主循环判定"还活着"与真正
+    /// 绘制之间隔着几毫秒，`elapsed` 越过总时长是完全可能的。早先直接写
+    /// `NOTICE_MS - ms`，u128 下溢 panic —— 实测把应用拖进分组时整个
+    /// Dock 崩掉，就是这一行。
+    #[must_use]
+    fn notice_alpha(elapsed_ms: u128) -> f32 {
+        let remain = Self::NOTICE_MS.saturating_sub(elapsed_ms);
+        (remain as f32 / Self::NOTICE_FADE_MS as f32).clamp(0.0, 1.0)
+    }
+
+    /// 某个槽位在屏幕上的矩形（物理像素，`(left, top, right, bottom)`）。
+    ///
+    /// 槽位几何是**窗口内**坐标，弹层要摆到屏幕上去，得加窗口偏移。
+    #[must_use]
+    pub fn slot_screen_rect(
+        &self,
+        index: usize,
+        win_x: i32,
+        win_y: i32,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let l = self.geom.slot_l.get(index)?;
+        let r = self.geom.slot_r.get(index)?;
+        let top = self.geom.bar_top;
+        let bottom = self.geom.bar_bottom;
+        Some((
+            win_x + l.round() as i32,
+            win_y + top.round() as i32,
+            win_x + r.round() as i32,
+            win_y + bottom.round() as i32,
+        ))
     }
 
     /// 标脏：下一次循环会重新布局（重算 `hot`）。
@@ -532,18 +660,75 @@ impl Dock {
             }
         }
         if d.active {
-            // 必须把自己排除掉：`drag_to` 开头已经 `take()` 了状态，
-            // `place_for` 里读 `self.drag` 只会拿到 `None`，于是把被拖项
-            // 也算进"左边有几个"，每次都会多挪一格。
-            let target = self.place_for(u, d.index);
-            if target != d.index {
-                self.move_item(d.index, target);
-                d.index = target;
-                // 同步 `press`，否则抬起时"同一图标"的判断会失配。
-                self.press = Some(target);
+            // 先判"拖出窗口"：这是删除手势，优先级最高。
+            // 24 px 容差 —— 光标刚好压在边缘时不该算拖出去。
+            let (ww, wh) = self.physical_size();
+            let outside = u < -24.0 || v < -24.0 || u > ww + 24.0 || v > wh + 24.0;
+            self.drop_outside = outside;
+            if outside {
+                self.merge_target = None;
+            } else {
+                // 再看光标是不是停在某个**组**的图标上。
+                //
+                // 是的话就别重排：重排会把那个组挤到别处，用户永远瞄不准，
+                // "把图标拖到文件夹里"这个动作就成了不可能完成的事。
+                let over_group = self.group_under(u, v, d.index);
+                self.merge_target = over_group;
+                if over_group.is_none() {
+                    // 必须把自己排除掉：`drag_to` 开头已经 `take()` 了状态，
+                    // `place_for` 里读 `self.drag` 只会拿到 `None`，于是把被拖项
+                    // 也算进"左边有几个"，每次都会多挪一格。
+                    let target = self.place_for(u, d.index);
+                    if target != d.index {
+                        self.move_item(d.index, target);
+                        d.index = target;
+                        // 同步 `press`，否则抬起时"同一图标"的判断会失配。
+                        self.press = Some(target);
+                    }
+                }
             }
         }
         self.drag = Some(d);
+    }
+
+    /// 光标停在第 `i` 个组图标上吗（`exclude` 是被拖的那一项）。
+    ///
+    /// 判的是**图标方块**，不是槽位：槽位比图标宽，停在槽位边缘就
+    /// 触发的话，用户想"拖到组旁边"也会被吸进去。
+    fn group_under(&self, u: f32, v: f32, exclude: usize) -> Option<usize> {
+        for (i, it) in self.items.iter().enumerate() {
+            if i == exclude || it.kind != ItemKind::Group || it.cur <= 1.0 {
+                continue;
+            }
+            let Some((ix, iy, iw, ih)) = self.icon_rect(i) else {
+                continue;
+            };
+            // 放大一点容差：图标之间的空隙太窄，差 2 px 就不算命中，
+            // 用户会觉得"明明指着它"。
+            let pad = 4.0;
+            if u >= ix - pad && u <= ix + iw + pad && v >= iy - pad && v <= iy + ih + pad {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// 第 `i` 个条目的图标矩形（窗口内物理坐标）。
+    fn icon_rect(&self, i: usize) -> Option<(f32, f32, f32, f32)> {
+        let it = self.items.get(i)?;
+        let sz = it.cur;
+        if sz <= 0.0 {
+            return None;
+        }
+        let lx = *self.geom.slot_l.get(i)? + it.slide;
+        Some(layout::map_rect(
+            self.cfg.edge,
+            lx,
+            self.geom.icon_bottom - sz,
+            sz,
+            sz,
+            self.metrics.lh as f32,
+        ))
     }
 
     /// 拖到 `u` 时应插入的下标。
@@ -590,6 +775,28 @@ impl Dock {
         self.pending_move.take()
     }
 
+    /// 取走待处理的归组（被拖项 → 目标组）。
+    pub fn take_pending_merge(&mut self) -> Option<(usize, usize)> {
+        self.pending_merge.take()
+    }
+
+    /// 取走待处理的移除（被拖项下标）。
+    pub fn take_pending_remove(&mut self) -> Option<usize> {
+        self.pending_remove.take()
+    }
+
+    /// 当前拖动是否拖出了栏体（绘制时据此给"松手移除"的提示）。
+    #[must_use]
+    pub fn drag_outside(&self) -> bool {
+        self.drop_outside
+    }
+
+    /// 当前拖动停在哪个组上（绘制时据此高亮）。
+    #[must_use]
+    pub fn merge_target(&self) -> Option<usize> {
+        self.merge_target
+    }
+
     /// 是否正在拖拽（绘制时据此画"跟手"的图标）。
     #[must_use]
     pub fn dragging(&self) -> Option<&DragState> {
@@ -606,11 +813,31 @@ impl Dock {
             return None;
         }
         // 拖过就不算点击：这条必须先判断，否则每次重排都会顺带启动一次应用。
-        let was_dragging = self.drag.take().is_some_and(|d| d.active);
+        let drag = self.drag.take();
+        let was_dragging = drag.as_ref().is_some_and(|d| d.active);
         let pressed = self.press.take();
         if was_dragging {
+            // 拖出栏体松手 = 从 Dock 移除。
+            if self.drop_outside {
+                self.drop_outside = false;
+                self.merge_target = None;
+                if let Some(src) = drag.map(|d| d.index) {
+                    self.pending_remove = Some(src);
+                    self.order_changed = false;
+                }
+                return None;
+            }
+            // 拖到组上松手 = 归组。
+            if let (Some(src), Some(dst)) = (drag.map(|d| d.index), self.merge_target.take()) {
+                if src != dst {
+                    self.pending_merge = Some((src, dst));
+                    self.order_changed = false;
+                }
+            }
             return None;
         }
+        self.merge_target = None;
+        self.drop_outside = false;
         // **按下的是哪一项就启动哪一项**，不再按抬起点重新命中：放大动画
         // 会让图标在按下与抬起之间移动，`hit_at` 复查失败就等于吞掉这次
         // 点击。同一性用路径核对（扫描插入临时条目会改变下标）。
@@ -640,6 +867,10 @@ impl Dock {
         let was = self.drag.take().is_some_and(|d| d.active);
         self.press = None;
         self.press_path = None;
+        // 归组目标也要清：拖拽被中断后，那个组不该还"亮着"，
+        // 下一次拖拽也不该直接继承它。
+        self.merge_target = None;
+        self.drop_outside = false;
         // **不能清 `click`。** 这个函数在 `WM_CAPTURECHANGED` 里被调用，而
         // "自己交还捕获"（`ReleaseCapture`）同样会同步触发那条消息 ——
         // 清掉 `click` 就等于把刚结算好的点击一起抹了。真正丢失捕获时
@@ -661,6 +892,7 @@ impl Dock {
         if hit.is_some() {
             self.press = None;
             self.drag = None;
+            self.merge_target = None;
             self.click = hit.map(|i| (i, true));
         }
         hit
@@ -852,6 +1084,17 @@ impl Dock {
     /// 保留旧图标，不清一次的话新来源永远不会被读取。
     pub fn clear_icons(&mut self) {
         self.icons.clear();
+    }
+
+    /// 只丢掉一个条目的图标。
+    ///
+    /// 换图标时 `path` 没变，但 `icon_src` 变了 —— `replace_items` 按
+    /// `path` 搬纹理，不清就会一直显示旧图标。全量 `clear_icons` 会让
+    /// 整条 Dock 闪一下，所以精确到下标。
+    pub fn clear_icon(&mut self, index: usize) {
+        if index < self.icons.len() {
+            self.icons[index] = None;
+        }
     }
 
     /// 窗口的**物理**像素尺寸。egui 画布尺寸 = 这个值 / ppp。
@@ -1061,7 +1304,9 @@ impl Dock {
             painter.text(
                 bar.center(),
                 Align2::CENTER_CENTER,
-                "将应用 / 文件夹 / 网址拖到这里",
+                // 只承诺**真能**做到的：文件与文件夹能拖进来，网址要
+                // OLE 拖放（`IDropTarget`），还没接。
+                "将应用或文件夹拖到这里",
                 FontId::proportional(13.0),
                 Color32::from_rgba_unmultiplied(255, 255, 255, 190),
             );
@@ -1086,6 +1331,76 @@ impl Dock {
         // 残影必须画在所有槽位内容之后，否则会被后面画的图标盖住。
         self.paint_drag_ghost(painter, p, dark);
         self.paint_hover_bubble(painter, p);
+        self.paint_drag_hint(painter, p, bar);
+        // 操作回执最后画：它要压在所有图标与悬停气泡之上。
+        self.paint_notice(painter, p, bar, dark);
+    }
+
+    /// 拖出栏体时给一句"松手移除"，否则用户不知道这个手势存在。
+    fn paint_drag_hint(&self, painter: &egui::Painter, p: Proj, bar: EguiRect) {
+        if !self.drag_outside() {
+            return;
+        }
+        let text = "松手从 Dock 移除";
+        let font = FontId::proportional(13.0);
+        let galley = painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE);
+        let size = galley.size() + egui::vec2(22.0, 12.0);
+        let rect = EguiRect::from_center_size(
+            egui::pos2(bar.center().x, bar.top() - size.y / 2.0 - 10.0),
+            size,
+        );
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(9),
+            Color32::from_rgba_unmultiplied(150, 48, 48, 236),
+        );
+        painter.galley(
+            egui::Align2::CENTER_CENTER
+                .align_size_within_rect(galley.size(), rect)
+                .min,
+            galley,
+            Color32::WHITE,
+        );
+        let _ = p;
+    }
+
+    /// 短提示：栏体上方居中的一块圆角气泡，末尾 300 ms 淡出。
+    fn paint_notice(&self, painter: &egui::Painter, p: Proj, bar: EguiRect, dark: bool) {
+        let Some((text, at)) = &self.notice else {
+            return;
+        };
+        let alpha = Self::notice_alpha(at.elapsed().as_millis());
+        if alpha <= 0.0 {
+            return;
+        }
+        let font = FontId::proportional(12.5);
+        let galley = painter.layout_no_wrap(text.clone(), font, Color32::WHITE);
+        let pad = egui::vec2(14.0, 8.0);
+        let size = galley.size() + pad * 2.0;
+        let rect = EguiRect::from_center_size(
+            egui::pos2(bar.center().x, bar.top() - size.y / 2.0 - 10.0 * p.k),
+            size,
+        );
+        let a = (alpha * 236.0) as u8;
+        let (bg, ink) = if dark {
+            (
+                Color32::from_rgba_unmultiplied(32, 33, 39, a),
+                Color32::from_rgba_unmultiplied(240, 240, 245, a),
+            )
+        } else {
+            (
+                Color32::from_rgba_unmultiplied(28, 28, 32, a),
+                Color32::from_rgba_unmultiplied(250, 250, 252, a),
+            )
+        };
+        painter.rect_filled(rect, CornerRadius::same(9), bg);
+        painter.galley(
+            egui::Align2::CENTER_CENTER
+                .align_size_within_rect(galley.size(), rect)
+                .min,
+            galley,
+            ink,
+        );
     }
 
     /// 一帧的坐标换算上下文。
@@ -1639,6 +1954,10 @@ impl Dock {
             // `map_rect` 里 v 越小越靠外侧。
             let bo = it.bounce_offset(self.metrics.s);
             self.paint_icon(painter, p, dark, i, it, lx, sz, bo);
+            // 拖到组上：给那个组一个高亮边框，告诉用户"松手就归到这里"。
+            if self.merge_target() == Some(i) {
+                self.paint_merge_hint(painter, p, i, sz);
+            }
             // 只给**正在运行**的应用画指示点。
             if self.cfg.dots && it.running {
                 self.paint_running_dot(painter, p, dark, lx, sz);
@@ -1751,6 +2070,22 @@ impl Dock {
         if let Some(ch) = it.name.chars().next() {
             crate::glyph::paint_monogram(painter, inner, ch, style, dark);
         }
+    }
+
+    /// 归组提示：目标组图标外一圈强调色描边。
+    fn paint_merge_hint(&self, painter: &egui::Painter, p: Proj, index: usize, sz: f32) {
+        let Some((ix, iy, iw, ih)) = self.icon_rect(index) else {
+            return;
+        };
+        let rect = EguiRect::from_min_size(self.to_egui(ix, iy, p), egui::vec2(iw * p.k, ih * p.k));
+        let accent = self.cfg.runtime_icon_accent.unwrap_or([46, 123, 246]);
+        let color = Color32::from_rgb(accent[0], accent[1], accent[2]);
+        painter.rect_stroke(
+            rect.expand(3.0 * p.k),
+            CornerRadius::same(r8(sz * 0.16 * p.k)),
+            Stroke::new(2.0 * p.k, color),
+            StrokeKind::Middle,
+        );
     }
 
     /// 运行指示点：横条或圆点，贴在栏底。
@@ -2279,6 +2614,30 @@ fn clock_line_size(line_h: f32, is_date: bool) -> f32 {
 mod tests {
     use super::*;
 
+    /// 回执提示的淡出曲线。
+    ///
+    /// 这条是为一个**实机崩溃**加的：早先直接写 `NOTICE_MS - ms`，
+    /// 主循环判定"提示还活着"与真正绘制之间隔着几毫秒，`elapsed` 越过
+    /// 总时长后 u128 下溢 panic —— 用户把应用拖进分组（归组成功会弹
+    /// "已加入分组"回执）时整个 Dock 崩掉。时间边界必须饱和。
+    #[test]
+    fn notice_alpha_saturates_at_the_deadline() {
+        assert_eq!(Dock::notice_alpha(0), 1.0);
+        assert_eq!(Dock::notice_alpha(1900), 1.0, "淡出尚未开始");
+        assert!((Dock::notice_alpha(2050) - 0.5).abs() < 0.01, "淡出中点");
+        assert!(
+            (Dock::notice_alpha(2199) - 1.0 / 300.0).abs() < 0.001,
+            "淡出最后一毫秒"
+        );
+        assert_eq!(Dock::notice_alpha(2200), 0.0, "恰好到点");
+        assert_eq!(Dock::notice_alpha(2200), 0.0, "恰好到点");
+        assert_eq!(
+            Dock::notice_alpha(5000),
+            0.0,
+            "越过时限必须饱和，这是当初下溢的位置"
+        );
+    }
+
     /// `argbc` 按 alpha 在前的顺序解释参数。
     ///
     /// 这条是为一个真实缺陷加的：整片代码曾经沿用 `ARGBC(a, r, g, b)` 的
@@ -2714,6 +3073,117 @@ mod tests {
 
         dock.drag_to(x + 20.0, y);
         assert!(dock.dragging().is_some(), "20 px 应当起拖");
+    }
+
+    /// 拖到组上松手 = 归组。
+    ///
+    /// 三件事要同时成立：拖动中要认出"下面是组"、**不重排**（重排会把
+    /// 组挤走）、松手时产出一条归组请求。
+    #[test]
+    fn dragging_onto_a_group_merges_instead_of_reordering() {
+        let cfg = Config::defaults(96);
+        let items: Vec<DockItem> = vec![
+            {
+                let it = Item::new(ItemKind::File, "记事本", "C:/a.exe");
+                let mut d = DockItem::from_item(&it);
+                d.cur = cfg.icon_size as f32;
+                d
+            },
+            {
+                let it = Item::new(ItemKind::Group, "工具", "");
+                let mut d = DockItem::from_item(&it);
+                d.cur = cfg.icon_size as f32;
+                d
+            },
+        ];
+        let mut dock = Dock::new(cfg, items, LRect::new(0, 0, 2560, 1400));
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
+
+        let s = dock.metrics.s;
+        let y = dock.geom.icon_bottom - s / 2.0;
+        let x0 = dock.geom.slot_l[0] + s / 2.0;
+        let x1 = dock.geom.slot_l[1] + s / 2.0;
+
+        assert!(dock.press_at(x0, y, false));
+        // 拖到组上：先要越过起拖阈值，再停在组的图标正中。
+        dock.drag_to(x0 + 20.0, y);
+        dock.drag_to(x1, y);
+        assert_eq!(dock.merge_target(), Some(1), "应当认出下面是组");
+        // 停在组上时**不能**重排：组一被挤走用户就瞄不准了。
+        assert_eq!(dock.take_pending_move(), None, "停在组上时不该重排");
+
+        assert_eq!(dock.release_at(x1, y), None, "拖过不算点击");
+        assert_eq!(dock.take_pending_merge(), Some((0, 1)));
+        assert_eq!(dock.take_click(), None, "归组不是点击");
+    }
+
+    /// 停在组上时不会重排 —— 拖到空白处又会重排。
+    #[test]
+    fn reorder_resumes_after_leaving_the_group() {
+        let cfg = Config::defaults(96);
+        let items: Vec<DockItem> = vec![
+            {
+                let it = Item::new(ItemKind::File, "记事本", "C:/a.exe");
+                let mut d = DockItem::from_item(&it);
+                d.cur = cfg.icon_size as f32;
+                d
+            },
+            {
+                let it = Item::new(ItemKind::Group, "工具", "");
+                let mut d = DockItem::from_item(&it);
+                d.cur = cfg.icon_size as f32;
+                d
+            },
+        ];
+        let mut dock = Dock::new(cfg, items, LRect::new(0, 0, 2560, 1400));
+        dock.update(96, nooksill_core::layout::REF_FRAME_MS);
+
+        let s = dock.metrics.s;
+        let y = dock.geom.icon_bottom - s / 2.0;
+        let x0 = dock.geom.slot_l[0] + s / 2.0;
+        let x1 = dock.geom.slot_l[1] + s / 2.0;
+
+        assert!(dock.press_at(x0, y, false));
+        dock.drag_to(x0 + 20.0, y);
+        dock.drag_to(x1, y);
+        assert_eq!(dock.merge_target(), Some(1));
+        // 拖到组的右边（空白处）→ 归组目标消失，重排恢复。
+        dock.drag_to(x1 + s, y);
+        assert_eq!(dock.merge_target(), None, "离开组后不该再提示归组");
+        assert!(dock.take_pending_move().is_some(), "离开组后应当能重排");
+    }
+
+    /// 拖出栏体松手 = 移除，不是点击也不是重排。
+    #[test]
+    fn dragging_outside_the_window_requests_removal() {
+        let mut dock = drag_dock();
+        let s = dock.metrics.s;
+        let y = dock.geom.icon_bottom - s / 2.0;
+        let x0 = dock.geom.slot_l[0] + s / 2.0;
+
+        assert!(dock.press_at(x0, y, false));
+        dock.drag_to(x0 + 20.0, y);
+        // 拖到窗口上方很远处：24 px 容差之外。
+        dock.drag_to(x0 + 20.0, -100.0);
+        assert!(dock.drag_outside(), "应当认出拖出了栏体");
+        assert_eq!(dock.take_pending_move(), None, "拖出去时不该重排");
+
+        assert_eq!(dock.release_at(x0 + 20.0, -100.0), None);
+        assert_eq!(dock.take_pending_remove(), Some(0));
+        assert_eq!(dock.take_pending_merge(), None);
+        assert_eq!(dock.take_click(), None);
+    }
+
+    /// 拖进来的路径要能被主循环取走。
+    #[test]
+    fn dropped_paths_round_trip() {
+        let mut dock = drag_dock();
+        assert!(dock.take_dropped_paths().is_empty());
+        dock.push_dropped_paths(vec!["C:/a.exe".to_owned(), "C:/d".to_owned()]);
+        let paths = dock.take_dropped_paths();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "C:/a.exe");
+        assert!(dock.take_dropped_paths().is_empty(), "取走之后不该还有残留");
     }
 
     /// 往右拖过最后一个图标 → 被拖项落到末尾，并产生一条待同步的重排。

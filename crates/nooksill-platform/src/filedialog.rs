@@ -116,3 +116,85 @@ fn show(owner: Option<isize>, title: &str, filters: &[Filter<'_>], mode: Mode) -
     let dialog = build(title, filters, mode)?;
     finish(dialog, owner)
 }
+
+/// 在 `parent` 下新建一个目录，返回创建后的完整路径。
+///
+/// 名字要先过 [`check_dir_name`]：路径分隔符、保留字符、空名都要挡掉 ——
+/// 用户在输入框里敲 `..\..\Windows` 不该在别处建出目录来。
+pub fn create_dir(parent: &std::path::Path, name: &str) -> Result<PathBuf, String> {
+    let name = check_dir_name(name)?;
+    let path = parent.join(&name);
+    std::fs::create_dir(&path).map_err(|e| format!("创建目录失败：{e}"))?;
+    Ok(path)
+}
+
+/// 校验目录名。返回清洗后的名字。
+///
+/// 规则：`..` 与路径分隔符一律拒绝（不能借它跳出父目录）；Windows 的
+/// 保留字符 `< > : " / \ | ? *` 与控制字符拒绝；结尾的点与空格去掉
+/// （Win32 会静默去掉，用户看到的名字与实际不符）。
+pub fn check_dir_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("名字不能为空".into());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("名字不能是 . 或 ..".into());
+    }
+    if trimmed.chars().any(|c| {
+        c == '/'
+            || c == '\\'
+            || c == ':'
+            || c == '*'
+            || c == '?'
+            || c == '"'
+            || c == '<'
+            || c == '>'
+            || c == '|'
+            || (c as u32) < 0x20
+    }) {
+        return Err("名字里有不能用的字符".into());
+    }
+    let cleaned = trimmed.trim_end_matches([' ', '.']).to_owned();
+    if cleaned.is_empty() {
+        return Err("名字不能为空".into());
+    }
+    Ok(cleaned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_dir_name;
+
+    #[test]
+    fn accepts_ordinary_names() {
+        assert_eq!(check_dir_name("工具").unwrap(), "工具");
+        assert_eq!(check_dir_name("  下载  ").unwrap(), "下载");
+        assert_eq!(check_dir_name("a b").unwrap(), "a b");
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_separators() {
+        assert!(check_dir_name("..").is_err());
+        assert!(check_dir_name(".").is_err());
+        assert!(check_dir_name("a/b").is_err());
+        assert!(check_dir_name("a\\b").is_err());
+        assert!(check_dir_name("C:x").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_reserved_characters() {
+        assert!(check_dir_name("").is_err());
+        assert!(check_dir_name("   ").is_err());
+        assert!(check_dir_name("a<b").is_err());
+        assert!(check_dir_name("a|b").is_err());
+        assert!(check_dir_name("a\u{1}b").is_err());
+    }
+
+    #[test]
+    fn trims_trailing_dots_and_spaces() {
+        // Win32 会静默去掉结尾的点与空格，不处理的话用户看到的名字
+        // 与实际建出来的目录不一样。
+        assert_eq!(check_dir_name("abc. ").unwrap(), "abc");
+    }
+}

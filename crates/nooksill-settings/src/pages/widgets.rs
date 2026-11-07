@@ -848,6 +848,56 @@ pub(crate) fn button(ctx: &mut Ctx<'_>, ui: &mut Ui, label: &str, cmd: Command) 
     );
 }
 
+/// 小号按钮：只报告"被点了"，命令由调用方拼。
+///
+/// 列表页的按钮要带参数（改第几个条目、移到哪个组），所以不能直接用
+/// [`button`] —— 它要求命令在绘制前就构造好，而那时参数还没确定。
+pub(crate) fn small_button(ui: &mut Ui, label: &str, tip: &str) -> bool {
+    let font = FontId::new(
+        ui.style().text_styles[&egui::TextStyle::Body].size,
+        egui::FontFamily::Proportional,
+    );
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let size = egui::vec2((galley.size().x + 22.0).max(38.0), 26.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::CLICK);
+    resp.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, label));
+    if !tip.is_empty() {
+        resp = resp.on_hover_text(tip);
+    }
+    let activated = resp.clicked()
+        || (resp.has_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)));
+    if activated {
+        resp.mark_changed();
+    }
+
+    let vis = ui.visuals();
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(8), field_bg(ui));
+    if resp.is_pointer_button_down_on() || resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), hover(ui));
+    }
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(8),
+            Stroke::new(1.5, vis.selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().galley(
+        egui::Align2::CENTER_CENTER
+            .align_size_within_rect(galley.size(), rect)
+            .min,
+        galley,
+        vis.text_color(),
+    );
+    activated
+}
+
 /// 主题色：来源下拉（跟随系统 / 自定义）+ 自定义时的取色器。
 ///
 /// 与 `color_row` 的区别：这里"跟随系统"是一个**有效取值**（-1），

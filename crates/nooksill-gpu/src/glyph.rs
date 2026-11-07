@@ -108,6 +108,8 @@ pub enum Builtin {
     Start,
     /// `nooksill:launchpad` —— 九宫格点阵。
     Launchpad,
+    /// `nooksill:notes` —— 一张带横线的便签。
+    Notes,
 }
 
 impl Builtin {
@@ -118,6 +120,8 @@ impl Builtin {
             Some(Self::Start)
         } else if path.eq_ignore_ascii_case("nooksill:launchpad") {
             Some(Self::Launchpad)
+        } else if path.eq_ignore_ascii_case("nooksill:notes") {
+            Some(Self::Notes)
         } else {
             None
         }
@@ -365,6 +369,26 @@ pub fn paint_tile(painter: &Painter, rect: EguiRect, kind: Builtin, style: IconS
                     col.linear_multiply(0.35)
                 };
                 painter.circle_filled(Pos2::new(x, y), r, c);
+            }
+        }
+        Builtin::Notes => {
+            // 一张纸：主题色底 + 白色便签 + 三条横线。
+            // 不用真实文字，小尺寸下字会糊成一团。
+            painter.rect_filled(t, radius, style.accent);
+            let pad = s * 0.24;
+            let paper = EguiRect::from_min_size(
+                Pos2::new(t.left() + pad, t.top() + pad),
+                egui::vec2(s - 2.0 * pad, s - 2.0 * pad),
+            );
+            painter.rect_filled(paper, CornerRadius::same(pix(s * 0.055)), Color32::WHITE);
+            let x0 = paper.left() + paper.width() * 0.20;
+            let line_w = paper.width() * 0.60;
+            for k in 0..3 {
+                let y = paper.top() + paper.height() * (0.30 + k as f32 * 0.22);
+                painter.line_segment(
+                    [Pos2::new(x0, y), Pos2::new(x0 + line_w, y)],
+                    Stroke::new(s * 0.035, style.accent),
+                );
             }
         }
     }
